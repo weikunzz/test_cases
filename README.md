@@ -1,2 +1,4 @@
 # test_cases
-just copy or modify some
+Today is sunday
+
+Now is Oct
