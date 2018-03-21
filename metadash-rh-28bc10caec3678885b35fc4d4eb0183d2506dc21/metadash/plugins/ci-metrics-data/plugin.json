@@ -1,0 +1,7 @@
+{
+    "name": "ci-metrics-data",
+    "author": "Kairui Song",
+    "description": "Plugin for Converting CI Result into metrics data",
+    "configs": {},
+    "version": "0.0.0"
+}
