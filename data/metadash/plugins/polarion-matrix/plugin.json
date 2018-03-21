@@ -1,0 +1,7 @@
+{
+    "name": "polarion-matrix",
+    "author": "Kairui Song",
+    "description": "Plugin for generating testrun matrix on Polarion",
+    "configs": {},
+    "version": "0.0.0"
+}

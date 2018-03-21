@@ -1,0 +1,20 @@
+{
+    "name": "beaker-plugin",
+    "author": "Kairui Song",
+    "description": "Beaker Plugin",
+    "configs": {
+        "BEAKER_URL": {
+            "description": "URL for beaker instance",
+            "default": null,
+            "secret": false,
+            "nullable": false
+        },
+        "BEAKER_JENKINS_URL": {
+            "description": "URL for reverse beaker job lookup",
+            "default": null,
+            "secret": false,
+            "nullable": false
+        }
+    },
+    "version": "0.0.0"
+}
