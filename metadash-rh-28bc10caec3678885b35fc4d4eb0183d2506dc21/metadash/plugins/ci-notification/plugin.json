@@ -1,7 +1,0 @@
-{
-    "name": "ci-notification",
-    "author": "Kairui Song",
-    "description": "Plugin for Sending CI Notification",
-    "configs": {},
-    "version": "0.0.0"
-}

@@ -1,7 +1,0 @@
-{
-    "name": "elasticsearch-pusher",
-    "author": "Kairui Song",
-    "description": "Push to elastic search",
-    "configs": {},
-    "version": "0.0.0"
-}

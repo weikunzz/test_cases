@@ -1,6 +1,0 @@
-[rhscl]
-name=RHSCL
-baseurl=http://download.eng.pek2.redhat.com/rel-eng/RHSCL-3.0-RHEL-7-RC-1.2/compose/Server/$basearch/os/
-gpgcheck=0
-enabled=1
-
