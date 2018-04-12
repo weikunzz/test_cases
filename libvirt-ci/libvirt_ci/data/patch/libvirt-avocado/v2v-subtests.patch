@@ -1,0 +1,19 @@
+diff --git a/backends/v2v/cfg/tests-shared.cfg b/backends/v2v/cfg/tests-shared.cfg
+index 4ba1ac5..0cfc059 100644
+--- a/backends/v2v/cfg/tests-shared.cfg
++++ b/backends/v2v/cfg/tests-shared.cfg
+@@ -11,13 +11,13 @@ connect_uri = default
+
+ # Include the base config files.
+ include base.cfg
+-include subtests.cfg
+ include machines.cfg
+ include guest-os.cfg
+ include guest-hw.cfg
+ # Include configuration for v2v tests
+ include convert_source.cfg
+ include convert_destination.cfg
++include subtests.cfg
+
+ # Modify/comment the following lines if you wish to modify the paths of the
+ # image files, ISO files or qemu binaries.

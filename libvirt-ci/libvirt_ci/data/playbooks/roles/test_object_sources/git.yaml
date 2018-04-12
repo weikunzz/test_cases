@@ -1,0 +1,10 @@
+- hosts: all
+  vars:
+      arch: "x86_64"
+      git_repo_path: "{{ test_path }}/libvirt"
+      patch_url: "{{ lookup('env','CI_PATCH_URL') }}"
+      commit: "{{ lookup('env','CI_GIT_COMMIT') }}"
+      package: "libvirt"
+  tasks:
+      - include: git/libvirt.yaml
+        when: package == "libvirt"

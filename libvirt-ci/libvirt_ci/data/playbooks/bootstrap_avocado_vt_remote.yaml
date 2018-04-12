@@ -1,0 +1,261 @@
+- hosts: "{{remote}}"
+  tasks:
+      - name: Create test path
+        file:
+            path: '{{ test_path }}'
+            state: directory
+            mode: 0755
+
+      - name: Copy avocado test repos
+        synchronize:
+            src: "{{ test_path }}/"
+            dest: "{{ test_path }}/"
+
+      - name: Install qemu-kvm-ma
+        yum:
+          name: qemu-kvm-ma
+          state: latest
+          exclude: qemu-kvm-rhev,qemu-kvm-common-rhev,qemu-img-rhev
+        when: qemu_pkg == "qemu-kvm-ma"
+
+      - name: Install qemu-kvm-rhev
+        yum:
+          name: qemu-kvm-rhev
+          state: latest
+        when: qemu_pkg == "qemu-kvm-rhev"
+
+      - name: Install Packages
+        package: state=latest name={{ item }}
+        with_items:
+            - libvirt
+            - libvirt-admin
+            - python-pip
+            - python-devel
+            - libvirt-python
+            - openssl
+            - openssl-devel
+            - libffi-devel
+            - policycoreutils-python
+            - tcpdump
+            - attr
+            - virt-install
+            - genisoimage
+            - net-tools
+            - nmap
+            - nmap-ncat
+            - numactl
+            - libusbx
+            - patch
+            - pexpect
+            - targetcli
+            - xfsprogs
+            - lsscsi
+            - xz
+            - fakeroot
+            - iscsi-initiator-utils
+
+      - name: Update pip and virtualenv
+        pip:
+            name:
+              - pip
+              - virtualenv
+              - six
+            extra_args: '{{ pip_option }}'
+
+      - name: Remove libvirt-python from avocado requirements
+        replace:
+            path: "{{ test_path }}/avocado/requirements.txt"
+            regexp: 'libvirt-python.*$'
+
+      - name: Install avocado requirements without libvirt-python
+        pip:
+            virtualenv: '{{ venv_path }}'
+            virtualenv_site_packages: yes
+            requirements: "{{ test_path }}/avocado/requirements.txt"
+            extra_args: '{{ pip_option }}'
+
+      - name: Install avocado-vt requirements
+        pip:
+            virtualenv: '{{ venv_path }}'
+            virtualenv_site_packages: yes
+            requirements: "{{ test_path }}/avocado-vt/requirements.txt"
+            extra_args: '{{ pip_option }}'
+
+      - name: Change tp-libvirt URL in avocado-vt
+        lineinfile:
+            dest: "{{ test_path }}/avocado-vt/test-providers.d/io-github-autotest-libvirt.ini"
+            regexp: "uri: .*"
+            line: "uri: {{ test_path }}/tp-libvirt"
+
+      - name: Remove unused test providers in avocado-vt
+        file:
+            path: "{{ test_path }}/avocado-vt/test-providers.d/io-github-{{ item }}.ini"
+            state: absent
+        with_items:
+            - 'autotest-qemu'
+            - 'spiceqa-spice'
+
+      - name: Install avocado-vt
+        pip:
+            name: "-e ."
+            virtualenv: '{{ venv_path }}'
+            virtualenv_site_packages: yes
+            editable: true
+            extra_args: --use-wheel
+            chdir: "{{ test_path }}/avocado-vt/"
+
+      - name: Symlink avocado and avocado-vt
+        file:
+            src: "{{ item.src }}"
+            dest: "{{ item.dest }}"
+            state: link
+        with_items:
+            - src: '{{ test_path }}/avocado-vt/virttest'
+              dest: '{{ test_path }}/avocado/virttest'
+            - src: '{{ test_path }}/avocado-vt/etc/avocado/conf.d/vt.conf'
+              dest: '{{ test_path }}/avocado/etc/avocado/conf.d/vt.conf'
+
+      - name: Install avocado
+        pip:
+            name: "-e ."
+            virtualenv: '{{ venv_path }}'
+            virtualenv_site_packages: yes
+            editable: true
+            extra_args: --use-wheel
+            chdir: "{{ test_path }}/avocado/"
+
+      - name: Bootstrap avocado-vt
+        shell: "source {{venv_path}}/bin/activate &&
+                ./scripts/avocado vt-bootstrap --yes-to-all --vt-type {{ vt_type }} --vt-no-downloads"
+        args:
+            chdir: "{{ test_path }}/avocado/"
+
+      - name: Remove test-provider dir
+        file:
+            path: /var/lib/avocado/data/avocado-vt/test-providers.d/downloads/io-github-autotest-libvirt
+            state: absent
+
+      - name: Create downloads dir under test-provider
+        file:
+            path: /var/lib/avocado/data/avocado-vt/test-providers.d/downloads
+            state: directory
+
+      - name: Create images dir under avocado-vt data
+        file:
+            path: /var/lib/avocado/data/avocado-vt/images
+            state: directory
+
+      - name: Replace it with link
+        file:
+            src: "{{ test_path }}/tp-libvirt/"
+            dest: /var/lib/avocado/data/avocado-vt/test-providers.d/downloads/io-github-autotest-libvirt
+            state: link
+
+      - name: Bootstrap avocado-vt again to make linked tp_libvirt take effect
+        shell: "source {{venv_path}}/bin/activate &&
+                ./scripts/avocado vt-bootstrap --yes-to-all --vt-type {{ vt_type }} --vt-no-downloads"
+        args:
+            chdir: "{{ test_path }}/avocado/"
+
+      - name: Download the image
+        get_url:
+            url: '{{ img_path }}'
+            dest: /var/lib/avocado/data/avocado-vt/images/
+
+      - name: Get image type
+        set_fact:
+            file_name: "{{ img_path.split('/')[-1] }}"
+            img_name: "{{ img_path.split('/')[-1] }}"
+            img_type: "{{ img_path.split('.')[-1] }}"
+
+      - name: Get image name
+        set_fact:
+            img_name: "{{ file_name.split('.xz')[0] }}"
+        when: "'xz' in img_type"
+
+      - name: Uncompress xz image
+        command: xz -dkf '{{ file_name }}'
+        args:
+            chdir: /var/lib/avocado/data/avocado-vt/images/
+        when: "'xz' in img_type"
+
+      - name : Create backup image
+        copy:
+            src: "/var/lib/avocado/data/avocado-vt/images/{{ img_name }}"
+            dest: /var/lib/avocado/data/avocado-vt/images/jeos-27-x86_64.qcow2.backup
+            remote_src: True
+            force: yes
+
+      - name: Copy image as jeos-27-x86_64
+        copy:
+            src: "/var/lib/avocado/data/avocado-vt/images/{{ img_name }}"
+            dest: /var/lib/avocado/data/avocado-vt/images/jeos-27-x86_64.qcow2
+            remote_src: True
+            force: yes
+
+      - name: Restart firewalld service
+        service: name=firewalld state=restarted
+        ignore_errors: yes
+
+      - name: Restart virtlogd.socket
+        service: name=virtlogd.socket state=restarted
+        ignore_errors: yes
+
+      - name: Restart libvirtd service
+        service: name=libvirtd state=restarted
+
+      - name: Get host vm names
+        virt:
+            command: list_vms
+        register: vms
+
+      - name: Destroy vm avocado-vt-vm1
+        virt:
+            name: avocado-vt-vm1
+            state: destroyed
+        when: '"avocado-vt-vm1" in vms.list_vms'
+
+      - name: Destroy extra vms
+        virt:
+            name: '{{ item }}'
+            state: destroyed
+        with_items: '{{ extra_vms }}'
+        when:
+            - extra_vms is defined
+            - 'item in vms.list_vms'
+
+      - name: Undefine vm avocado-vt-vm1
+        shell: virsh undefine --snapshots-metadata --managed-save --nvram avocado-vt-vm1
+        when: '"avocado-vt-vm1" in vms.list_vms'
+
+      - name: Undefine extra vms
+        shell: virsh undefine --snapshots-metadata --managed-save --nvram '{{ item }}'
+        with_items: '{{ extra_vms }}'
+        when:
+            - extra_vms is defined
+            - 'item in vms.list_vms'
+
+      - name: Prepare domain xml for define
+        copy:
+            content: '{{ domxml }}'
+            dest: /tmp/domain_avocado_vt_vm.xml
+            force: yes
+        when: domxml is defined
+
+      - name: Define vm avocado-vt-vm1 from the xml
+        shell: virsh define /tmp/domain_avocado_vt_vm.xml
+        when: domxml is defined
+
+      - name: Install vm avocado-vt-vm1 from the image
+        shell: |
+          virt-install --connect qemu:///system -n avocado-vt-vm1 --hvm --accelerate \
+          -r 1024 --vcpus=2 --os-variant rhel7 --disk \
+          path=/var/lib/avocado/data/avocado-vt/images/jeos-27-x86_64.qcow2,bus=virtio,format=qcow2 \
+          --network bridge=virbr0,model=virtio --import --noreboot --noautoconsole --serial pty \
+          --debug --memballoon model=virtio --graphics vnc --video vga
+        when: domxml is undefined
+
+      - name: Create extra vms by clone
+        shell: virt-clone --connect qemu:///system --original avocado-vt-vm1 --name '{{ item }}' --auto-clone
+        with_items: '{{ extra_vms }}'
+        when: extra_vms is defined

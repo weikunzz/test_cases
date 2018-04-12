@@ -1,0 +1,85 @@
+- name: Prepare iSCSI target
+  hosts: all
+  vars_files:
+    - vars/iscsi_params.yaml
+  tasks:
+    - name: Unsupported OS
+      fail: msg="OS {{ ansible_os_family }} is unsupported"
+      when: ansible_os_family != "RedHat"
+
+    - name: Unsupported method
+      fail: msg="Unsupported {{ iscsi_params.required_method }}"
+      when:
+        - ansible_distribution_major_version == '6'
+        - iscsi_params.required_method == 'lio'
+
+    - name: Setting facts Linux SCSI target framework(tgt)
+      set_fact:
+          required_packages:
+            - scsi-target-utils
+          required_service: tgtd
+          required_method: tgt
+          has_firewalld: False
+      when: (ansible_distribution_major_version == '6' and iscsi_params.required_method == 'auto') or iscsi_params.required_method == 'tgt'
+
+    - name: Setting facts Linux-IO Target(lio)
+      set_fact:
+          required_packages:
+            - targetcli
+          required_service: target
+          required_method: lio
+          backstore_type: fileio
+          backstore_name: device.iscsi
+          has_firewalld: True
+      when: (ansible_distribution_major_version|int >= 7 and iscsi_params.required_method == 'auto') or iscsi_params.required_method == 'lio'
+
+    - name: Install required packages
+      package:
+        name="{{ item }}"
+        state=present
+      with_items:
+        - "{{ required_packages }}"
+        - "{{ iscsi_params.required_packages }}"
+      when: not iscsi_params.cleanup
+
+    - name: "Start and enable {{ required_service }}"
+      service:
+        name="{{ required_service }}"
+        state=started
+        enabled=true
+
+    - name: LIO service conflict with tgtd
+      service:
+        name=tgtd
+        state=stopped
+      when:
+        - not iscsi_params.cleanup
+        - required_service == 'target'
+
+    - name: "Setup {{ required_method }}"
+      include: roles/iscsi_target/setup_{{ required_method }}.yaml
+      when: not iscsi_params.cleanup
+
+- name: Login iSCSI target
+  hosts: all
+  vars_files:
+    - vars/iscsi_params.yaml
+  tasks:
+    - include: roles/iscsi_target/login_iscsi.yaml
+      when: not iscsi_params.cleanup
+
+- name: Logout iSCSI target
+  hosts: all
+  vars_files:
+    - vars/iscsi_params.yaml
+  tasks:
+    - include: roles/iscsi_target/logout_iscsi.yaml
+      when: iscsi_params.cleanup
+
+- name: Cleanup iSCSI target
+  hosts: all
+  vars_files:
+    - vars/iscsi_params.yaml
+  tasks:
+    - include: roles/iscsi_target/cleanup_{{ required_method }}.yaml
+      when: iscsi_params.cleanup

@@ -1,0 +1,34 @@
+- job-template:
+    name: 'libvirt-diff'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    auth-token: 'd41d8cd98f00b204e9800998ecf8427ea'
+    properties:
+        - build-discarder:
+            days-to-keep: '-1'
+            artifact-days-to-keep: '-1'
+    parameters:
+        - libvirt-ci-branch
+        - node-label:
+            default: jslave-libvirt
+    triggers:
+        - timed: '0 19 * * *'
+    scm:
+        - libvirt-ci
+    wrappers:
+        - default-ci-wrappers
+    builders:
+        - shell:
+            !include-raw:
+                - ../scripts/setup_venv.sh
+                - ../scripts/install_libvirt_ci.sh
+                - ../scripts/libvirt_diff.sh
+                - ../scripts/clear_venv.sh
+    publishers:
+        - html-publisher:
+            name: "Libvirt Version Difference Report"
+            dir: ""
+            files: "libvirt-diff.pdf"
+        - archive:
+            artifacts: 'libvirt-diff.pdf'
+            allow-empty: 'true'

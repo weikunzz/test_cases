@@ -1,0 +1,9 @@
+#!/bin/bash
+
+unset http_proxy
+unset https_proxy
+
+sed -e '/jms/ s/".*"/"never_trigger"/' -i jobs/provision.yaml
+
+python utils/jobs_generator.py config/jobs.yaml
+jenkins-jobs --conf jobs/pjm_config update -x jobs/projects/jobs_gate.yaml -r jobs $1

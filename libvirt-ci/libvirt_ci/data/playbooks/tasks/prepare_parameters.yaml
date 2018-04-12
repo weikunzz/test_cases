@@ -1,0 +1,58 @@
+- name: Ensure local environment file {{ env_file }} exists
+  local_action: file
+  args:
+      path: "{{ env_file }}"
+      state: touch
+  changed_when: false
+
+
+- name: Set worker IPv6 address conditionally
+  set_fact: >
+    worker_ipv6_addr={{
+        hostvars[groups.worker[0]].ansible_default_ipv6.address is defined |
+        ternary(hostvars[groups.worker[0]].ansible_default_ipv6.address, '') }}
+  when: "groups.worker is defined"
+
+
+- name: Set resource IPv6 address conditionally
+  set_fact: >
+    resource_ipv6_addr={{
+        hostvars[groups.resource[0]].ansible_default_ipv6.address is defined |
+        ternary(hostvars[groups.resource[0]].ansible_default_ipv6.address, '') }}
+  when: "groups.resource is defined"
+
+
+- name: Collect worker variables
+  local_action: lineinfile
+  args:
+      dest: "{{ env_file }}"
+      regexp: "^{{ item.key }}="
+      line: "{{ item.key }}={{ item.value }}"
+  with_items:
+      - key: "WORKER_HOSTNAME"
+        value: "{{ hostvars[groups['worker'][0]]['ansible_nodename'] }}"
+      - key: "WORKER_IFACE"
+        value: "{{ hostvars[groups['worker'][0]]['ansible_default_ipv4']['interface'] }}"
+      - key: "WORKER_IPV4ADDR"
+        value: "{{ hostvars[groups['worker'][0]]['ansible_default_ipv4']['address'] }}"
+      - key: "WORKER_IPV6ADDR"
+        value: "{{ worker_ipv6_addr }}"
+  when: "groups.worker is defined"
+
+
+- name: Collect resource variables
+  local_action: lineinfile
+  args:
+      dest: "{{ env_file }}"
+      regexp: "^{{ item.key }}="
+      line: "{{ item.key }}={{ item.value }}"
+  with_items:
+      - key: "RESOURCE_HOSTNAME"
+        value: "{{ hostvars[groups['resource'][0]]['ansible_nodename'] }}"
+      - key: "RESOURCE_IFACE"
+        value: "{{ hostvars[groups['resource'][0]]['ansible_default_ipv4']['interface'] }}"
+      - key: "RESOURCE_IPV4ADDR"
+        value: "{{ hostvars[groups['resource'][0]]['ansible_default_ipv4']['address'] }}"
+      - key: "RESOURCE_IPV6ADDR"
+        value: "{{ resource_ipv6_addr }}"
+  when: "groups.resource is defined"

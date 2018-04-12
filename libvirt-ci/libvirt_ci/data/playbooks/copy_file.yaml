@@ -1,0 +1,16 @@
+- hosts: "{{ remote }}"
+  gather_facts: no
+  tasks:
+      - name: Copy content to remote file
+        copy:
+            content: "{{ file_content }}"
+            dest: "{{ file_path }}"
+            force: yes
+        when: file_content is defined
+
+      - name: Copy file to remote
+        copy:
+            src: "{{ file_path }}"
+            dest: "{{ file_path }}"
+            force: yes
+        when: file_content is undefined

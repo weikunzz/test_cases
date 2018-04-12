@@ -1,0 +1,18 @@
+- job:
+    name: 'libvirt-static-provisioner'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    concurrent: true
+    parameters:
+        - libvirt-ci-branch
+        - node-label:
+            default: jslave-libvirt
+    scm:
+        - libvirt-ci:
+    builders:
+        - shell:
+            !include-raw:
+                - ../scripts/setup_venv.sh
+                - ../scripts/install_libvirt_ci.sh
+                - ../scripts/prepare_provisioner.sh
+                - ../scripts/clear_venv.sh

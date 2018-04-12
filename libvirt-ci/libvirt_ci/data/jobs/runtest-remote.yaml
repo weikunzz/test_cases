@@ -1,0 +1,46 @@
+- job-template:
+    defaults: ci-runtest-test-runner
+    name: '{component}-{product}-{version}-runtest-{arch}-{job-suffix}-remote'
+    display-name: '{component}-{product}-{version}-runtest-{arch}-{job-suffix}-remote'
+    publishers:
+        - html-publisher:
+            name: "Libvirt Code Coverage Report"
+            dir: "html_report"
+            files: "index.html"
+            allow-missing: true
+        - cobertura:
+            report-file: '{cobertura-xml}'
+            targets:
+                - files:
+                    healthy: 0
+                    unhealthy: 0
+                    failing: 0
+                - method:
+                    healthy: 0
+                    unhealthy: 0
+                    failing: 0
+                - classes:
+                    healthy: 0
+                    unhealthy: 0
+                    failing: 0
+                - line:
+                    healthy: 0
+                    unhealthy: 0
+                    failing: 0
+                - conditional:
+                    healthy: 0
+                    unhealthy: 0
+                    failing: 0
+        - test-runner-publisher:
+            teardown-project: ''
+            artifacts: '{artifacts}'
+            unstable-thld: '{unstable-thld}'
+            failure-thld: '{failure-thld}'
+            enable-report: '{enable-report}'
+            recipients: '{recipients}'
+
+- job-group:
+    name: 'job-workflow-remote'
+    jslavename: 'jslave-{component}-{product}-{version}-{arch}-jump'
+    jobs:
+        - '{component}-{product}-{version}-runtest-{arch}-{job-suffix}-remote'

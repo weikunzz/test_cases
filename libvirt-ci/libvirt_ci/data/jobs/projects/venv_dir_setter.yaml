@@ -1,0 +1,21 @@
+- project:
+    name: venv_dir_setter
+    jobs:
+      - 'libvirt-jobs-updater':
+          venv_dir: 'jobs-updater'
+      - 'libvirt-jobs-checker':
+          venv_dir: 'jobs-checker'
+      - 'libvirt-ma-bug-reporter':
+          venv_dir: 'ma_bug_reporter'
+      - 'libvirt-x86-bug-reporter':
+          venv_dir: 'x86_bug_reporter'
+      - 'libvirt-diff':
+          venv_dir: 'libvirt-diff'
+      - 'ci-message-publisher':
+          venv_dir: 'message-publisher'
+      - 'libvirt-repo-updater':
+          venv_dir: 'repo-updater'
+      - 'libvirt-auto-doc-updater':
+          venv_dir: 'auto-doc-updater'
+      - 'libvirt-auto-doc-checker':
+          venv_dir: 'auto-doc-checker'

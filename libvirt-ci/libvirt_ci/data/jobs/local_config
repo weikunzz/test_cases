@@ -1,0 +1,4 @@
+[jenkins]
+user=test
+password=test
+url=http://10.66.5.69

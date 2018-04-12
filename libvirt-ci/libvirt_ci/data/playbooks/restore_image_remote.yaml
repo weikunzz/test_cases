@@ -1,0 +1,8 @@
+- hosts: "{{ remote }}"
+  gather_facts: no
+  tasks:
+      - name: Uncompress xz image
+        command: xz -dkf RHEL-ALT-ppc64le-latest.qcow2.xz
+        args:
+            chdir: /var/lib/avocado/data/avocado-vt/images/
+

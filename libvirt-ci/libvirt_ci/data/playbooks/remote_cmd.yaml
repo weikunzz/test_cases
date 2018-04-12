@@ -1,0 +1,5 @@
+- hosts: "{{remote}}"
+  gather_facts: no
+  tasks:
+      - name: Run shell command
+        shell: "timeout {{timeout}} {{ cmd }}"

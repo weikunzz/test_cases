@@ -1,0 +1,8 @@
+- hosts: "{{ remote }}"
+  gather_facts: no
+  tasks:
+      - name: Fetch remote file
+        fetch:
+            src: "{{ file_path }}"
+            dest: "{{ dir_path }}"
+            flat: yes

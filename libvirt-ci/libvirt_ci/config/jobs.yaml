@@ -1,0 +1,2781 @@
+# Cartesian sets for specifying the combination axes for generating
+# all testing jobs
+archs:
+    - 'x86_64'
+    - 'ppc64le'
+    - 'aarch64'
+    - 's390x'
+products:
+    RHEL:
+        - '6.9'
+        - '6.10'
+        - '7.3'
+        - '7.4'
+        - '7.5'
+        - '8.0'
+    Fedora:
+        - '23'
+    RHEL-ALT:
+        - '7.5'
+jobs:
+    libvirt:
+        - acceptance:
+            - general
+            - generalx
+            - migration
+            - ovmf
+        - function:
+            - cpu
+            - mem
+            - console
+            - block_copy_shallow
+            - block_copy_no_shallow
+            - block_job_commit_pull
+            - numa
+            - snapshot
+            - virtual_disk
+            - hooks
+            - storage
+            - attach_detach_disk
+            - attach_detach_interface
+            - attach_detach_media
+            - remote_access
+            - migration
+            - guest_kernel_debugging
+            - svirt
+            - graphical_framebuffers
+            - managed_save
+            - virtual_networks
+            - virsh_domain
+            - libvirtd
+            - guest_agent
+            - network_filter
+            - virtio_rng
+            - secret
+            - lxc
+            - npiv
+            - misc
+            - misc_virtual_devices
+            - ovmf
+            - seabios
+            - sriov
+        - special:
+            - session_mode
+            - non_root_user
+            - full_xml
+            - minimal_xml
+    libvirt-python:
+        - acceptance
+        - function:
+            - single_node
+            - sriov
+            - npiv
+            - rhel:
+                - migration
+            - rhev:
+                - migration
+    installation:
+        - acceptance:
+            - rhel:
+                - linux
+                - win_1
+                - win_2
+            - rhev:
+                - linux
+                - win_1
+                - win_2
+        - matrix:
+            - rhel:
+                - linux_1
+                - linux_2
+                - win_1
+                - win_2
+            - rhev:
+                - linux_1
+                - linux_2
+                - win_1
+                - win_2
+    v2v:
+        - acceptance:
+            - libvirt
+            - ovirt
+            - gate
+        - function:
+            - v2v_options
+            - function_test_esx
+            - function_test_xen
+            - specific_kvm
+            - convert_from_file
+        - matrix:
+            - kvm
+            - kvm_ISCSI
+            - kvm_FC
+            - xen
+            - xen_ISCSI_FC
+            - esx5.1
+            - esx5.1_ISCSI_FC
+            - esx5.5
+            - esx5.5_ISCSI_FC
+            - esx6.0
+            - esx6.0_ISCSI_FC
+            - esx6.5
+            - esx6.5_ISCSI_FC
+    python-virtinst:
+        - acceptance:
+            - virt_clone_virt_xml
+            - virt_clone_virt_convert_virt_image
+            - virt_install:
+              - run_1
+              - run_2
+              - run_3
+              - run_4
+    perl-Sys-Virt:
+        - acceptance
+    libvirt-cim:
+        - acceptance
+    libvirt-upstream:
+        - acceptance
+        - unit_test
+
+# Rules to filtering specific combinations or
+# setting parameter for specific condition
+rules:
+    #-------------------------------------------------
+    # Exclusion part:
+    #     Excludes unwanted test jobs
+    #-------------------------------------------------
+    - when: major == 8
+      exclude:
+          - product == 'Fedora'
+          - product == 'RHEL-ALT'
+          - test_type == 'special'
+          - test_type == 'function'
+          - component == 'libvirt-python'
+          - component == 'installation'
+          - component == 'v2v'
+          - component == 'python-virtinst'
+          - component == 'perl-Sys-Virt'
+          - component == 'libvirt-cim'
+          - component == 'libvirt-upstream'
+
+    - when: major < 7 or (major == 7 and minor < 2)
+      exclude:
+          - arch == 'ppc64le'
+          - arch == 'aarch64'
+          - component == 'v2v'
+
+    - when: test.endswith('ovmf')
+      exclude:
+          - arch == 'ppc64le'
+          - arch == 'aarch64'
+          - arch == 's390x'
+          - product == 'Fedora'
+          - product == 'RHEL-ALT'
+          - major < 7
+          - major == 7 and minor < 3
+
+    - when: test == 'libvirt.function.seabios'
+      exclude:
+          - arch == 'ppc64le'
+          - arch == 'aarch64'
+          - arch == 's390x'
+          - product == 'Fedora'
+          - product == 'RHEL-ALT'
+
+    - when: test == 'libvirt.acceptance.generalx'
+      exclude:
+          - arch == 'ppc64le'
+          - arch == 'aarch64'
+          - arch == 's390x'
+          - product == 'Fedora'
+          - product == 'RHEL-ALT'
+
+    - when: major < 7 or (major == 7 and minor < 5)
+      exclude:
+          - arch == 's390x'
+
+    - when: arch == 's390x'
+      exclude:
+          - product == 'RHEL'
+          - product == 'Fedora'
+
+    - when: component == 'v2v'
+      exclude:
+          - arch == 'ppc64le'
+          - arch == 'aarch64'
+          - arch == 's390x'
+          - product == 'Fedora'
+          - product == 'RHEL-ALT'
+
+    - when: component == 'v2v' and (major == 7 and minor < 4)
+      exclude:
+          - test == 'v2v.acceptance.gate'
+
+    - when: test == 'libvirt.acceptance.migration'
+      exclude:
+          - arch == 'ppc64le'
+          - arch == 'aarch64'
+          - arch == 's390x'
+          - product == 'RHEL-ALT'
+
+    - when: component == 'python-virtinst'
+      exclude:
+          - arch == 'ppc64le'
+          - arch == 'aarch64'
+          - arch == 's390x'
+          - product == 'Fedora'
+          - product == 'RHEL-ALT'
+
+    - when: component == 'perl-Sys-Virt'
+      exclude:
+          - arch == 'ppc64le'
+          - arch == 'aarch64'
+          - arch == 's390x'
+          - product == 'Fedora'
+          - product == 'RHEL-ALT'
+
+    - when: component == 'libvirt-cim'
+      exclude:
+          - arch == 'ppc64le'
+          - arch == 'aarch64'
+          - arch == 's390x'
+          - product == 'Fedora'
+          - product == 'RHEL-ALT'
+
+    - when: component == 'installation'
+      exclude:
+          - product == 'Fedora'
+
+    - when: component == 'python-virtinst' and major >= 7
+      exclude:
+          - test == 'python-virtinst.acceptance.virt_clone_virt_convert_virt_image'
+
+    - when: component == 'python-virtinst' and major < 7
+      exclude:
+          - test == 'python-virtinst.acceptance.virt_clone_virt_xml'
+
+    - when: test_type == 'function'
+      exclude:
+          - arch == 'aarch64'
+          - arch == 's390x'
+
+    - when: test_type == 'special'
+      exclude:
+          - arch == 'aarch64'
+          - arch == 'ppc64le'
+          - arch == 's390x'
+
+    - when: component == 'installation' or component == 'libvirt-python'
+      exclude:
+          - arch == 'aarch64'
+          - arch == 's390x'
+
+    - when: component == 'installation' and 'win' in test
+      exclude:
+          - arch == 'ppc64le'
+          - arch == 's390x'
+
+    - when: component == 'installation' and 'rhel' in test
+      exclude:
+          - arch == 'ppc64le'
+          - arch == 's390x'
+
+    - when: component == 'installation' and major < 7 and minor < 9
+      exclude:
+          - test.startswith('installation.matrix.rhev')
+          - test.startswith('installation.acceptance.rhev')
+
+    - when: component == 'installation' and arch == 'ppc64le' and minor < 4
+      exclude:
+          - test.startswith('installation.matrix.rhev')
+          - test.startswith('installation.acceptance.rhev')
+
+    - when: component == 'installation' and arch == 'ppc64le' and 'linux_2' in test
+      exclude:
+          - test.startswith('installation.matrix.rhev')
+
+    - when: component == 'libvirt-upstream'
+      exclude:
+          - arch == 'ppc64le'
+          - arch == 'aarch64'
+          - arch == 's390x'
+          - product == 'RHEL'
+
+    - when: component == 'libvirt'
+      exclude:
+          - product == 'Fedora'
+
+    - when: component == 'libvirt-python'
+      exclude:
+          - product == 'Fedora'
+          - product == 'RHEL-ALT'
+
+    - when: test.startswith('libvirt-python.function.rhel')
+      exclude:
+          - arch == 'ppc64le'
+
+    - when: component == 'libvirt-python' and major < 7 and minor < 9
+      exclude:
+          - test.startswith('libvirt-python.function.rhev')
+
+    - when: product == 'RHEL-ALT'
+      exclude:
+          - arch == 'x86_64'
+          - test.startswith('installation.matrix')
+
+    - when: product == 'RHEL-ALT' and (arch == 'aarch64' or arch == 's390x')
+      exclude:
+          - test_type == 'function'
+
+    - when: component == 'libvirt-python' and major < 7
+      exclude:
+          - test.startswith('libvirt-python.function.sriov')
+          - test.startswith('libvirt-python.function.npiv')
+
+
+    #-------------------------------------------------
+    # Default parameters part:
+    #     Define default parameters. These parameters
+    #     can be overwritten by following definitions
+    #-------------------------------------------------
+
+    # Provision related default parameters
+    - ndisk: ''
+      location: 'US'
+      need_numa: false
+      need_cpu_vendor: ''
+      need_1g_hugepage: false
+      resource-host: false
+      resource-guest-name: ''
+      resource-img-dest: ''
+      target: bkr
+      need_westmere: false
+      min_mem: '7000'
+      min_disk: '70000'
+      need_hvm: true
+      need_sriov: false
+      need_npiv: false
+      reserve-days: 1
+      enable_iommu: false
+      ignore_panic: false
+      hypervisor: ''
+      only-rhel-repos: false
+      custom-playbook: ''
+      token: 'd41d8cd98f00b204e9800998ecf8427ea'
+
+    # Job related default parameters
+    - trigger-package: ''
+      trigger-by-tree: false
+      timed: ''
+      label-package: 'libvirt'
+      show-packages: 'libvirt,qemu-kvm,kernel,qemu-kvm-rhev,selinux-policy,spice-gtk,spice,libcgroup,systemd,netcf,dnsmasq,virtio-win'
+      quiet-period: 5
+      qemu-rhel: 'false'
+      qemu-rhev: 'true'
+      retain-fail: 'disable'
+      artifacts: '*.xml, *.txt'
+      unstable-thld: 20
+      failure-thld: 100
+      enable-report: 'false'
+      fail-priority: 'normal'
+      skip-priority: 'minor'
+      days-to-keep: -1
+      num-to-keep: -1
+      install-pkgs:
+          - attr
+          - genisoimage
+          - iscsi-initiator-utils
+          - libvirt\*
+          - net-tools
+          - nmap
+          - nmap-ncat
+          - numactl
+          - libusbx
+          - patch
+          - pexpect
+          - targetcli
+          - tcpdump
+          - virt-install
+          - scsi-target-utils
+          - xfsprogs
+          - lsscsi
+
+    # Test runner related default parameters
+    - test-framework: 'avocado-vt'
+      vt-type: ''
+      vm-type: ''
+      custom-repo: ''
+      pr: ''
+      host: ''
+      only: ''
+      ci-no: ''
+      rhel-no: ''
+      yum-repos: ''
+      connect-uri: ''
+      domxml: ''
+      netxml: ''
+      slice: ''
+      timeout: ''
+      patch: ''
+      changes: ''
+      replaces: ''
+      img-url: 'http://download.libvirt.redhat.com/libvirt-CI-resources/{product}-{version}-{arch}-latest.qcow2'
+      screenshots-url: ''
+      ci-password: 'redhat'
+      skip-scratch: 'TRUE'
+      additional-vms: ''
+      v2v-vms-src: ''
+      v2v-vms-list: ''
+      inst-guest-list: ''
+      inst-arch-list: ''
+      test-objects: ''
+      patch-url: ''
+      test-path: ''
+      extra-desc: ''
+      git-commit: ''
+      pip-option: ''
+      job-template: 'job-workflow'
+      dashboard-auto-submit: 'true'
+      tags: ''
+      repo-expire-duration: 9600
+      patch-expire-duration: 9600
+      cobertura-xml: 'coverage.xml'
+      enable-coverage: 'false'
+      recipients: 'kasong, gsun'
+
+    #-------------------------------------------------
+    # Compatible parameters part:
+    #     Some new branch version may break on older system
+    #     so override them here
+    #     Move this part to the end
+    #-------------------------------------------------
+    #
+    #-------------------------------------------------
+    # Arch parameters part:
+    #     Define per arch parameters. These parameters
+    #     can be overwritten by following definitions
+    #-------------------------------------------------
+    #
+    - when: arch in ['ppc64le', 'aarch64', 's390x']
+      need_hvm: false
+
+    - when: product == 'RHEL-ALT'
+      trigger-package: ''
+      ignore_panic: true
+      qemu-rhel: 'false'
+      qemu-rhev: 'true'
+    #-------------------------------------------------
+    # Component parameters part:
+    #     Define per component parameters. These parameters
+    #     can be overwritten by following definitions
+    #-------------------------------------------------
+    - when: component == 'libvirt'
+      location: 'ANY'
+      vt-type: 'libvirt'
+      enable-coverage: 'true'
+      trigger-package: libvirt
+      label-package: 'libvirt'
+
+    - when: component == 'libvirt' and (( major == 7 and minor >= 4 ) or ( major == 8 ))
+      yum-repos: 'libvirt-coverage|http://download.libvirt.redhat.com/libvirt-CI-Coverage-repos/{product}/{version}/{arch}/'
+
+    - when: component == 'libvirt-upstream'
+      label-package: ''
+      qemu-rhel: 'true'
+      qemu-rhev: 'false'
+      custom-repo: 'libvirt git://libvirt.org/libvirt.git master'
+      test-path: ''
+      # TODO: just a workaround before we can create a Fedora guest image
+      img-url: 'http://download.libvirt.redhat.com/libvirt-CI-resources/RHEL-7.2-latest.qcow2'
+      job-template: 'job-workflow-static'
+      feature: 'upstream'
+      days-to-keep: '30'
+      # TODO: We don't have any linkage for upstream testing yet.
+      dashboard-auto-submit: 'false'
+      repo-expire-duration: 0
+      patch-expire-duration: 0
+
+    - when: component == 'libvirt' and product == 'RHEL-ALT' and arch == 'ppc64le'
+      location: 'ANY'
+      vt-type: 'libvirt'
+      job-template: 'job-workflow-remote,job-workflow'
+      domxml:
+          !include-raw:
+              - xml/domain-pegas10-coral.xml
+      trigger-package: ''
+      label-package: 'libvirt'
+      enable-coverage: 'false'
+      replaces: |
+          avocado-vt shared/cfg/base.cfg:
+              "take_regular_screendumps = yes"-->"take_regular_screendumps = no"
+
+
+    - when: component == 'libvirt-python' or component == 'installation'
+      location: 'ANY'
+      trigger-package: 'libvirt-python'
+      label-package: 'libvirt-python'
+      test-framework: 'test-api'
+      patch: 'test-api test-api/test-api.patch'
+      timeout: '3600'
+      qemu-rhel: 'true'
+      install-pkgs: !extend
+          - crash
+          - virtio-win
+          - pciutils
+          - dosfstools
+          - syslinux
+          - tftp-server
+          - tftp
+          - ipxe-roms-qemu
+          - wget
+      # TODO: We don't have any linkage for libvirt-python or installation yet.
+      dashboard-auto-submit: 'false'
+
+    - when: component == 'v2v'
+      vt-type: 'v2v'
+      trigger-package: libguestfs
+      label-package: virt-v2v
+      location: 'CN'
+      qemu-rhel: 'true'
+      qemu-rhev: 'true'
+      retain-fail: 'enable'
+      timeout: '3600'
+      patch: |
+          avocado-vt libvirt-avocado/v2v-subtests.patch
+          tp-libvirt libvirt-avocado/v2v-xen-exist.patch
+      pr: !extend
+          - 'avocado-vt 909,1016'
+          - 'tp-libvirt 1214,1389'
+      install-pkgs: !extend
+          - virt-v2v
+          - virtio-win
+          - libguestfs-winsupport
+          - ovirt-engine-sdk-python
+      screenshots-url: 'http://download.libvirt.redhat.com/libvirt-CI-resources/v2v/win_screenshots/'
+      replaces: |
+          avocado-vt etc/avocado/conf.d/vt.conf:
+              "backup_image_before_test.*"-->"backup_image_before_test = True"
+              "restore_image_after_test.*"-->"restore_image_after_test = True"
+          avocado-vt backends/v2v/cfg/convert_source.cfg:
+              "KVM_HOSTNAME_V2V_EXAMPLE"-->"10.66.5.60"
+              "XEN_HOSTNAME_V2V_EXAMPLE"-->"10.73.3.21"
+              "VPX_51_HOSTNAME_V2V_EXAMPLE"-->"10.73.75.182"
+              "VPX_51_DC_V2V_EXAMPLE"-->"data"
+              "VPX_55_HOSTNAME_V2V_EXAMPLE"-->"10.73.75.182"
+              "VPX_55_DC_V2V_EXAMPLE"-->"data"
+              "VPX_60_HOSTNAME_V2V_EXAMPLE"-->"10.73.75.182"
+              "VPX_60_DC_V2V_EXAMPLE"-->"data"
+              "VPX_65_HOSTNAME_V2V_EXAMPLE"-->"10.73.199.71"
+              "VPX_65_DC_V2V_EXAMPLE"-->"data"
+              "VPX_PASSWORD_V2V_EXAMPLE"-->"VCENTER@redhat2016"
+              "ESX_51_HOSTNAME_V2V_EXAMPLE"-->"10.73.72.75"
+              "ESX_55_HOSTNAME_V2V_EXAMPLE"-->"10.73.3.19"
+              "ESX_60_HOSTNAME_V2V_EXAMPLE"-->"10.73.72.61"
+              "ESX_65_HOSTNAME_V2V_EXAMPLE"-->"10.73.196.89"
+          avocado-vt backends/v2v/cfg/convert_destination.cfg:
+              "OVIRT_ENGINE_URL_V2V_EXAMPLE"-->"hp-dl360eg8-03.lab.eng.pek2.redhat.com/ovirt-engine"
+              "OVIRT_ENGINE_USER_V2V_EXAMPLE"-->"admin@internal"
+              "OVIRT_ENGINE_PASSWORD_V2V_EXAMPLE"-->"123qweP"
+              "OVIRT_NODE_NETWORK_V2V_EXAMPLE"-->"ovirtmgmt"
+              "OVIRT_NODE_BRIDGE_V2V_EXAMPLE"-->"ovirtmgmt"
+              "RHV_NODE_PASSWORD"-->"123qweP"
+              "NFS_OVIRT_NODE_ADDRESS_V2V_EXAMPLE"-->"hp-dl360eg8-02.lab.eng.pek2.redhat.com"
+              "NFS_EXPORT_STORAGE_V2V_EXAMPLE"-->"10.73.72.63:/root/nfs_export"
+              "NFS_EXPORT_NAME_V2V_EXAMPLE"-->"nfs_export"
+              "NFS_STORAGE_NAME_V2V_EXAMPLE"-->"nfs_data"
+              "NFS_CLUSTER_NAME_V2V_EXAMPLE"-->"NFS"
+              "ISCSI_OVIRT_NODE_ADDRESS_V2V_EXAMPLE"-->"hp-dl360eg8-04.lab.eng.pek2.redhat.com"
+              "ISCSI_EXPORT_STORAGE_V2V_EXAMPLE"-->"10.73.72.65:/home/iscsi_export"
+              "ISCSI_EXPORT_NAME_V2V_EXAMPLE"-->"iscsi_export"
+              "ISCSI_STORAGE_NAME_V2V_EXAMPLE"-->"iscsi_data"
+              "ISCSI_CLUSTER_NAME_V2V_EXAMPLE"-->"ISCSI"
+              "FC_OVIRT_NODE_ADDRESS_V2V_EXAMPLE"-->"ibm-x3250m5-05.lab.eng.pek2.redhat.com"
+              "FC_EXPORT_STORAGE_V2V_EXAMPLE"-->"10.73.73.59:/home/fc_export"
+              "FC_EXPORT_NAME_V2V_EXAMPLE"-->"fc_export"
+              "FC_STORAGE_NAME_V2V_EXAMPLE"-->"fc_data"
+              "FC_CLUSTER_NAME_V2V_EXAMPLE"-->"FC"
+          tp-libvirt v2v/tests/cfg/convert_from_file.cfg:
+              "OVA_DIR_V2V_EXAMPLE"-->"/var/lib/libvirt/images/v2v/ova-images/esx-rhel6.8-ova"
+              "OVA_TAR_FILE_V2V_EXAMPLE"-->"esx-rhel6.8-ova.tar"
+              "OVA_ZIP_FILE_V2V_EXAMPLE"-->"esx-rhel6.8-ova.zip"
+              "OVA_PIGZ_FILE_V2V_EXAMPLE"-->"esx-rhel6.8-ova.tar.gz"
+              "OVA_XZ_FILE_V2V_EXAMPLE"-->"esx-rhel6.8-ova.tar.xz"
+              "OVA_RELATIVE_PATH_V2V_EXAMPLE"-->"esx-rhel6.8.ova"
+              "OVA_VMDKGZ_ZIP_FILE_V2V_EXAMPLE"-->"esx-rhel6.8-vmdkgz.zip"
+              "OVA_VMDKGZ_TAR_FILE_V2V_EXAMPLE"-->"esx-rhel6.8-vmdkgz.tar"
+              "OVA_DIR_SPECIAL_V2V_EXAMPLE"-->"/var/lib/libvirt/images/v2v/ova-images/ova-special"
+              "OVA_FILE_BUG_1164853_V2V_EXAMPLE"-->"1164853-LPLCLDWA273_reboot.ova"
+              "OVA_FILE_BUG_1167302_V2V_EXAMPLE"-->"test-bug1167302.ova"
+              "OVA_FILE_BUG_1161333_V2V_EXAMPLE"-->"1161333-WPLCLDWA170_no_mcafee.ova"
+              "BSOD_IMAGE_V2V_EXAMPLE"-->"BSOD"
+              "OVA_DIR_PARSE_V2V_EXAMPLE"-->"/var/lib/libvirt/images/v2v/ova-images/case84967"
+              "OVA_FILE_SHA1_V2V_EXAMPLE"-->"SHA1.ova"
+              "OVA_FILE_SHA256_V2V_EXAMPLE"-->"SHA256.ova"
+              "OVA_FILE_SHA1SHA256_V2V_EXAMPLE"-->"SHA1_SHA256.ova"
+              "OVA_FILE_INVALID_LINE_IN_MANIFEST_V2V_EXAMPLE"-->"invalid_line_in_manifest.ova"
+              "OVA_FILE_INVALID_LINE_IN_MANIFEST_MISSING_SPACE_V2V_EXAMPLE"-->"invalid_line_in_manifest-missing_space.ova"
+              "OVA_DIR_AWS_V2V_EXAMPLE"-->"/var/lib/libvirt/images/v2v/ova-images/bug1401077"
+              "OVA_FILE_RHEL72_AWS_V2V_EXAMPLE"-->"rhel7.2-aws"
+              "OVA_FILE_WIN2008R2_AWS_V2V_EXAMPLE"-->"win2008r2-aws"
+              "OS_VERSION_WIN2008R2_AWS_V2V_EXAMPLE"-->"win2008r2"
+              "OVA_FILE_EC2_V2V_EXAMPLE"-->"rhel6-ec2.ova"
+              "OVA_FILE_EATON_V2V_EXAMPLE"-->"centos-Eaton.ova"
+              "OVA_DIR_RHEL65_V2V_EXAMPLE"-->"/var/lib/libvirt/images/v2v/ova-images/rhel6.5-ova"
+              "OVA_FILE_RHEL65_V2V_EXAMPLE"-->"esx-rhel6-ova.tar"
+          tp-libvirt v2v/tests/cfg/function_test_esx.cfg:
+              "VM_NAME_ESX_CDROM_V2V_EXAMPLE"-->"Auto-esx5.5-rhel7-local-with-cdrom"
+              "VM_NAME_ESX_MIGRATED_V2V_EXAMPLE"-->"Auto-esx5.5-rhel7-migrate"
+              "VM_NAME_ESX_LOCALSTORAGE_V2V_EXAMPLE"-->"Auto-esx5.5-rhel7-local-with-cdrom"
+              "VM_NAME_ESX_MULDISKS_V2V_EXAMPLE"-->"Auto-esx5.5-rhel7.1-clone-mulcpu-disk"
+              "VM_NAME_ESX_MULCPUS_V2V_EXAMPLE"-->"Auto-esx5.5-rhel7.1-clone-mulcpu-disk"
+              "VM_NAME_ESX_SPECIALNAME_V2V_EXAMPLE"-->"Auto-esx5.5-rhel7.1-#clone-mulcpu-disk"
+              "VM_NAME_ESX_CLONED_V2V_EXAMPLE"-->"Auto-esx5.5-rhel7-clone"
+              "VM_NAME_ESX_TEMPLATE_V2V_EXAMPLE"-->"Auto-esx5.5-rhel7.1-fromtemplate"
+              "VM_NAME_ESX_EFI_V2V_EXAMPLE"-->"Auto-esx6.0-win7-efi"
+              "VM_NAME_ESX_UEFI_RHEL_V2V_EXAMPLE"-->"Auto-esx5.5-rhel7.4-uefi"
+              "VM_NAME_GPO_AV_V2V_EXAMPLE"-->"bug1260689-win2008R2-GPO-Macfee"
+              "VM_NAME_VMTOOLS_V2V_EXAMPLE"-->"Auto-esx6.0-rhel6.8-vmware-tool"
+              "VM_NAME_VMTOOLS_SERVICE_V2V_EXAMPLE"-->"Auto-esx6.0-rhel7.4-vmware-tool"
+              "VM_NAME_DEVICE_PASSTHRU_V2V_EXAMPLE"-->"Auto-esx5.5-rhel6.7-pci-passthrough"
+              "VM_NAME_EMPTY_CDROM_V2V_EXAMPLE"-->"Auto-esx6.0-empty-cdrom"
+              "VM_NAME_MULTIPLE_LINUX_V2V_EXAMPLE"-->"multiple_linux"
+              "VM_NAME_ESX_RHEL7_V2V_EXAMPLE"-->"esx5.5-rhel7.2-x86_64"
+              "VM_NAME_ESX_FSTAB_SEPBY_COMMA"-->"Auto-esx5.5-rhel7.4-case84636"
+              "VM_NAME_ESX_SNAPSHOT_V2V_EXAMPLE"-->"Auto-esx5.5-rhel7.1-snapshot"
+              "ESX_REMOVED_FILE_V2V_EXAMPLE"-->"/home/bug1172425/case13022.log"
+              "HTTP_PROXY_V2V_EXAMPLE"-->"http://squid.apac.redhat.com:3128"
+              "HTTPS_PROXY_V2V_EXAMPLE"-->"http://squid.apac.redhat.com:3128"
+              "VM_NAME_RHEL5_V2V_EXAMPLE"-->"esx6.0-rhel5.11-i386"
+              "VM_NAME_USR_PARTITION_V2V_EXAMPLE"-->"Auto-esx5.5-rhel7.2-usr-partition"
+              "VM_NAME_ESX_RAID_V2V_EXAMPLE"-->"Auto-esx6.0-rhel6.9-x64-MD"
+          tp-libvirt v2v/tests/cfg/function_test_xen.cfg:
+              "XEN_VM_OS_VERSION_V2V_EXAMPLE"-->"rhel7"
+              "DISPLAY_VM_NAME_V2V_EXAMPLE"-->"Auto-rhel7.2-display"
+              "DISPLAY_OS_VERSION_V2V_EXAMPLE"-->"rhel7"
+              "SDL_VM_NAME_V2V_EXAMPLE"-->"Auto-xen-rhel6.7-SDL"
+              "SCSI_VM_NAME_V2V_EXAMPLE"-->"Auto-xen-rhel6.7-scsidisk"
+              "IDE_VM_NAME_V2V_EXAMPLE"-->"Auto-xen-rhel6.7-cd-sndcrd"
+              "WIN2003_SCREENSHOTS_V2V_EXAMPLE"-->"screenshots/win2003-0.ppm,screenshots/win2003-1.ppm,screenshots/win2003-2.ppm,screenshots/win2003-3.ppm"
+              "PROGRAM_FILES_2_OS_VERSION_V2V_EXAMPLE"-->"win2003"
+              "PROGRAM_FILES_2_VM_NAME_V2V_EXAMPLE"-->"Auto-xen-win2003-2ProgramFiles"
+              "XEN_VM_NAME_V2V_EXAMPLE"-->"xen-hvm-rhel7.2-x86_64"
+              "MULTICONSOLE_VM_NAME_V2V_EXAMPLE"-->"Auto-xen-rhel6.7-multiconsole"
+              "CONSOLE_XVC0_VM_NAME_V2V_EXAMPLE"-->"Auto-xenpv-rhel6.7-consolexvc0"
+              "WINDOWS_ROOT_V2V_EXAMPLE"-->"LINUX"
+              "WINDOWS_ROOT_OS_VERSION_V2V_EXAMPLE"-->"win2003"
+              "WINDOWS_ROOT_VM_NAME_V2V_EXAMPLE"-->"Auto-xenkvm-win2003-64-rootonLinux"
+              "OS_VERSION_RHEV_FILE_V2V_EXAMPLE"-->"win2008"
+              "RHEV_FILE_VM_NAME_V2V_EXAMPLE"-->"xen-hvm-win2008-x86_64"
+              "VM_NAME_PV_WITH_REGULAR_KERNEL_V2V_EXAMPLE"-->"Auto-xen-pv-rhel5.11-x64-with-regular-kernel"
+              "VM_NAME_PV_NO_REGULAR_KERNEL_V2V_EXAMPLE"-->"Auto-xen-pv-rhel5.11-x64-no-regular-kernel"
+              "VM_NAME_XEN_ES1370_V2V_EXAMPLE"-->"Auto-xen-hvm-rhel7-x64-es1370"
+              "VM_NAME_XEN_SB16_V2V_EXAMPLE"-->"Auto-xen-hvm-rhel7-x64-sb16"
+              "VM_NAME_XEN_PCSPK_V2V_EXAMPLE"-->"Auto-xen-hvm-rhel7-x64-pcspk"
+              "XEN_VM_NAME_VIRTIO_WIN_V2V_EXAMPLE"-->"xen-hvm-win2008-x86_64"
+              "OS_VERSION_VIRTIO_WIN_V2V_EXAMPLE"-->"win2008"
+              "SERVER_PASSWORD_V2V_EXAMPLE"-->"redhat"
+              "VM_NAME_XEN_ENCRYPED_V2V_EXAMPLE"-->"Auto-xen-rhel6.9-case13063"
+              "VM_NAME_XEN_MULTIDISK_V2V_EXAMPLE"-->"Auto-xen-rhel7.3-case13050"
+              "XEN_VM_NAME_RHSRVANYMD5_V2V_EXAMPLE"-->"xen-hvm-win2008r2-x86_64"
+              "OS_VERSION_RHSRVANYMD5_V2V_EXAMPLE"-->"win2008r2"
+              "VM_NAME_XEN_RHEL62_V2V_EXAMPLE"-->"xen-hvm-rhel6.2-i386"
+          tp-libvirt v2v/tests/cfg/v2v_options.cfg:
+              "DISK_IMAGE_PATH_V2V_EXAMPLE"-->"var/lib/libvirt/images/v2v"
+              "VM_NAME_RAW_PREALLOCATED_V2V_EXAMPLE"-->"Auto-kvm-rhel6.7-prealloraw"
+              "VM_NAME_RAW_SPARSE_V2V_EXAMPLE"-->"Auto-kvm-rhel6.7-sparseraw"
+              "VM_NAME_QCOW2_SPARSE_V2V_EXAMPLE"-->"Auto-kvm-rhel7.1-sparseqcow2"
+              "VM_NAME_ESX_DEFAULT_V2V_EXAMPLE"-->"esx6.0-rhel7.2-x86_64"
+              "VM_NAME_XEN_DEFAULT_V2V_EXAMPLE"-->"xen-hvm-rhel7.2-x86_64"
+              "USER._V2V_EXAMPLE"-->"redhat"
+              "EXPORT_DOMAIN_UUDI_V2V_EXAMPLE"-->"0000000000"
+              "WINDOWS_IMAGE_V2V_EXAMPLE"-->"Auto-kvm-win2008-64-virtio.img"
+              "MACHINE_READABLE_V2V_EXAMPLE"-->"machine_readable"
+              "IMAGE_WITH_VBOX_ADD_V2V_EXAMPLE"-->"Auto-kvm-rhel7.3-vbox.img"
+              "IMAGE_WITH_INVALID_FILE_V2V_EXAMPLE"-->"bug1301593.img"
+              "INSTALL_VM_SCRIPT_V2V_EXAMPLE"-->"install_vm_session.sh"
+              "VM_NAME_VMX_V2V_EXAMPLE"-->"esx5.5-rhel6.7-x86_64"
+              "NFS_VMX_V2V_EXAMPLE"-->"10.73.194.27:/vol/s3/v2v/esx5.5"
+          tp-libvirt v2v/tests/cfg/specific_kvm.cfg:
+              "VM_VIRTIOSCIC_DISK_V2V_EXAMPLE"-->"Auto-kvm-rhel6.7-virioscsi"
+              "OS_VERSION_WIN_V2V_EXAMPLE"-->"win8"
+              "VM_WIN_V2V_EXAMPLE"-->"kvm-win8-x86_64"
+              "KERNEL_FIRMWARE_URL_V2V_EXAMPLE"-->"http://download.eng.bos.redhat.com/brewroot/packages/kernel/2.6.32/653.el6/noarch/kernel-firmware-2.6.32-653.el6.noarch.rpm"
+              "KERNEL_URL_V2V_EXAMPLE"-->"http://download.eng.bos.redhat.com/brewroot/packages/kernel/3.10.0/489.el7/x86_64/kernel-3.10.0-489.el7.x86_64.rpm"
+              "VM_WIN_VIRTIO_ON_V2V_EXAMPLE"-->"Auto-kvm-win2008-virtio"
+              "VM_NOYUMREPO_V2V_EXAMPLE"-->"Auto-kvm-rhel6.7-noyumrepo-rhn"
+              "VM_KDUMP_V2V_EXAMPLE"-->"Auto-kvm-rhel6.7-kdump"
+              "VM_WIN_8_V2V_EXAMPLE"-->"Auto-win8-unclean-filesystem"
+              "NTP_SERVER_V2V_EXAMPLE"-->"clock.redhat.com"
+              "VM_MEM_ACCLOC_V2V_EXAMPLE"-->"Auto-case84583"
+              "VM_LVM_MULTIDISK_V2V_EXAMPLE"-->"rhel6.9-lvms"
+              "VM_MULTI_KERNEL_V2V_EXAMPLE" -->"rhel7.4-multi-kernel"
+              "VM_BOGUS_KERNEL_V2V_EXAMPLE" -->"rhel6.9-bogus"
+          tp-libvirt v2v/tests/cfg/*.cfg:
+              "RHV_NODE_PASSWORD"-->"123qweP"
+              "XEN_PASSWORD"-->"123qweP"
+              "KVM_VM_NAME_V2V_EXAMPLE"-->"${{{{hypervisor}}}}-${{{{os_version}}}}-${{{{vm_arch}}}}${{{{image_format_n}}}}"
+              "XEN_VM_NAME_V2V_EXAMPLE"-->"${{{{hypervisor}}}}-${{{{vir_mode}}}}-${{{{os_version}}}}-${{{{vm_arch}}}}"
+              "ESX_VM_NAME_V2V_EXAMPLE"-->"${{{{esx_version}}}}-${{{{os_version}}}}-${{{{vm_arch}}}}"
+
+    - when: component == 'python-virtinst'
+      trigger-package: virt-manager
+      label-package: virt-install
+      test-framework: 'virtinst-test'
+      enable-coverage: 'true'
+      timeout: '3600'
+      location: 'CN'
+      install-pkgs: !extend
+          - python-virtinst
+          - nmap
+          - expect
+          - wget
+      # TODO: We don't have any linkage for python-virtinst yet.
+      dashboard-auto-submit: 'false'
+
+    - when: component == 'perl-Sys-Virt'
+      trigger-package:
+          - perl-Sys-Virt
+          - libvirt
+      label-package: perl-Sys-Virt
+      test-framework: 'libvirt-tck'
+      install-pkgs: !extend
+          - perl-Sys-Virt
+      # TODO: We don't have any linkage yet.
+      dashboard-auto-submit: 'false'
+
+    - when: component == 'libvirt-cim'
+      trigger-package: libvirt-cim
+      label-package: libvirt-cim
+      test-framework: 'cimtest'
+      install-pkgs: !extend
+          - libvirt-cim
+      # TODO: We don't have any linkage yet.
+      dashboard-auto-submit: 'false'
+
+    #-------------------------------------------------
+    # perl-Sys-Virt parameters part:
+    #     Define python-virtinst acceptance specific parameters
+    #-------------------------------------------------
+    - when: component == 'perl-Sys-Virt' and major == 6
+      custom-repo: 'libvirt-tck https://gitlab.cee.redhat.com/weizhan/libvirt-tck.git rhel6'
+
+    #-------------------------------------------------
+    # python-virtinst acceptance parameters part:
+    #     Define python-virtinst acceptance specific parameters
+    #-------------------------------------------------
+    - when: component == 'python-virtinst' and major == 6
+      trigger-package: python-virtinst
+      label-package: python-virtinst
+      custom-repo: 'python-virtinst http://git.host.prod.eng.bos.redhat.com/git/python-virtinst.git rhel6'
+      install-pkgs: !extend
+          - syslinux
+
+    - when: test == 'python-virtinst.acceptance.virt_clone_virt_xml'
+      only: |
+          virt-clone
+          virt-xml
+
+    - when: test == 'python-virtinst.acceptance.virt_clone_virt_convert_virt_image'
+      only: |
+          virt-clone
+          virt-convert
+          virt-image
+
+    - when: test == 'python-virtinst.acceptance.virt_install.run_1'
+      only: |
+          virt-install.run_1
+
+    - when: test == 'python-virtinst.acceptance.virt_install.run_2'
+      only: |
+          virt-install.run_2
+
+    - when: test == 'python-virtinst.acceptance.virt_install.run_3'
+      only: |
+          virt-install.run_3
+
+    - when: test == 'python-virtinst.acceptance.virt_install.run_4'
+      only: |
+          virt-install.run_4
+
+    #-------------------------------------------------
+    # libvirt-python and installation parameters part:
+    #     Define libvirt-python and installation specific parameters
+    #-------------------------------------------------
+    - when: test.startswith('libvirt-python.acceptance') or test.startswith('installation.acceptance')
+      watchers:
+          - kasong
+          - lcheng
+          - weizhan
+          - tzheng
+          - yisun
+      enable-report: 'true'
+
+    - when: test.startswith('installation.matrix')
+      watchers:
+          - lcheng
+          - weizhan
+          - tzheng
+          - juzhou
+      enable-report: 'true'
+
+    - when: (component == 'libvirt-python' or component == 'installation') and major == 7
+      custom-repo: 'test-api http://git.host.prod.eng.bos.redhat.com/git/libvirt-test-API.git rhel7'
+
+    - when: (test.startswith('libvirt-python.acceptance') or test.startswith('installation.acceptance')) and major == 7
+      trigger-by-tree: true
+      trigger-package:
+          - libvirt
+          - libvirt-python
+
+    - when: (component == 'libvirt-python' or component == 'installation') and major == 6
+      trigger-package: libvirt
+      custom-repo: 'test-api http://git.host.prod.eng.bos.redhat.com/git/libvirt-test-API.git rhel6'
+
+    - when: (component == 'libvirt-python' or component == 'installation') and major == 7 and arch == 'ppc64le'
+      custom-repo: 'test-api http://git.host.prod.eng.bos.redhat.com/git/libvirt-test-API.git rhel7_ppc'
+      qemu-rhev: 'true'
+      qemu-rhel: 'false'
+
+    - when: test == 'libvirt-python.acceptance'
+      only: |
+          acceptance_attach_detach_readonlydisk
+          acceptance_basic_blockjob
+          acceptance_basic_blockjob_rhev_specific
+          acceptance_basic_interface
+          acceptance_basic_network
+          acceptance_domain_nfs_start
+          acceptance_eventhandler
+          acceptance_linux_domain_rhev_specific
+          acceptance_managedsave
+          acceptance_numa_param
+          acceptance_ownership_test
+          acceptance_snapshot_rhev_specific
+          acceptance_snapshot_rhev_specific_nfs
+          acceptance_snapshot_rhev_specific_iscsi
+          acceptance_storage_dir
+          acceptance_storage_iscsi
+          acceptance_storage_logical
+          acceptance_storage_mpath
+          acceptance_storage_netfs
+          acceptance_storage_scsi
+          acceptance_test_connection
+
+    - when: component == 'installation'
+      test-framework: 'install'
+
+    - when: component == 'installation' and 'rhev' in test
+      qemu-rhev: 'true'
+      qemu-rhel: 'false'
+
+    - when: component == 'installation' and 'rhel' in test
+      qemu-rhel: 'true'
+      qemu-rhev: 'false'
+
+    - when: component == 'installation' and 'linux' in test and major == 7
+      timeout: '25000'
+
+    - when: component == 'installation' and 'win' in test and major == 7
+      timeout: '20000'
+
+    - when: component == 'installation' and 'linux' in test and major == 6
+      timeout: '30000'
+
+    - when: component == 'installation' and 'win' in test and major == 6
+      timeout: '30000'
+
+    - when: test.startswith('installation.acceptance') and 'linux' in test and major == 7
+      inst-guest-list: 'rhel6u9 rhel7u4 rhel7u5'
+
+    - when: test.startswith('installation.acceptance') and 'linux' in test and major == 6
+      inst-guest-list: 'rhel6u9 rhel6u10 rhel7u5'
+
+    - when: test.startswith('installation.acceptance') and 'linux' in test
+      inst-arch-list: 'x86_64 i386'
+      only: |
+          domain_linux_cdrom_inst
+          domain_linux_net_inst
+
+    - when: test.startswith('installation.acceptance') and 'linux' in test and arch == 'ppc64le'
+      inst-arch-list: 'ppc64le ppc64'
+
+    - when: test.startswith('installation.acceptance') and 'win_1' in test
+      inst-guest-list: 'win7 win8 win2008'
+      inst-arch-list: 'x86_64 i386'
+      only: |
+          domain_win_cdrom_inst
+
+    - when: test.startswith('installation.acceptance') and 'win_2' in test
+      inst-guest-list: 'win8u1 win10'
+      inst-arch-list: 'x86_64 i386'
+      need_westmere: true
+      only: |
+          domain_win_cdrom_inst
+
+    - when: test.startswith('installation.matrix')
+      trigger-package: ''
+
+    - when: test.startswith('installation.matrix') and 'linux_1' in test and major == 7
+      location: 'US'
+      only: |
+          installation_matrix_rhel5_release
+          installation_matrix_rhel6_release
+
+    - when: test.startswith('installation.matrix') and arch == 'ppc64le'
+      timeout: '21000'
+      only: |
+          installation_matrix_rhel7_latest
+          installation_matrix_rhel7_http_iscsi
+          installation_matrix_rhel7_http_local_dir
+          installation_matrix_rhel7_http_nfs
+          installation_matrix_rhel7_iso_iscsi
+          installation_matrix_rhel7_iso_local_dir
+          installation_matrix_rhel7_iso_nfs
+          installation_matrix_bootiso
+          installation_matrix_pxe
+          installation_matrix_ftp
+          installation_matrix_nfs
+          installation_matrix_rhel6_http_iscsi
+          installation_matrix_rhel6_http_local_dir
+          installation_matrix_rhel6_http_nfs
+          installation_matrix_rhel6_iso_iscsi
+          installation_matrix_rhel6_iso_local_dir
+          installation_matrix_rhel6_iso_nfs
+          installation_matrix_rhel6_latest
+          installation_matrix_suse
+      reserve-days: 2
+
+    - when: test.startswith('installation.matrix') and 'linux_2' in test and major == 7
+      location: 'US'
+      only: |
+          installation_matrix_rhel7_release
+          installation_matrix_rhel7_latest
+          installation_matrix_ubuntu
+
+    - when: test.startswith('installation.matrix') and 'linux_1' in test and major == 6
+      only: |
+          installation_matrix_rhel5_release
+          installation_matrix_rhel7_release
+          installation_matrix_ubuntu
+
+    - when: test.startswith('installation.matrix') and 'linux_2' in test and major == 6
+      only: |
+          installation_matrix_rhel6_release
+          installation_matrix_rhel6_latest
+
+    - when: test.startswith('installation.matrix') and 'win_1' in test
+      only: |
+          installation_matrix_win_1
+
+    - when: test.startswith('installation.matrix') and 'win_2' in test
+      need_westmere: true
+      only: |
+          installation_matrix_win_2
+
+    - when: test == 'installation.acceptance.rhev.linux' and arch == 'ppc64le'
+      timeout: '8000'
+      only: |
+          domain_linux_net_inst
+
+    - when: test == 'libvirt-python.function.single_node' and arch == 'x86_64'
+      ci-no: |
+          acceptance_attach_detach_readonlydisk
+          acceptance_basic_blockjob
+          acceptance_basic_blockjob_rhev_specific
+          acceptance_basic_interface
+          acceptance_basic_network
+          acceptance_domain_nfs_start
+          acceptance_eventhandler
+          acceptance_linux_domain_rhev_specific
+          acceptance_managedsave
+          acceptance_numa_param
+          acceptance_ownership_test
+          acceptance_snapshot_rhev_specific
+          acceptance_snapshot_rhev_specific_nfs
+          acceptance_snapshot_rhev_specific_iscsi
+          acceptance_storage_dir
+          acceptance_storage_iscsi
+          acceptance_storage_logical
+          acceptance_storage_mpath
+          acceptance_storage_netfs
+          acceptance_storage_scsi
+          acceptance_test_connection
+          consumption_unixsocket_sasl
+          domain_linux_cdrom_inst
+          domain_linux_net_inst
+          domain_win_cdrom_inst
+          ssh_persistent_paused_no_dst
+          ssh_persistent_paused_with_dst
+          ssh_persistent_running_no_dst
+          ssh_persistent_running_with_dst
+          ssh_transient_paused_no_dst
+          ssh_transient_paused_with_dst
+          ssh_transient_running_no_dst
+          ssh_transient_running_with_dst
+          tcp_persistent_paused_no_dst
+          tcp_persistent_paused_with_dst
+          tcp_persistent_running_no_dst
+          tcp_persistent_running_with_dst
+          tcp_sasl_persistent_paused_no_dst
+          tcp_sasl_persistent_paused_with_dst
+          tcp_sasl_persistent_running_no_dst
+          tcp_sasl_persistent_running_with_dst
+          tcp_sasl_transient_paused_no_dst
+          tcp_sasl_transient_paused_with_dst
+          tcp_sasl_transient_running_no_dst
+          tcp_sasl_transient_running_with_dst
+          tcp_transient_paused_no_dst
+          tcp_transient_paused_with_dst
+          tcp_transient_running_no_dst
+          tcp_transient_running_with_dst
+          tls_persistent_paused_no_dst
+          tls_persistent_paused_with_dst
+          tls_persistent_running_no_dst
+          tls_persistent_running_with_dst
+          tls_sasl_persistent_paused_no_dst
+          tls_sasl_persistent_paused_with_dst
+          tls_sasl_persistent_running_no_dst
+          tls_sasl_persistent_running_with_dst
+          tls_sasl_transient_paused_no_dst
+          tls_sasl_transient_paused_with_dst
+          tls_sasl_transient_running_no_dst
+          tls_sasl_transient_running_with_dst
+          tls_transient_paused_no_dst
+          tls_transient_paused_with_dst
+          tls_transient_running_no_dst
+          tls_transient_running_with_dst
+          installation_matrix_rhel5_release
+          installation_matrix_rhel6_release
+          installation_matrix_rhel7_release
+          installation_matrix_rhel7_latest
+          installation_matrix_rhel6_latest
+          installation_matrix_ubuntu
+          installation_matrix_win_1
+          installation_matrix_win_2
+          basic_npiv
+          nodedevice
+          tls_persistent_running_no_dst_new
+          migrate
+
+    - when: test == 'libvirt-python.function.single_node' and arch == 'ppc64le'
+      ci-no: |
+          acceptance_attach_detach_readonlydisk
+          acceptance_basic_blockjob
+          acceptance_basic_interface
+          acceptance_basic_network
+          acceptance_domain_nfs_start
+          acceptance_eventhandler
+          acceptance_linux_domain_rhev_specific
+          acceptance_managedsave
+          acceptance_numa_param
+          acceptance_ownership_test
+          acceptance_snapshot_rhev_specific
+          acceptance_snapshot_rhev_specific_nfs
+          acceptance_snapshot_rhev_specific_iscsi
+          acceptance_storage_dir
+          acceptance_storage_iscsi
+          acceptance_storage_logical
+          acceptance_storage_mpath
+          acceptance_storage_netfs
+          acceptance_storage_scsi
+          acceptance_test_connection
+          consumption_unixsocket_sasl
+          domain_linux_cdrom_inst
+          domain_linux_net_inst
+          domain_rhel_alt_latest
+          domain_win_cdrom_inst
+          ssh_persistent_paused_no_dst
+          ssh_persistent_paused_with_dst
+          ssh_persistent_running_no_dst
+          ssh_persistent_running_with_dst
+          ssh_transient_paused_no_dst
+          ssh_transient_paused_with_dst
+          ssh_transient_running_no_dst
+          ssh_transient_running_with_dst
+          tcp_persistent_paused_no_dst
+          tcp_persistent_paused_with_dst
+          tcp_persistent_running_no_dst
+          tcp_persistent_running_with_dst
+          tcp_sasl_persistent_paused_no_dst
+          tcp_sasl_persistent_paused_with_dst
+          tcp_sasl_persistent_running_no_dst
+          tcp_sasl_persistent_running_with_dst
+          tcp_sasl_transient_paused_no_dst
+          tcp_sasl_transient_paused_with_dst
+          tcp_sasl_transient_running_no_dst
+          tcp_sasl_transient_running_with_dst
+          tcp_transient_paused_no_dst
+          tcp_transient_paused_with_dst
+          tcp_transient_running_no_dst
+          tcp_transient_running_with_dst
+          tls_persistent_paused_no_dst
+          tls_persistent_paused_with_dst
+          tls_persistent_running_no_dst
+          tls_persistent_running_with_dst
+          tls_sasl_persistent_paused_no_dst
+          tls_sasl_persistent_paused_with_dst
+          tls_sasl_persistent_running_no_dst
+          tls_sasl_persistent_running_with_dst
+          tls_sasl_transient_paused_no_dst
+          tls_sasl_transient_paused_with_dst
+          tls_sasl_transient_running_no_dst
+          tls_sasl_transient_running_with_dst
+          tls_transient_paused_no_dst
+          tls_transient_paused_with_dst
+          tls_transient_running_no_dst
+          tls_transient_running_with_dst
+          installation_matrix_rhel7_latest
+          installation_matrix_rhel7_http_iscsi
+          installation_matrix_rhel7_http_local_dir
+          installation_matrix_rhel7_http_nfs
+          installation_matrix_rhel7_iso_iscsi
+          installation_matrix_rhel7_iso_local_dir
+          installation_matrix_rhel7_iso_nfs
+          installation_matrix_bootiso
+          installation_matrix_pxe
+          installation_matrix_ftp
+          installation_matrix_nfs
+          installation_matrix_rhel6_http_iscsi
+          installation_matrix_rhel6_http_local_dir
+          installation_matrix_rhel6_http_nfs
+          installation_matrix_rhel6_iso_iscsi
+          installation_matrix_rhel6_iso_local_dir
+          installation_matrix_rhel6_iso_nfs
+          installation_matrix_rhel6_latest
+          installation_matrix_suse
+          installation_matrix_win_iso
+          nodedevice
+
+    - when: test == 'libvirt-python.function.single_node' and major >= 7
+      install-pkgs: !extend
+          - OVMF
+          - libcgroup-tools
+
+    - when: test == 'libvirt-python.function.sriov'
+      need_sriov: true
+      enable_iommu: true
+      only: |
+          nodedevice
+
+    - when: test == 'libvirt-python.function.npiv'
+      need_npiv: true
+      only: |
+          basic_npiv
+
+    - when: test.startswith('libvirt-python.function.rhev')
+      qemu-rhev: 'true'
+      qemu-rhel: 'false'
+
+    - when: test.startswith('libvirt-python.function.rhel')
+      qemu-rhel: 'true'
+      qemu-rhev: 'false'
+
+    - when: test == 'libvirt-python.function.rhel.migration' or test == 'libvirt-python.function.rhev.migration'
+      resource-host: true
+      resource-img-dest: '/var/lib/libvirt/images/libvirt-test-api'
+      only: |
+          consumption_unixsocket_sasl
+          ssh_persistent_paused_no_dst
+          ssh_persistent_paused_with_dst
+          ssh_persistent_running_no_dst
+          ssh_persistent_running_with_dst
+          ssh_transient_paused_no_dst
+          ssh_transient_paused_with_dst
+          ssh_transient_running_no_dst
+          ssh_transient_running_with_dst
+          tcp_persistent_paused_no_dst
+          tcp_persistent_paused_with_dst
+          tcp_persistent_running_no_dst
+          tcp_persistent_running_with_dst
+          tcp_sasl_persistent_paused_no_dst
+          tcp_sasl_persistent_paused_with_dst
+          tcp_sasl_persistent_running_no_dst
+          tcp_sasl_persistent_running_with_dst
+          tcp_sasl_transient_paused_no_dst
+          tcp_sasl_transient_paused_with_dst
+          tcp_sasl_transient_running_no_dst
+          tcp_sasl_transient_running_with_dst
+          tcp_transient_paused_no_dst
+          tcp_transient_paused_with_dst
+          tcp_transient_running_no_dst
+          tcp_transient_running_with_dst
+          tls_persistent_paused_no_dst
+          tls_persistent_paused_with_dst
+          tls_persistent_running_no_dst
+          tls_persistent_running_with_dst
+          tls_sasl_persistent_paused_no_dst
+          tls_sasl_persistent_paused_with_dst
+          tls_sasl_persistent_running_no_dst
+          tls_sasl_persistent_running_with_dst
+          tls_sasl_transient_paused_no_dst
+          tls_sasl_transient_paused_with_dst
+          tls_sasl_transient_running_no_dst
+          tls_sasl_transient_running_with_dst
+          tls_transient_paused_no_dst
+          tls_transient_paused_with_dst
+          tls_transient_running_no_dst
+          tls_transient_running_with_dst
+
+    - when: test == 'libvirt-python.function.rhev.migration' and major >= 7 and minor >= 4
+      only: |
+          consumption_unixsocket_sasl
+          ssh_persistent_paused_no_dst
+          ssh_persistent_paused_with_dst
+          ssh_persistent_running_no_dst
+          ssh_persistent_running_with_dst
+          ssh_transient_paused_no_dst
+          ssh_transient_paused_with_dst
+          ssh_transient_running_no_dst
+          ssh_transient_running_with_dst
+          tcp_persistent_paused_no_dst
+          tcp_persistent_paused_with_dst
+          tcp_persistent_running_no_dst
+          tcp_persistent_running_with_dst
+          tcp_sasl_persistent_paused_no_dst
+          tcp_sasl_persistent_paused_with_dst
+          tcp_sasl_persistent_running_no_dst
+          tcp_sasl_persistent_running_with_dst
+          tcp_sasl_transient_paused_no_dst
+          tcp_sasl_transient_paused_with_dst
+          tcp_sasl_transient_running_no_dst
+          tcp_sasl_transient_running_with_dst
+          tcp_transient_paused_no_dst
+          tcp_transient_paused_with_dst
+          tcp_transient_running_no_dst
+          tcp_transient_running_with_dst
+          tls_persistent_paused_no_dst
+          tls_persistent_paused_with_dst
+          tls_persistent_running_no_dst
+          tls_persistent_running_with_dst
+          tls_sasl_persistent_paused_no_dst
+          tls_sasl_persistent_paused_with_dst
+          tls_sasl_persistent_running_no_dst
+          tls_sasl_persistent_running_with_dst
+          tls_sasl_transient_paused_no_dst
+          tls_sasl_transient_paused_with_dst
+          tls_sasl_transient_running_no_dst
+          tls_sasl_transient_running_with_dst
+          tls_transient_paused_no_dst
+          tls_transient_paused_with_dst
+          tls_transient_running_no_dst
+          tls_transient_running_with_dst
+          tls_persistent_running_no_dst_new
+          migrate
+
+    #-------------------------------------------------
+    # v2v acceptance parameters part:
+    #     Define v2v acceptance specific parameters
+    #-------------------------------------------------
+    - when: test == 'v2v.acceptance.ovirt' or test.startswith('v2v.matrix.kvm')
+      v2v-vms-src: '10.73.194.35:/vol/s3tzheng393301/s3images/kvm'
+      v2v-vms-list: |
+          rhel5.11
+          rhel6.9
+          rhel7.4
+          win2008
+          win2008r2
+          win2012
+          win2012r2
+          win7
+          win8
+          win8.1
+          win10
+          win2016
+
+    - when: test.startswith('v2v.acceptance')
+      enable-report: 'true'
+      unstable-thld: 0
+      failure-thld: 30
+
+    - when: test == 'v2v.acceptance.libvirt'
+      only:
+          !include-raw:
+              - only/acceptance-v2v-libvirt.only
+
+    - when: test == 'v2v.acceptance.ovirt'
+      only:
+          !include-raw:
+              - only/acceptance-v2v-ovirt.only
+
+    - when: test == 'v2v.acceptance.gate'
+      timed: '0 16 * * *'
+      only: |
+          convert_vm_to_libvirt.xen.vm.hvm.linux.6_9.arch_x86_64
+
+    - when: component == 'v2v' and test_type in ['function', 'matrix'] or test == 'v2v.acceptance.gate'
+      trigger-package: ''
+
+    - when: test == 'v2v.function.v2v_options' and major == 7 and minor == 5
+      timed: '0 1 1-7 * 6'
+      v2v-vms-src: '10.73.194.27:/vol/s3v2v/kvm'
+      v2v-vms-list: 'function'
+      only: |
+          v2v_options
+
+    - when: test == 'v2v.matrix.kvm'
+      qemu-rhel: 'false'
+      only: |
+          convert_vm_to_ovirt.kvm..NFS
+
+    - when: test == 'v2v.matrix.xen'
+      qemu-rhel: 'false'
+      only: |
+          convert_vm_to_libvirt.xen
+          convert_vm_to_ovirt.xen..NFS
+
+    - when: test == 'v2v.matrix.esx5.1'
+      qemu-rhel: 'false'
+      only: |
+          convert_vm_to_libvirt.esx.vm.5_1
+          convert_vm_to_ovirt.esx.vm.5_1..NFS
+
+    - when: test == 'v2v.matrix.esx5.5'
+      qemu-rhel: 'false'
+      only: |
+          convert_vm_to_libvirt.esx.vm.5_5
+          convert_vm_to_ovirt.esx.vm.5_5..NFS
+
+    - when: test == 'v2v.matrix.esx6.0'
+      qemu-rhel: 'false'
+      only: |
+          convert_vm_to_libvirt.esx.vm.6_0
+          convert_vm_to_ovirt.esx.vm.6_0..NFS
+
+    - when: test == 'v2v.matrix.esx6.5'
+      qemu-rhel: 'false'
+      only: |
+          convert_vm_to_libvirt.esx.vm.6_5
+          convert_vm_to_ovirt.esx.vm.6_5..NFS
+
+    - when: test == 'v2v.matrix.kvm_ISCSI'
+      qemu-rhev: 'false'
+      only: |
+          convert_vm_to_ovirt.kvm..ISCSI
+
+    - when: test == 'v2v.matrix.kvm_FC'
+      qemu-rhev: 'false'
+      only: |
+          convert_vm_to_ovirt.kvm..FC
+
+    - when: test == 'v2v.matrix.xen_ISCSI_FC'
+      qemu-rhev: 'false'
+      only: |
+          convert_vm_to_ovirt.xen..ISCSI
+          convert_vm_to_ovirt.xen..FC
+
+    - when: test == 'v2v.matrix.esx5.1_ISCSI_FC'
+      qemu-rhev: 'false'
+      only: |
+          convert_vm_to_ovirt.esx.vm.5_1..ISCSI
+          convert_vm_to_ovirt.esx.vm.5_1..FC
+
+    - when: test == 'v2v.matrix.esx5.5_ISCSI_FC'
+      qemu-rhev: 'false'
+      only: |
+          convert_vm_to_ovirt.esx.vm.5_5..ISCSI
+          convert_vm_to_ovirt.esx.vm.5_5..FC
+
+    - when: test == 'v2v.matrix.esx6.0_ISCSI_FC'
+      qemu-rhev: 'false'
+      only: |
+          convert_vm_to_ovirt.esx.vm.6_0..ISCSI
+          convert_vm_to_ovirt.esx.vm.6_0..FC
+
+    - when: test == 'v2v.matrix.esx6.5_ISCSI_FC'
+      qemu-rhev: 'false'
+      only: |
+          convert_vm_to_ovirt.esx.vm.6_5..ISCSI
+          convert_vm_to_ovirt.esx.vm.6_5..FC
+
+    - when: test == 'v2v.function.function_test_esx' and major == 7 and minor == 5
+      timed: '0 1 8-14 * 6'
+      v2v-vms-src: '10.73.194.27:/vol/s3new/virt-tools'
+      only: |
+          function_test_esx
+
+    - when: test == 'v2v.function.function_test_xen' and major == 7 and minor == 5
+      yum-repos: 'brew_rhevm-4.1-rhel-7-candidate|http://download.eng.pek2.redhat.com/rel-eng/repos/rhevm-4.1-rhel-7-candidate/x86_64/'
+      timed: '0 1 15-21 * 6'
+      only: |
+          function_test_xen
+
+    - when: test == 'v2v.function.specific_kvm' and major == 7 and minor == 5
+      timed: '0 1 22-28 * 6'
+      v2v-vms-src: '10.73.194.27:/vol/s3v2v/kvm'
+      v2v-vms-list: 'function'
+      only: |
+          specific_kvm
+
+    - when: test == 'v2v.function.convert_from_file' and major == 7 and minor == 5
+      timed: '0 1 1-7 * 0'
+      v2v-vms-src: '10.73.194.27:/vol/s3new/virt-tools'
+      v2v-vms-list: 'function'
+      only: |
+          convert_from_file
+
+    - when: test.startswith('v2v.function') and major == 7 and minor < 5
+      timed: ''
+
+    #-------------------------------------------------
+    # libvirt acceptance parameters part:
+    #     Define libvirt acceptance specific parameters
+    #-------------------------------------------------
+    - when: component == 'libvirt' and test_type == 'acceptance'
+      fail-priority: 'blocker'
+      skip-priority: 'major'
+
+    - when: (test == 'libvirt.acceptance.general' or test == 'libvirt.acceptance.generalx' or test == 'libvirt.acceptance.ovmf') and (( major == 6 and minor >= 9 ) or ( major == 7 and minor >= 4 )) and arch == 'x86_64'
+      timed: '0 18 * * *'
+      location: 'CN'
+
+    - when: (test == 'libvirt.acceptance.general' or test == 'libvirt.acceptance.generalx') and arch == 'x86_64'
+      trigger-by-tree: true
+      skip-scratch: 'FALSE'
+      additional-vms: 'vm2'
+      only:
+          !include-raw:
+              - only/acceptance-minimum.only
+              - only/acceptance-common.only
+              - only/acceptance-x86_64.only
+      ci-no: |
+          virsh.console.normal_test.acl_test.valid_domname
+          virsh.nodedev_dumpxml.positve_test.acl_test.normal_test
+          virsh.qemu_agent_command_fs
+          virsh.vol_create.positive_test.disk_pool.vol_format_linux.pool_format_none
+          virsh.domxml_to_native.expected_option
+          virsh.dompmsuspend.positive_test.non_acl.disk
+          virsh.domblkerror.undefinded_error
+      install-pkgs: !extend
+          - glusterfs
+          - glusterfs-server
+          - mlocate
+          - libcgroup-tools
+          - libvirt-admin
+          - gstreamer
+      pr: !extend
+          - 'tp-libvirt 1027,1239,1241,1254,1257,1258,1259,1295'
+          - 'avocado-vt 1207,1378'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/numa/guest_numa.cfg:
+              "memory_nodeset = "0-1""-->"memory_nodeset = "0""
+              "memnode_nodeset_0 = 1"-->"memnode_nodeset_0 = 0"
+              "page_nodenum_0 = "1""-->"page_nodenum_0 = "0""
+              "host-nodes=0-1"-->"host-nodes=0"
+              "host-nodes=1"-->"host-nodes=0"
+          tp-libvirt libvirt/tests/cfg/virtual_disks/virtual_disks_ceph.cfg:
+              "mon_host = "EXAMPLE_MON_HOST""-->"mon_host = "10.73.75.154""
+              "disk_source_host = "EXAMPLE_HOSTS""-->"disk_source_host = "10.73.75.154""
+              "disk_source_port = "EXAMPLE_PORTS""-->"disk_source_port = "6789""
+              "disk_source_name = "EXAMPLE_SOURCE_NAME""-->"disk_source_name = "avocado-vt-pool/rbd.img""
+              "disk_source_name = "EXAMPLE_ATTACH_NAME""-->"disk_source_name = "avocado-vt-pool/attach.img""
+              "mon_host = "EXAMPLE_MON_HOST_AUTHX""-->"mon_host = "10.73.75.216""
+              "disk_source_host = "EXAMPLE_HOSTS_AUTHX""-->"disk_source_host = "10.73.75.216""
+              "client_name = "EXAMPLE_CLIENT_NAME""-->"client_name = "client.admin""
+              "client_key = "EXAMPLE_CLIENT_KEY""-->"client_key = "AQCS6yNYGiqsDRAACb3zHBaIujuFUY1jKprFGw==""
+              "auth_key = "EXAMPLE_AUTH_KEY""-->"auth_key = ${{{{client_key}}}}"
+              "secret_usage = "EXAMPLE_SECRET_USAGE""-->"secret_usage = "client.libvirt secret""
+              "auth_user = "EXAMPLE_AUTH_USER""-->"auth_user = "admin""
+      retain-fail: 'enable'
+      unstable-thld: 0
+      failure-thld: 5
+      enable-report: 'true'
+
+    - when: test == 'libvirt.acceptance.general' and arch == 'x86_64'
+      qemu-rhel: 'false'
+      qemu-rhev: 'true'
+
+    - when: test == 'libvirt.acceptance.generalx' and arch == 'x86_64'
+      qemu-rhel: 'true'
+      qemu-rhev: 'false'
+
+    - when: test == 'libvirt.acceptance.general' and (major < 7 or (major == 7 and minor <= 2))
+      ci-no: |
+          virt_admin.server_threadpool_set.normal_test.min_workers_test.min_workers_lt_nworkers
+          virt_admin.server_clients_set.normal_test.max_clients_test.max_clients_gt_nclients
+
+    - when: test == 'libvirt.acceptance.general' and arch == 'ppc64le' and product == 'RHEL'
+      trigger-by-tree: true
+      skip-scratch: 'FALSE'
+      only:
+          !include-raw:
+              - only/acceptance-minimum.only
+              - only/acceptance-common.only
+              - only/acceptance-p8.only
+      patch: 'tp-libvirt libvirt-avocado/nodememstats.patch'
+      pr: !extend
+          - 'tp-libvirt 1020,1027,1030,1031'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/libvirt_mem.cfg:
+              "2560000"-->"2097152"
+              "1024000"-->"1048576"
+              "512000"-->"524288"
+              "512001"-->"524289"
+              "1536000"-->"1048576"
+              "2609152"-->"2097152"
+              "page_size = 4"-->"page_size = 64"
+              "2048"-->"16384"
+              "0x11f000000"-->"0x40000000"
+
+    - when: test == 'libvirt.acceptance.general' and arch == 'ppc64le' and product == 'RHEL' and (major >= 7 and minor >= 5)
+      qemu-rhel: 'true'
+
+    - when: test == 'libvirt.acceptance.general' and arch == 'ppc64le' and product == 'RHEL-ALT'
+      skip-scratch: 'FALSE'
+      only:
+          !include-raw:
+              - only/acceptance-minimum.only
+              - only/acceptance-common.only
+              - only/acceptance-p9.only
+      patch: 'tp-libvirt libvirt-avocado/nodememstats.patch'
+      pr: !extend
+          - 'tp-libvirt 1020,1027,1030,1031'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/libvirt_vcpu_plug_unplug.cfg:
+              "vcpu_max_num = "4""-->"vcpu_max_num = "20""
+          tp-libvirt libvirt/tests/cfg/virsh_cmd/domain/virsh_setvcpus.cfg:
+              "setvcpus_max = "4""-->"setvcpus_max = "20""
+              "sockets='1'"-->"sockets='2'"
+              "cores= '2'"-->"cores= '10'"
+              "threads= '2'"-->"threads= '1'"
+              "setvcpus_count = "8""-->"setvcpus_count = "24""
+          tp-libvirt libvirt/tests/cfg/virsh_cmd/domain/virsh_vcpucount.cfg:
+              "vcpucount_maxvcpu = 4"-->"vcpucount_maxvcpu = 20"
+          tp-libvirt libvirt/tests/cfg/virsh_cmd/host/virsh_nodecpustats.cfg:
+              "inner_test_iterations = 5"-->"inner_test_iterations = 2"
+          tp-libvirt libvirt/tests/cfg/virsh_cmd/domain/virsh_setmem.cfg:
+              "setmem_quiesce_delay = 3"-->"setmem_quiesce_delay = 10"
+
+    - when: test == 'libvirt.acceptance.general' and arch in ['aarch64', 's390x']
+      only:
+          !include-raw:
+              - only/acceptance-minimum.only
+              - only/acceptance-common.only
+      replaces: |
+          avocado-vt shared/cfg/base.cfg:
+              "take_regular_screendumps = yes"-->"take_regular_screendumps = no"
+
+    - when: test == 'libvirt.acceptance.general' and arch == 'aarch64'
+      qemu-rhel: 'true'
+      qemu-rhev: 'true'
+      trigger-package: 'libvirt'
+      trigger-by-tree: true
+      install-pkgs: !extend
+          - AAVMF
+      pr: !extend
+          - 'avocado-vt 1272'
+          - 'tp-libvirt 1379,1382,1383,1384'
+
+    - when: test == 'libvirt.acceptance.general' and arch == 's390x'
+      min_mem: '2000'
+      min_disk: '10000'
+      qemu-rhel: 'true'
+      qemu-rhev: 'false'
+      trigger-package: 'libvirt'
+      trigger-by-tree: true
+      patch: 'avocado libvirt-avocado/cpu-online-list-s390x.patch'
+      domxml:
+          !include-raw:
+              - xml/domain-s390x-virtio.xml
+
+    - when: test == 'libvirt.acceptance.migration' and arch == 'x86_64'
+      trigger-by-tree: true
+      location: 'CN'
+      only:
+          !include-raw:
+              - only/acceptance-migration-x86_64.only
+      install-pkgs: !extend
+          - virt-viewer
+          - glusterfs
+          - glusterfs-server
+      resource-host: true
+      resource-img-dest: '/var/lib/libvirt/images-remote-guest/jeos-27-x86_64.qcow2'
+      resource-guest-name: 'avocado-vt-remote-vm1'
+      pr: !extend
+          - 'avocado-vt 847,977,1146'
+          - 'tp-libvirt 977,1395'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/migration/migrate_vm.cfg:
+              "ENTER.YOUR.CLIENT_NETWORK_INTERFACE_NAME"-->"$WORKER_IFACE"
+              "ENTER.YOUR.SERVER_NETWORK_INTERFACE_NAME"-->"$RESOURCE_IFACE"
+              "ENTER.YOUR.SERVER_CN"-->"$RESOURCE_HOSTNAME"
+              "ENTER.YOUR.CLIENT_CN"-->"$WORKER_HOSTNAME"
+              "ipv6_addr_src = "3cde::101""-->"ipv6_addr_src = "$WORKER_IPV6ADDR""
+              "ipv6_addr_des = "3cde::102""-->"ipv6_addr_des = "$RESOURCE_IPV6ADDR""
+              "ipv6_addr_src = "3def::101""-->"ipv6_addr_src = "$WORKER_IPV6ADDR""
+              "ipv6_addr_des = "3def::102""-->"ipv6_addr_des = "$RESOURCE_IPV6ADDR""
+          avocado-vt shared/cfg/base.cfg:
+              "ENTER.YOUR.DEST.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "PASSWORD.DEST.EXAMPLE"-->"redhat"
+              "ENTER.YOUR.SOURCE.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "PASSWORD.SOURCE.EXAMPLE"-->"redhat"
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "ENTER.YOUR.LOCAL.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "SHARED_IMAGE.EXAMPLE"-->""
+              "local_pwd = """-->"local_pwd = redhat"
+              "migrate_vms = """-->"migrate_vms = "avocado-vt-vm1""
+              "# nfs_mount_dir: the local dir your want to mount to"-->"nfs_mount_dir = "/var/lib/libvirt/migrate""
+              "# nfs_mount_options: mount options"-->"nfs_mount_options = "rw""
+              "# nfs_mount_src: the nfs resource you use"-->"nfs_mount_src = "/var/lib/avocado/data/avocado-vt/images""
+              "# export_ip: optional."-->"export_ip = "*""
+              "# export_options: optional."-->"export_options = "rw,no_root_squash""
+              "# export_dir: the dir export to users"-->"export_dir = "/var/lib/avocado/data/avocado-vt/images""
+          tp-libvirt libvirt/tests/cfg/migration/migrate_options_shared.cfg:
+              "ENTER.YOUR.SERVER_CN"-->"$RESOURCE_HOSTNAME"
+              "ENTER.YOUR.CLIENT_CN"-->"$WORKER_HOSTNAME"
+      qemu-rhel: 'true'
+      retain-fail: 'enable'
+      unstable-thld: 0
+      failure-thld: 5
+      enable-report: 'true'
+      reserve-days: 2
+
+    - when: test == 'libvirt.acceptance.migration' and arch == 'x86_64' and major == 7
+      domxml:
+          !include-raw:
+              - xml/domain-migration-x86_64.xml
+
+    - when: test == 'libvirt.acceptance.migration' and arch == 'x86_64' and major == 6
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/migration/migrate_vm.cfg:
+              "ENTER.YOUR.CLIENT_NETWORK_INTERFACE_NAME"-->"$WORKER_IFACE"
+              "ENTER.YOUR.SERVER_NETWORK_INTERFACE_NAME"-->"$RESOURCE_IFACE"
+              "ENTER.YOUR.SERVER_CN"-->"$RESOURCE_HOSTNAME"
+              "ENTER.YOUR.CLIENT_CN"-->"$WORKER_HOSTNAME"
+              "ipv6_addr_src = "3cde::101""-->"ipv6_addr_src = "$WORKER_IPV6ADDR""
+              "ipv6_addr_des = "3cde::102""-->"ipv6_addr_des = "$RESOURCE_IPV6ADDR""
+              "ipv6_addr_src = "3def::101""-->"ipv6_addr_src = "$WORKER_IPV6ADDR""
+              "ipv6_addr_des = "3def::102""-->"ipv6_addr_des = "$RESOURCE_IPV6ADDR""
+          avocado-vt shared/cfg/base.cfg:
+              "ENTER.YOUR.DEST.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "PASSWORD.DEST.EXAMPLE"-->"redhat"
+              "ENTER.YOUR.SOURCE.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "PASSWORD.SOURCE.EXAMPLE"-->"redhat"
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "ENTER.YOUR.LOCAL.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "SHARED_IMAGE.EXAMPLE"-->""
+              "local_pwd = """-->"local_pwd = redhat"
+              "migrate_vms = """-->"migrate_vms = "avocado-vt-vm1""
+              "# nfs_mount_dir: the local dir your want to mount to"-->"nfs_mount_dir = "/var/lib/libvirt/migrate""
+              "# nfs_mount_options: mount options"-->"nfs_mount_options = "rw""
+              "# nfs_mount_src: the nfs resource you use"-->"nfs_mount_src = "/usr/share/avocado/data/avocado-vt/images""
+              "# export_ip: optional."-->"export_ip = "*""
+              "# export_options: optional."-->"export_options = "rw,no_root_squash""
+              "# export_dir: the dir export to users"-->"export_dir = "/usr/share/avocado/data/avocado-vt/images""
+
+    - when: test == 'libvirt.acceptance.ovmf' and arch == 'x86_64'
+      trigger-by-tree: true
+      skip-scratch: 'FALSE'
+      only:
+          virsh.boot.ma_q35.by_ovmf.positive_test.secure_boot_enabled
+      install-pkgs: !extend
+          - OVMF
+      pr: !extend
+          - 'tp-libvirt 1234'
+          - 'avocado-vt 1272'
+      img-url: 'http://download.libvirt.redhat.com/libvirt-CI-resources/RHEL-7.4-x86_64-release-ovmf.qcow2'
+      qemu-rhel: 'false'
+      qemu-rhev: 'true'
+      vm-type: 'q35'
+      retain-fail: 'enable'
+      unstable-thld: 0
+      failure-thld: 5
+      enable-report: 'true'
+
+    #-------------------------------------------------
+    # libvirt special case parameters part:
+    #     Define libvirt special case specific parameters
+    #-------------------------------------------------
+    - when: component == 'libvirt' and test_type == 'special'
+      quiet-period: 180
+      only:
+          !include-raw:
+              - only/acceptance-minimum.only
+              - only/acceptance-common.only
+              - only/acceptance-x86_64.only
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/numa/guest_numa.cfg:
+              "memory_nodeset = "0-1""-->"memory_nodeset = "0""
+              "memnode_nodeset_0 = 1"-->"memnode_nodeset_0 = 0"
+              "page_nodenum_0 = "1""-->"page_nodenum_0 = "0""
+              "host-nodes=0-1"-->"host-nodes=0"
+              "host-nodes=1"-->"host-nodes=0"
+      install-pkgs: !extend
+          - glusterfs
+          - glusterfs-server
+          - mlocate
+
+    - when: test == 'libvirt.special.session_mode'
+      connect-uri: 'qemu:///session'
+
+    - when: test == 'libvirt.special.non_root_user'
+      connect-uri: 'qemu:///system'
+
+    - when: test == 'libvirt.special.full_xml'
+      domxml:
+          !include-raw:
+              - xml/domain-x86_64-full.xml
+      netxml:
+          !include-raw:
+              - xml/domain-net-full.xml
+      ci-no: |
+          virsh.console.normal_test.acl_test.valid_domname
+          virsh.nodedev_dumpxml.positve_test.acl_test.normal_test
+          virsh.qemu_agent_command_fs
+          virsh.vol_create.positive_test.disk_pool.vol_format_linux.pool_format_none
+          virsh.domxml_to_native.expected_option
+          virsh.dompmsuspend.positive_test.non_acl.disk
+          virsh.domblkerror.undefinded_error
+
+    - when: test == 'libvirt.special.minimal_xml'
+      domxml:
+          !include-raw:
+              - xml/domain-x86_64-minimal.xml
+
+    #-------------------------------------------------
+    # libvirt upstream acceptance parameters part:
+    #     Define libvirt acceptance specific parameters
+    #-------------------------------------------------
+    #
+    - when: test == 'libvirt-upstream.acceptance'
+      test-objects: !extend
+          - "test_object:libvirt source:git arch:{arch}"
+      unstable-thld: 0
+      failure-thld: 5
+
+    - when: test == 'libvirt-upstream.acceptance' and arch == 'x86_64'
+      only:
+          !include-raw:
+              - only/acceptance-minimum.only
+              - only/acceptance-common.only
+              - only/acceptance-x86_64.only
+
+    - when: test == 'libvirt-upstream.unit_test'
+      test-framework: 'libvirt-unit-test'
+      unstable-thld: 0
+      failure-thld: 0
+
+    #-------------------------------------------------
+    # libvirt function parameters part:
+    #     Define libvirt function specific parameters
+    #-------------------------------------------------
+    - when: component == 'libvirt' and test_type == 'function'
+      quiet-period: 180
+      enable-report: 'true'
+      fail-priority: 'major'
+      skip-priority: 'normal'
+
+    - when: test == 'libvirt.function.cpu'
+      only: |
+          libvirt_vcpu_plug_unplug
+          virsh.cpu_baseline
+          virsh.cpu_compare
+          virsh.cpu_stats
+          virsh.cpu_models
+          virsh.setvcpus
+          virsh.vcpupin
+          virsh.vcpucount
+          virsh.vcpuinfo
+          virsh.maxvcpus
+          virsh.emulatorpin
+          virsh.schedinfo_qemu_posix
+          virsh.capabilities
+          timer_management
+          libvirt_qemu_cmdline.hypervisor_features
+          virsh.edit..edit_vcpu
+          vcpu_hotpluggable
+      ci-no: |
+          virsh.setvcpus.normal_test.remote
+          virsh.maxvcpus.connect_to_remote
+          virsh.cpu_models.positive_test.remote_host
+          virsh.vcpuinfo.normal_test.remote
+      install-pkgs: !extend
+          - 'libcgroup-tools'
+      pr: !extend
+          - 'tp-libvirt 1239,1140,1127,1321,1345,1405'
+      additional-vms: 'vm2'
+      feature: 'CPU Management'
+
+    - when: test == 'libvirt.function.mem'
+      only: |
+          virsh.node_memtune
+          virsh.memtune
+          virsh.setmem
+          virsh.setmaxmem
+          libvirt_qemu_cmdline.memory_backing
+          libvirt_mem
+          virsh.edit..edit_memory
+      pr: !extend
+          - 'tp-libvirt 1342'
+      feature: 'Memory management'
+
+    - when: test == 'libvirt.function.mem' and arch == 'ppc64le' and product == 'RHEL'
+    # Reason for configuration replacements:
+    # 1) Due to bug 1249006 , some memory values specified will be changed to
+    #    align with 256M, which will make the automatic script fail against the
+    #    value assertion.
+    # 2) The page size on ppc64le is 64K by default instead of 4K on x86_64.
+    # 3) The hugepage size on ppc64le is 16M instead of 2M on x86_64.
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/libvirt_mem.cfg:
+              "2560000"-->"2097152"
+              "1024000"-->"1048576"
+              "512000"-->"524288"
+              "512001"-->"524289"
+              "1536000"-->"1048576"
+              "2609152"-->"2097152"
+              "page_size = 4"-->"page_size = 64"
+              "2048"-->"16384"
+              "0x11f000000"-->"0x40000000"
+
+    - when: test == 'libvirt.function.console'
+      only: |
+          virsh.attach_device.character..normal_test..name_ref.file_argument.domain_argument
+          virsh.attach_device.character..error_test..file_argument.domain_positional
+          virsh.attach_device.controller..normal_test..uuid_ref.file_positional.domain_argument
+          virsh.attach_device.controller..error_test..file_positional.domain_positional
+          channel.functional
+          controller.functional
+          serial.functional
+          multiple_controller_ppc
+          virsh.console
+      pr: !extend
+          - 'tp-libvirt 1162,1196,1241,1279,1462'
+          - 'avocado-vt 1450'
+      feature: 'console and serial devices'
+
+    - when: test == 'libvirt.function.block_copy_shallow'
+      only: |
+          virsh.blockcopy.positive_test..shallow
+          virsh.blockcopy.negative_test
+      feature: 'Snapshot'
+      timeout: '2400'
+
+    - when: test == 'libvirt.function.block_copy_no_shallow'
+      only: |
+          virsh.blockcopy.positive_test..no_shallow
+      feature: 'Snapshot'
+      timeout: '2400'
+
+    - when: test == 'libvirt.function.block_job_commit_pull'
+      only: |
+          virsh.blockcommit
+          virsh.blockjob
+          virsh.blockpull
+          virsh.blockresize
+      feature: 'Snapshot'
+
+
+    # gluster server not supported on ppc yet
+    - when: test == 'libvirt.function.block_job_commit_pull' and arch == 'x86_64'
+      install-pkgs: !extend
+          - glusterfs
+          - glusterfs-server
+
+    - when: test == 'libvirt.function.numa'
+      only: |
+          numa_capabilities
+          numad_vcpupin
+          numa_memory_migrate
+          numa_memory
+          numa_preferred_undefine
+          numatune
+          virsh.nodeinfo
+          virsh.freepages
+          guest_numa
+      pr: !extend
+          - 'tp-libvirt 1150,1294'
+          - 'avocado-vt 1194,1289'
+      need_numa: true
+      feature: 'NUMA'
+
+    - when: test == 'libvirt.function.numa' and arch == 'x86_64' and major == 7
+      need_1g_hugepage: true
+
+    - when: test == 'libvirt.function.numa' and arch == 'ppc64le'
+      patch: 'tp-libvirt libvirt-avocado/guest_numa_ppc.patch'
+
+    - when: test == 'libvirt.function.snapshot'
+      only: |
+          virsh.snapshot
+          virsh.snapshot_create_as
+          virsh.snapshot_disk
+          virsh.snapshot_dumpxml
+          virsh.snapshot_edit
+          virsh.snapshot_list
+          virsh.snapshot_par_cur
+      feature: 'Snapshot'
+
+    - when: test == 'libvirt.function.snapshot' and arch == 'x86_64'
+      install-pkgs: !extend
+          - glusterfs
+          - glusterfs-server
+
+    - when: test == 'libvirt.function.virtual_disk'
+      only: |
+          virtual_disks
+          startup_policy.startupPolicy
+      additional-vms: 'vm1'
+      feature: 'Virtual disks'
+      pr: !extend
+          - 'tp-libvirt 1119,1139,1149'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/virtual_disks/virtual_disks_ceph.cfg:
+              "mon_host = "EXAMPLE_MON_HOST""-->"mon_host = "10.73.75.154""
+              "disk_source_host = "EXAMPLE_HOSTS""-->"disk_source_host = "10.73.75.154""
+              "disk_source_port = "EXAMPLE_PORTS""-->"disk_source_port = "6789""
+              "disk_source_name = "EXAMPLE_SOURCE_NAME""-->"disk_source_name = "avocado-vt-pool/rbd.img""
+              "disk_source_name = "EXAMPLE_ATTACH_NAME""-->"disk_source_name = "avocado-vt-pool/attach.img""
+              "mon_host = "EXAMPLE_MON_HOST_AUTHX""-->"mon_host = "10.73.75.216""
+              "disk_source_host = "EXAMPLE_HOSTS_AUTHX""-->"disk_source_host = "10.73.75.216""
+              "client_name = "EXAMPLE_CLIENT_NAME""-->"client_name = "client.admin""
+              "client_key = "EXAMPLE_CLIENT_KEY""-->"client_key = "AQCS6yNYGiqsDRAACb3zHBaIujuFUY1jKprFGw==""
+              "auth_key = "EXAMPLE_AUTH_KEY""-->"auth_key = ${{{{client_key}}}}"
+              "secret_usage = "EXAMPLE_SECRET_USAGE""-->"secret_usage = "client.libvirt secret""
+              "auth_user = "EXAMPLE_AUTH_USER""-->"auth_user = "admin""
+          tp-libvirt libvirt/tests/cfg/virtual_disks/virtual_disks_luks.cfg:
+              "ceph_host_ip = "EXAMPLE_HOSTS_AUTHX""-->"ceph_host_ip = "10.73.75.216""
+              "ceph_mon_ip = "EXAMPLE_MON_HOST_AUTHX""-->"ceph_mon_ip = "10.73.75.216""
+              "ceph_client_name = "EXAMPLE_CLIENT_NAME""-->"ceph_client_name = "client.admin""
+              "ceph_client_key = "EXAMPLE_CLIENT_KEY""-->"ceph_client_key = "AQCS6yNYGiqsDRAACb3zHBaIujuFUY1jKprFGw==""
+              "ceph_auth_user = "EXAMPLE_AUTH_USER""-->"ceph_auth_user = "admin""
+              "ceph_auth_key = "EXAMPLE_AUTH_KEY""-->"ceph_auth_key = "AQCS6yNYGiqsDRAACb3zHBaIujuFUY1jKprFGw==""
+              "ceph_host_ip = "EXAMPLE_HOSTS""-->"ceph_host_ip = "10.73.75.154""
+              "ceph_mon_ip = "EXAMPLE_MON_HOST""-->"ceph_mon_ip = "10.73.75.154""
+
+    # gluster server not supported on ppc yet
+    - when: test == 'libvirt.function.virtual_disk' and arch == 'x86_64'
+      location: 'CN'
+      install-pkgs: !extend
+          - glusterfs
+          - glusterfs-server
+
+    - when: test == 'libvirt.function.hooks'
+      only: |
+          libvirt_hooks
+      pr: !extend
+          - 'tp-libvirt 662'
+      feature: 'hooks'
+
+    - when: test == 'libvirt.function.storage'
+      only: |
+          virsh.find_storage_pool_sources_as
+          virsh.find_storage_pool_sources
+          virsh.pool_acl
+          virsh.pool_create_as
+          virsh.pool_create
+          virsh.pool_edit
+          virsh.pool
+          virsh.vol_clone_wipe
+          virsh.vol_create_from
+          virsh.vol_create
+          virsh.vol_download_upload
+          virsh.vol_resize
+          virsh.volume_application
+          virsh.volume
+          virsh.pool_autostart
+      pr: !extend
+          - 'tp-libvirt 477,1166,1181,1189'
+          - 'avocado-vt 1149,1150'
+      install-pkgs: !extend
+          - 'scrub'
+      feature: 'Storage'
+
+    - when: test == 'libvirt.function.storage' and arch == 'x86_64'
+      install-pkgs: !extend
+          - glusterfs
+          - glusterfs-server
+          - dosfstools
+
+    - when: test == 'libvirt.function.attach_detach_media'
+      only: |
+          virsh.change_media_matrix
+          virsh.change_media
+          virsh.update_device_matrix
+          virsh.update_device
+      pr: !extend
+          - 'tp-libvirt 664'
+      feature: 'Virtual disks'
+
+    - when: test == 'libvirt.function.attach_detach_disk'
+      only: |
+          virsh.attach_device.block..normal_test..name_ref.file_positional.domain_positional
+          virsh.attach_device.block..error_test..file_positional.domain_argument
+          virsh.attach_device.multiple..normal_test..id_ref.file_argument.domain_positional
+          virsh.attach_device.multiple..error_test..file_argument.domain_argument
+          virsh.attach_device_matrix
+          virsh.detach_device
+          virsh.attach_detach_disk
+          virsh.attach_detach_disk_matrix
+      pr: !extend
+          - 'tp-libvirt 664,1462'
+          - 'avocado-vt 1450'
+      feature: 'Virtual disks'
+
+    - when: test == 'libvirt.function.attach_detach_interface'
+      only: |
+          virsh.attach_detach_interface
+          virsh.attach_detach_interface_matrix
+      pr: !extend
+          - 'tp-libvirt 664'
+      feature: 'Virtual networks'
+
+    - when: test == 'libvirt.function.attach_detach_media' and arch == 'ppc64le'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/virsh_cmd/domain/virsh_update_device_matrix.cfg:
+              "updatedevice_target_bus = "ide""-->"updatedevice_target_bus = "scsi""
+              "updatedevice_target_dev = "hdc""-->"updatedevice_target_dev = "sdc""
+          tp-libvirt libvirt/tests/cfg/virsh_cmd/domain/virsh_change_media_matrix.cfg:
+              "change_media_target_device = "hdc""-->"change_media_target_device = "sdc""
+          tp-libvirt libvirt/tests/src/virsh_cmd/domain/virsh_change_media_matrix.py:
+              "ide"-->"scsi"
+          tp-libvirt libvirt/tests/src/virsh_cmd/domain/virsh_update_device.py:
+              " "ide""-->" "scsi""
+              "hdc"-->"sdc"
+
+    - when: test == 'libvirt.function.attach_detach_disk' and arch == 'ppc64le'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/virsh_cmd/domain/virsh_detach_device.cfg:
+              "dt_device_bus_type = ide"-->"dt_device_bus_type = scsi"
+              "dt_device_device_target = hdc"-->"dt_device_device_target = sdc"
+          tp-libvirt libvirt/tests/cfg/virsh_cmd/domain/virsh_attach_detach_disk.cfg:
+              "ide"-->"scsi"
+              "hdc"-->"sdc"
+
+    - when: test == 'libvirt.function.cpu' and arch == 'ppc64le' and product == 'RHEL'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/virsh_cmd/domain/virsh_setvcpus.cfg:
+              "setvcpus_current = "1""-->"setvcpus_current = "2""
+              "setvcpus_count = "1""-->"setvcpus_count = "2""
+
+    - when: test == 'libvirt.function.remote_access'
+      only: |
+          virsh.remote_with_tls
+          virsh.remote_with_tcp
+          virsh.remote_with_ssh
+          virsh.remote_with_unix
+          virsh.list.special_test.remote
+          virsh.start.status_error_no.remote_start
+          virsh.domid.normal_test.remote
+          virsh.dominfo.normal_test.remote
+          virsh.dommemstat.normal_test.remote_option
+          virsh.shutdown.normal_test.remote_option
+          virsh.destroy.normal_test..remote
+          virsh.undefine.normal_test.remote
+          virsh.reboot.normal_test.remote
+          virsh.setvcpus.normal_test.remote
+          virsh.maxvcpus.connect_to_remote
+          virsh.vncdisplay.normal_test.remote
+          virsh.domstate.normal_test.remote
+          virsh.uri.no_option.connect_to_remote
+          virsh.domcapabilities.positive_test.remote_host
+          virsh.cpu_models.positive_test.remote_host
+          virsh.vcpuinfo.normal_test.remote
+      pr: !extend
+          - 'tp-libvirt 1393'
+          - 'avocado-vt 1329'
+      resource-host: true
+      resource-img-dest: '/var/lib/avocado/data/avocado-vt/images/jeos-27-64.qcow2'
+      resource-guest-name: 'avocado-vt-vm1'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/remote_access/remote_with_ssh.cfg:
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "ENTER.YOUR.REMOTE.PASSWORD"-->"redhat"
+              "ENTER.YOUR.REMOTE.USER"-->"root"
+              "ENTER.YOUR.CLIENT.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "ENTER.YOUR.CLIENT.USER"-->"root"
+              "ENTER.YOUR.CLIENT.PASSWORD"-->"redhat"
+              "ENTER.YOUR.REMOTE.XEN.EXAMPLE.COM"-->"10.73.3.21"
+              "ENTER.YOUR.REMOTE.XEN.PASSWORD"-->"123qweP"
+              "ENTER.YOUR.REMOTE.ESX.EXAMPLE.COM"-->"10.73.3.19"
+              "ENTER.YOUR.REMOTE.ESX.PASSWORD"-->"123qweP"
+              "ENTER.YOUR.SERVER.IFACE.NAME"-->"$RESOURCE_IFACE"
+              "ENTER.YOUR.CLIENT.IFACE.NAME"-->"$WORKER_IFACE"
+              "ENTER.YOUR.IPv6.SOURCE"-->"$WORKER_IPV6ADDR"
+              "ENTER.YOUR.IPv6.TRAGET"-->"$RESOURCE_IPV6ADDR"
+          tp-libvirt libvirt/tests/cfg/remote_access/remote_with_tcp.cfg:
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "ENTER.YOUR.REMOTE.PASSWORD"-->"redhat"
+              "ENTER.YOUR.REMOTE.USER"-->"root"
+              "ENTER.YOUR.SERVER.IFACE.NAME"-->"$RESOURCE_IFACE"
+              "ENTER.YOUR.CLIENT.IFACE.NAME"-->"$WORKER_IFACE"
+              "ENTER.YOUR.IPv6.SOURCE"-->"$WORKER_IPV6ADDR"
+              "ENTER.YOUR.IPv6.TRAGET"-->"$RESOURCE_IPV6ADDR"
+          tp-libvirt libvirt/tests/cfg/remote_access/remote_with_tls.cfg:
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "ENTER.YOUR.REMOTE.PASSWORD"-->"redhat"
+              "ENTER.YOUR.REMOTE.USER"-->"root"
+              "ENTER.YOUR.CLIENT.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "ENTER.YOUR.CLIENT.USER"-->"root"
+              "ENTER.YOUR.CLIENT.PASSWORD"-->"redhat"
+              "ENTER.YOUR.SERVER.HOSTNAME"-->"$RESOURCE_HOSTNAME"
+              "ENTER.YOUR.CLIENT.HOSTNAME"-->"$WORKER_HOSTNAME"
+              "ENTER.YOUR.IPv6.SOURCE"-->"$WORKER_IPV6ADDR"
+              "ENTER.YOUR.IPv6.TRAGET"-->"$RESOURCE_IPV6ADDR"
+              "ENTER.YOUR.SERVER.IFACE.NAME"-->"$RESOURCE_IFACE"
+              "ENTER.YOUR.CLIENT.IFACE.NAME"-->"$WORKER_IFACE"
+          tp-libvirt libvirt/tests/cfg/remote_access/remote_with_unix.cfg:
+              "ENTER.YOUR.CLIENT.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "ENTER.YOUR.CLIENT.USER"-->"root"
+              "ENTER.YOUR.CLIENT.PASSWORD"-->"redhat"
+          tp-libvirt libvirt/tests/cfg/virsh_cmd/monitor/virsh_list.cfg:
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "ENTER.YOUR.REMOTE.USER"-->"root"
+              "ENTER.YOUR.REMOTE.PASSWORD"-->"redhat"
+              "ENTER.YOUR.LOCAL.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "ENTER.YOUR.LOCAL.USER"-->"root"
+              "ENTER.YOUR.LOCAL.PASSWORD"-->"redhat"
+          avocado-vt shared/cfg/base.cfg:
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "ENTER.YOUR.LOCAL.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "local_pwd = """-->"local_pwd = redhat"
+              "ENTER.YOUR.DEST.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "PASSWORD.DEST.EXAMPLE"-->"redhat"
+      feature: 'Remote access'
+
+    - when: test == 'libvirt.function.remote_access' and arch == 'x86_64' and major == 7
+      domxml:
+          !include-raw:
+              - xml/domain-migration-x86_64.xml
+
+    - when: test == 'libvirt.function.remote_access' and arch == 'ppc64le' and product == 'RHEL-ALT'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/remote_access/remote_with_ssh.cfg:
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"10.0.1.32"
+              "ENTER.YOUR.REMOTE.PASSWORD"-->"redhat"
+              "ENTER.YOUR.REMOTE.USER"-->"root"
+              "ENTER.YOUR.CLIENT.EXAMPLE.COM"-->"10.0.1.28"
+              "ENTER.YOUR.CLIENT.USER"-->"root"
+              "ENTER.YOUR.CLIENT.PASSWORD"-->"redhat"
+              "ENTER.YOUR.REMOTE.XEN.EXAMPLE.COM"-->"10.73.3.21"
+              "ENTER.YOUR.REMOTE.XEN.PASSWORD"-->"123qweP"
+              "ENTER.YOUR.REMOTE.ESX.EXAMPLE.COM"-->"10.73.3.19"
+              "ENTER.YOUR.REMOTE.ESX.PASSWORD"-->"123qweP"
+              "ENTER.YOUR.SERVER.IFACE.NAME"-->"enP1p14s0f0"
+              "ENTER.YOUR.CLIENT.IFACE.NAME"-->"enP48p1s0f0"
+              "ENTER.YOUR.IPv6.SOURCE"-->"fc00:1::9abe:94ff:fe07:411c"
+              "ENTER.YOUR.IPv6.TRAGET"-->"fc00:1::9abe:94ff:fe07:3a54"
+          tp-libvirt libvirt/tests/cfg/remote_access/remote_with_tcp.cfg:
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"10.0.1.32"
+              "ENTER.YOUR.REMOTE.PASSWORD"-->"redhat"
+              "ENTER.YOUR.REMOTE.USER"-->"root"
+              "ENTER.YOUR.SERVER.IFACE.NAME"-->"enP1p14s0f0"
+              "ENTER.YOUR.CLIENT.IFACE.NAME"-->"enP48p1s0f0"
+              "ENTER.YOUR.IPv6.SOURCE"-->"fc00:1::9abe:94ff:fe07:411c"
+              "ENTER.YOUR.IPv6.TRAGET"-->"fc00:1::9abe:94ff:fe07:3a54"
+          tp-libvirt libvirt/tests/cfg/remote_access/remote_with_tls.cfg:
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"10.0.1.32"
+              "ENTER.YOUR.REMOTE.PASSWORD"-->"redhat"
+              "ENTER.YOUR.REMOTE.USER"-->"root"
+              "ENTER.YOUR.CLIENT.EXAMPLE.COM"-->"10.0.1.28"
+              "ENTER.YOUR.CLIENT.USER"-->"root"
+              "ENTER.YOUR.CLIENT.PASSWORD"-->"redhat"
+              "ENTER.YOUR.SERVER.HOSTNAME"-->"c155f2-u31"
+              "ENTER.YOUR.CLIENT.HOSTNAME"-->"c155f2-u27"
+              "ENTER.YOUR.IPv6.SOURCE"-->"fc00:1::9abe:94ff:fe07:411c"
+              "ENTER.YOUR.IPv6.TRAGET"-->"fc00:1::9abe:94ff:fe07:3a54"
+              "ENTER.YOUR.SERVER.IFACE.NAME"-->"enP1p14s0f0"
+              "ENTER.YOUR.CLIENT.IFACE.NAME"-->"enP48p1s0f0"
+          tp-libvirt libvirt/tests/cfg/remote_access/remote_with_unix.cfg:
+              "ENTER.YOUR.CLIENT.EXAMPLE.COM"-->"10.0.1.28"
+              "ENTER.YOUR.CLIENT.USER"-->"root"
+              "ENTER.YOUR.CLIENT.PASSWORD"-->"redhat"
+          tp-libvirt libvirt/tests/cfg/virsh_cmd/monitor/virsh_list.cfg:
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"10.0.1.32"
+              "ENTER.YOUR.REMOTE.USER"-->"root"
+              "ENTER.YOUR.REMOTE.PASSWORD"-->"redhat"
+              "ENTER.YOUR.LOCAL.EXAMPLE.COM"-->"10.0.1.28"
+              "ENTER.YOUR.LOCAL.USER"-->"root"
+              "ENTER.YOUR.LOCAL.PASSWORD"-->"redhat"
+          tp-libvirt libvirt/tests/cfg/virsh_cmd/domain/virsh_setvcpus.cfg:
+              "setvcpus_max = "4""-->"setvcpus_max = "20""
+              "sockets='1'"-->"sockets='2'"
+              "cores= '2'"-->"cores= '10'"
+              "threads= '2'"-->"threads= '1'"
+              "setvcpus_count = "8""-->"setvcpus_count = "24""
+          avocado-vt shared/cfg/base.cfg:
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"10.0.1.32"
+              "ENTER.YOUR.LOCAL.EXAMPLE.COM"-->"10.0.1.28"
+              "local_pwd = """-->"local_pwd = redhat"
+              "ENTER.YOUR.DEST.EXAMPLE.COM"-->"10.0.1.32"
+              "PASSWORD.DEST.EXAMPLE"-->"redhat"
+
+    - when: test == 'libvirt.function.migration'
+      # TODO: Add ppc failure cases to blacklist
+      only:
+          !include-raw:
+            - only/migration-minimum.only
+            - only/migration-extra.only
+      resource-host: true
+      resource-img-dest: '/var/lib/libvirt/images-remote-guest/jeos-27-x86_64.qcow2'
+      resource-guest-name: 'avocado-vt-remote-vm1'
+      pr: !extend
+          - 'tp-libvirt 1187,977,1275'
+          - 'avocado-vt 1146'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/migration/migrate_vm.cfg:
+              "ENTER.YOUR.CLIENT_NETWORK_INTERFACE_NAME"-->"$WORKER_IFACE"
+              "ENTER.YOUR.SERVER_NETWORK_INTERFACE_NAME"-->"$RESOURCE_IFACE"
+              "ENTER.YOUR.SERVER_CN"-->"$RESOURCE_HOSTNAME"
+              "ENTER.YOUR.CLIENT_CN"-->"$WORKER_HOSTNAME"
+              "ipv6_addr_src = "3cde::101""-->"ipv6_addr_src = "$WORKER_IPV6ADDR""
+              "ipv6_addr_des = "3cde::102""-->"ipv6_addr_des = "$RESOURCE_IPV6ADDR""
+              "ipv6_addr_src = "3def::101""-->"ipv6_addr_src = "$WORKER_IPV6ADDR""
+              "ipv6_addr_des = "3def::102""-->"ipv6_addr_des = "$RESOURCE_IPV6ADDR""
+          tp-libvirt libvirt/tests/cfg/migration/migrate_options_shared.cfg:
+              "ENTER.YOUR.SERVER_CN"-->"$RESOURCE_HOSTNAME"
+              "ENTER.YOUR.CLIENT_CN"-->"$WORKER_HOSTNAME"
+          avocado-vt shared/cfg/base.cfg:
+              "ENTER.YOUR.DEST.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "PASSWORD.DEST.EXAMPLE"-->"redhat"
+              "ENTER.YOUR.SOURCE.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "PASSWORD.SOURCE.EXAMPLE"-->"redhat"
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "ENTER.YOUR.LOCAL.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "SHARED_IMAGE.EXAMPLE"-->""
+              "local_pwd = """-->"local_pwd = redhat"
+              "migrate_vms = """-->"migrate_vms = "avocado-vt-vm1""
+              "# nfs_mount_dir: the local dir your want to mount to"-->"nfs_mount_dir = "/var/lib/libvirt/migrate""
+              "# nfs_mount_options: mount options"-->"nfs_mount_options = "rw""
+              "# nfs_mount_src: the nfs resource you use"-->"nfs_mount_src = "/var/lib/avocado/data/avocado-vt/images""
+              "# export_ip: optional."-->"export_ip = "*""
+              "# export_options: optional."-->"export_options = "rw,no_root_squash""
+              "# export_dir: the dir export to users"-->"export_dir = "/var/lib/avocado/data/avocado-vt/images""
+      feature: 'Migration'
+
+    - when: test == 'libvirt.function.migration' and arch == 'x86_64'
+      location: 'US'
+      install-pkgs: !extend
+          - virt-viewer
+          - glusterfs
+          - glusterfs-server
+
+    - when: test == 'libvirt.function.migration' and arch == 'x86_64' and major == 7
+      domxml:
+          !include-raw:
+            - xml/domain-migration-x86_64.xml
+
+    - when: test == 'libvirt.function.migration' and arch == 'x86_64' and major == 6
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/migration/migrate_vm.cfg:
+              "ENTER.YOUR.CLIENT_NETWORK_INTERFACE_NAME"-->"$WORKER_IFACE"
+              "ENTER.YOUR.SERVER_NETWORK_INTERFACE_NAME"-->"$RESOURCE_IFACE"
+              "ENTER.YOUR.SERVER_CN"-->"$RESOURCE_HOSTNAME"
+              "ENTER.YOUR.CLIENT_CN"-->"$WORKER_HOSTNAME"
+              "ipv6_addr_src = "3cde::101""-->"ipv6_addr_src = "$WORKER_IPV6ADDR""
+              "ipv6_addr_des = "3cde::102""-->"ipv6_addr_des = "$RESOURCE_IPV6ADDR""
+              "ipv6_addr_src = "3def::101""-->"ipv6_addr_src = "$WORKER_IPV6ADDR""
+              "ipv6_addr_des = "3def::102""-->"ipv6_addr_des = "$RESOURCE_IPV6ADDR""
+          avocado-vt shared/cfg/base.cfg:
+              "ENTER.YOUR.DEST.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "PASSWORD.DEST.EXAMPLE"-->"redhat"
+              "ENTER.YOUR.SOURCE.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "PASSWORD.SOURCE.EXAMPLE"-->"redhat"
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "ENTER.YOUR.LOCAL.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "SHARED_IMAGE.EXAMPLE"-->""
+              "local_pwd = """-->"local_pwd = redhat"
+              "migrate_vms = """-->"migrate_vms = "avocado-vt-vm1""
+              "# nfs_mount_dir: the local dir your want to mount to"-->"nfs_mount_dir = "/var/lib/libvirt/migrate""
+              "# nfs_mount_options: mount options"-->"nfs_mount_options = "rw""
+              "# nfs_mount_src: the nfs resource you use"-->"nfs_mount_src = "/usr/share/avocado/data/avocado-vt/images""
+              "# export_ip: optional."-->"export_ip = "*""
+              "# export_options: optional."-->"export_options = "rw,no_root_squash""
+              "# export_dir: the dir export to users"-->"export_dir = "/usr/share/avocado/data/avocado-vt/images""
+
+    - when: test == 'libvirt.function.migration' and arch == 'ppc64le'
+      only:
+          !include-raw:
+            - only/migration-minimum.only
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/migration/migrate_vm.cfg:
+              "ENTER.YOUR.CLIENT_NETWORK_INTERFACE_NAME"-->"$WORKER_IFACE"
+              "ENTER.YOUR.SERVER_NETWORK_INTERFACE_NAME"-->"$RESOURCE_IFACE"
+              "ENTER.YOUR.SERVER_CN"-->"$RESOURCE_HOSTNAME"
+              "ENTER.YOUR.CLIENT_CN"-->"$WORKER_HOSTNAME"
+              "ipv6_addr_src = "3cde::101""-->"ipv6_addr_src = "$WORKER_IPV6ADDR""
+              "ipv6_addr_des = "3cde::102""-->"ipv6_addr_des = "$RESOURCE_IPV6ADDR""
+              "ipv6_addr_src = "3def::101""-->"ipv6_addr_src = "$WORKER_IPV6ADDR""
+              "ipv6_addr_des = "3def::102""-->"ipv6_addr_des = "$RESOURCE_IPV6ADDR""
+          tp-libvirt libvirt/tests/cfg/migration/migrate_options_shared.cfg:
+              "ENTER.YOUR.SERVER_CN"-->"$RESOURCE_HOSTNAME"
+              "ENTER.YOUR.CLIENT_CN"-->"$WORKER_HOSTNAME"
+          avocado-vt shared/cfg/base.cfg:
+              "ENTER.YOUR.DEST.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "PASSWORD.DEST.EXAMPLE"-->"redhat"
+              "ENTER.YOUR.SOURCE.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "PASSWORD.SOURCE.EXAMPLE"-->"redhat"
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"$RESOURCE_IPV4ADDR"
+              "ENTER.YOUR.LOCAL.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "SHARED_IMAGE.EXAMPLE"-->""
+              "local_pwd = """-->"local_pwd = redhat"
+              "migrate_vms = """-->"migrate_vms = "avocado-vt-vm1""
+              "# nfs_mount_dir: the local dir your want to mount to"-->"nfs_mount_dir = "/var/lib/libvirt/migrate""
+              "# nfs_mount_options: mount options"-->"nfs_mount_options = "rw""
+              "# nfs_mount_src: the nfs resource you use"-->"nfs_mount_src = "/var/lib/avocado/data/avocado-vt/images""
+              "# export_ip: optional."-->"export_ip = "*""
+              "# export_options: optional."-->"export_options = "rw,no_root_squash""
+              "# export_dir: the dir export to users"-->"export_dir = "/var/lib/avocado/data/avocado-vt/images""
+
+    - when: test == 'libvirt.function.migration' and arch == 'ppc64le' and product == 'RHEL-ALT'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/migration/migrate_vm.cfg:
+              "ENTER.YOUR.CLIENT_NETWORK_INTERFACE_NAME"-->"enP48p1s0f0"
+              "ENTER.YOUR.SERVER_NETWORK_INTERFACE_NAME"-->"enP1p14s0f0"
+              "ENTER.YOUR.SERVER_CN"-->"c155f2-u31"
+              "ENTER.YOUR.CLIENT_CN"-->"c155f2-u27"
+              "ipv6_addr_src = "3cde::101""-->"ipv6_addr_src = "fc00:1::9abe:94ff:fe07:411c""
+              "ipv6_addr_des = "3cde::102""-->"ipv6_addr_des = "fc00:1::9abe:94ff:fe07:3a54""
+              "ipv6_addr_src = "3def::101""-->"ipv6_addr_src = "fc00:1::9abe:94ff:fe07:411c""
+              "ipv6_addr_des = "3def::102""-->"ipv6_addr_des = "fc00:1::9abe:94ff:fe07:3a54""
+          tp-libvirt libvirt/tests/cfg/migration/migrate_options_shared.cfg:
+              "ENTER.YOUR.SERVER_CN"-->"$RESOURCE_HOSTNAME"
+              "ENTER.YOUR.CLIENT_CN"-->"$WORKER_HOSTNAME"
+          avocado-vt shared/cfg/base.cfg:
+              "ENTER.YOUR.DEST.EXAMPLE.COM"-->"10.0.1.32"
+              "PASSWORD.DEST.EXAMPLE"-->"redhat"
+              "ENTER.YOUR.SOURCE.EXAMPLE.COM"-->"10.0.1.28"
+              "PASSWORD.SOURCE.EXAMPLE"-->"redhat"
+              "ENTER.YOUR.REMOTE.EXAMPLE.COM"-->"10.0.1.32"
+              "ENTER.YOUR.LOCAL.EXAMPLE.COM"-->"10.0.1.28"
+              "SHARED_IMAGE.EXAMPLE"-->""
+              "local_pwd = """-->"local_pwd = redhat"
+              "migrate_vms = """-->"migrate_vms = "avocado-vt-vm1""
+              "# nfs_mount_dir: the local dir your want to mount to"-->"nfs_mount_dir = "/var/lib/libvirt/migrate""
+              "# nfs_mount_options: mount options"-->"nfs_mount_options = "rw""
+              "# nfs_mount_src: the nfs resource you use"-->"nfs_mount_src = "/var/lib/avocado/data/avocado-vt/images""
+              "# export_ip: optional."-->"export_ip = "*""
+              "# export_options: optional."-->"export_options = "rw,no_root_squash""
+              "# export_dir: the dir export to users"-->"export_dir = "/var/lib/avocado/data/avocado-vt/images""
+
+    - when: (test == 'libvirt.function.migration' or test == 'libvirt.function.remote_access') and major >= 7 and minor >= 4
+      custom-playbook: 'prepare_krb'
+
+    - when: test == 'libvirt.function.guest_kernel_debugging'
+      only: |
+          virsh.guest_kernel_debugging
+          virsh.sendkey
+          virsh.domstate
+          virsh.dump
+          virsh.qemu_monitor_command
+          conf_file.qemu_conf
+      pr: !extend
+          - 'tp-libvirt 1110'
+      ci-no: |
+          virsh.domstate.normal_test.remote
+      feature: 'Guest kernel debugging'
+
+    - when: test == 'libvirt.function.svirt'
+      only: |
+          dac_start_destroy
+          dac_nfs_disk
+          dac_vm_per_image_start
+          dac_per_disk_hotplug
+          dac_nfs_save_restore
+          svirt_start_destroy
+          svirt_attach_disk
+          svirt_save_restore
+          svirt_virt_install
+          svirt_undefine_define
+          svirt_virt_clone
+      pr: !extend
+          - 'tp-libvirt 704,1124,1142,1144'
+      feature: 'sVirt'
+
+    - when: test == 'libvirt.function.svirt' and arch == 'x86_64'
+      install-pkgs: !extend
+          - glusterfs
+          - glusterfs-server
+
+    - when: test == 'libvirt.function.graphical_framebuffers'
+      only: |
+          graphics
+      pr: !extend
+          - 'tp-libvirt 832,1207'
+      feature: 'Graphical framebuffers'
+
+    - when: test == 'libvirt.function.managed_save'
+      only: |
+          virsh.managedsave
+      pr: !extend
+          - 'tp-libvirt 651'
+      feature: 'Managed save'
+
+    - when: test == 'libvirt.function.virtual_networks'
+      only: |
+          virtual_network
+          virsh.domiflist
+          virsh.edit..edit_iface
+          virsh.domif_setlink_getlink
+          virsh.net_define_undefine
+          virsh.net_dumpxml
+          virsh.net_create
+          virsh.net_edit
+          virsh.net_update
+          virsh.net_destroy
+          virsh.net_list
+          virsh.net_start
+          virsh.net_autostart
+          virsh.net_info
+          virsh.net_name
+          virsh.net_uuid
+          virsh.net_event
+          virsh.net_dhcp_leases
+          virsh.iface
+          virsh.iface_trans
+          virsh.iface_bridge
+          virsh.iface_edit
+      pr: !extend
+          - 'tp-libvirt 1153,1297,1322,1392'
+          - 'avocado-vt 1097,1205,1207,1261,1312,1356,1378'
+      install-pkgs: !extend
+          - lsof
+          - openvswitch
+          - mlocate
+      feature: 'Virtual networks'
+
+    - when: test == 'libvirt.function.virtual_networks' and arch == 'x86_64'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/virtual_network/iface_network.cfg:
+              "EXAMPLE_INITRD"-->"http://mirror.umd.edu/fedora/releases/23/Server/x86_64/os/images/pxeboot/initrd.img"
+              "EXAMPLE_VMLINUZ"-->"http://mirror.umd.edu/fedora/releases/23/Server/x86_64/os/images/pxeboot/vmlinuz"
+
+    - when: test == 'libvirt.function.virtual_networks' and arch == 'ppc64le'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/virtual_network/iface_network.cfg:
+              "rtl8139"-->"virtio"
+          tp-libvirt libvirt/tests/cfg/virtual_network/iface_options.cfg:
+              "rtl8139"-->"virtio"
+          tp-libvirt libvirt/tests/src/virtual_network/iface_options.py:
+              "iface_model = params.*"-->'iface_model = "virtio"'
+
+    - when: test == 'libvirt.function.virsh_domain'
+      only: |
+          virsh.autostart
+          virsh.create
+          virsh.define
+          virsh.resume
+          virsh.desc
+          virsh.domblklist
+          virsh.domblkerror
+          virsh.domcontrol
+          virsh.domdisplay
+          virsh.domid
+          virsh.domiftune
+          virsh.domjobinfo
+          virsh.domjobabort
+          virsh.domname
+          virsh.domuuid
+          virsh.domxml_from_native
+          virsh.domxml_to_native
+          virsh.blkiotune
+          virsh.blkdeviotune
+          virsh.shutdown
+          virsh.suspend
+          virsh.undefine
+          virsh.dumpxml
+          virsh.reset
+          virsh.restore
+          virsh.save
+          virsh.domcapabilities
+          virsh.metadata
+          virsh.destroy
+          virsh.save_image_define
+          virsh.save_image_edit
+          virsh.guestvcpus
+          virsh.domrename
+      pr: !extend
+          - 'tp-libvirt 1209,1388'
+      ci-no: |
+          virsh.domid.normal_test.remote
+          virsh.shutdown.normal_test.remote_option
+          virsh.destroy.normal_test..remote
+          virsh.undefine.normal_test.remote
+          virsh.domjobabort.normal_test.migrate_option
+          virsh.domcapabilities.positive_test.remote_host
+      feature: 'Virsh cmd - Confirmed'
+
+    - when: test == 'libvirt.function.libvirtd'
+      only: |
+          daemon
+          conf_file.libvirtd_conf
+          conf_file.sysconfig_libvirtd
+          virsh.start
+          libvirtd_start
+      ci-no: |
+          virsh.start.status_error_no.remote_start
+      install-pkgs: !extend
+          - 'gdb'
+      feature: 'Libvirtd'
+
+    - when: test == 'libvirt.function.guest_agent'
+      only: |
+          virsh.dompmsuspend
+          virsh.domtime
+          virsh.domfsfreeze
+          virsh.domfsfreeze_domfsthaw
+          virsh.reboot
+          virsh.domfstrim
+          virsh.domfsthaw
+          virsh.qemu_agent_command
+          virsh.domfsinfo
+      ci-no: |
+          virsh.reboot.normal_test.remote
+      pr: !extend
+          - 'tp-libvirt 1202,1320,1391'
+          - 'avocado-vt 1334'
+      install-pkgs: !extend
+          - gstreamer
+      feature: 'Guest agent'
+
+    - when: test == 'libvirt.function.network_filter'
+      only: |
+          nwfilter_update_lock
+          nwfilter_vm_start
+          nwfilter_edit_uuid
+          nwfilter_vm_attach
+          nwfilter_update_vm_running
+          nwfilter_list
+          nwfilter_dumpxml
+          nwfilter_define
+          nwfilter_edit
+          nwfilter_undefine
+      feature: 'network filter'
+
+    - when: test == 'libvirt.function.virtio_rng'
+      only: |
+          libvirt_rng
+          virsh.edit..edit_rng
+      feature: 'Security'
+
+    - when: test == 'libvirt.function.secret'
+      only: |
+          virsh.secret_set_get
+          virsh.secret_define_undefine
+          virsh.secret_dumpxml
+          virsh.secret_list
+      feature: 'ACL'
+
+    - when: test == 'libvirt.function.npiv'
+      # TODO: Location should be updated when ci/beaker can filter npiv machine.
+      location: 'hp-dl360eg8-06.lab.eng.pek2.redhat.com'
+      only: |
+          npiv.hostdev_passthrough
+          npiv.nodedev_create_destroy
+          npiv.pool_vol
+          npiv.virtual_disk
+          npiv.restart_libvirtd
+      pr: !extend
+          - 'tp-libvirt 938,965'
+      feature: 'NPIV'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/npiv/npiv_hostdev_passthrough.cfg:
+              "ENTER.YOUR.WWNN"-->"20000000c99e2b80"
+              "ENTER.YOUR.WWPN"-->"1000000000000001"
+          tp-libvirt libvirt/tests/cfg/npiv/npiv_restart_libvirtd.cfg:
+              "ENTER.YOUR.WWNN"-->"20000000c99e2b80"
+              "ENTER.YOUR.WWPN"-->"1000000000000001"
+          tp-libvirt libvirt/tests/cfg/npiv/npiv_pool_vol.cfg:
+              "1000000000000004"-->"1000000000000001"
+
+    - when: test == 'libvirt.function.ovmf' and arch == "x86_64"
+      location: 'CN'
+      only: |
+          virsh.boot.ma_q35.by_ovmf
+      ci-no: |
+          virsh.boot.ma_q35.by_ovmf.positive_test.secure_boot_enabled
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/bios/virsh_boot.cfg:
+              "mon_host = "EXAMPLE_MON_HOST""-->"mon_host = "10.73.75.154""
+              "disk_source_host = "EXAMPLE_HOSTS""-->"disk_source_host = "10.73.75.154""
+              "disk_source_port = "EXAMPLE_PORTS""-->"disk_source_port = "6789""
+              "disk_source_name = "EXAMPLE_SOURCE_NAME""-->"disk_source_name = "avocado-vt-pool/bios.qcow2""
+              "client_name = "EXAMPLE_CLIENT_NAME""-->"client_name = "client.admin""
+              "client_key = "EXAMPLE_CLIENT_KEY""-->"client_key = "AQCS6yNYGiqsDRAACb3zHBaIujuFUY1jKprFGw==""
+              "boot_iso_url = "EXAMPLE_BOOT_ISO_URL""-->"boot_iso_url = "http://download.eng.pek2.redhat.com/pub/rhel/rel-eng/RHEL-7.4-20170711.0/compose/Server/x86_64/os/images/boot.iso""
+              "non_release_os_url = "EXAMPLE_NON_RELEASED_OS_URL"" -->"non_release_os_url = "http://download.libvirt.redhat.com/libvirt-CI-resources/RHEL-7.5-x86_64-non-release-ovmf.qcow2""
+      install-pkgs: !extend
+          - OVMF
+          - glusterfs-server
+          - ceph-common
+      pr: !extend
+          - 'tp-libvirt 1234'
+          - 'avocado-vt 1272'
+      img-url: 'http://download.libvirt.redhat.com/libvirt-CI-resources/{product}-{version}-{arch}-latest-ovmf.qcow2'
+      qemu-rhel: 'false'
+      qemu-rhev: 'true'
+      vm-type: 'q35'
+      retain-fail: 'enable'
+      unstable-thld: 0
+      failure-thld: 5
+      enable-report: 'true'
+      feature: 'BIOS'
+
+    - when: test == 'libvirt.function.seabios' and arch == "x86_64"
+      location: 'CN'
+      only: |
+          virsh.boot.ma_i440fx.by_seabios
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/bios/virsh_boot.cfg:
+              "mon_host = "EXAMPLE_MON_HOST""-->"mon_host = "10.73.75.154""
+              "disk_source_host = "EXAMPLE_HOSTS""-->"disk_source_host = "10.73.75.154""
+              "disk_source_port = "EXAMPLE_PORTS""-->"disk_source_port = "6789""
+              "disk_source_name = "EXAMPLE_SOURCE_NAME""-->"disk_source_name = "avocado-vt-pool/bios.qcow2""
+              "client_name = "EXAMPLE_CLIENT_NAME""-->"client_name = "client.admin""
+              "client_key = "EXAMPLE_CLIENT_KEY""-->"client_key = "AQCS6yNYGiqsDRAACb3zHBaIujuFUY1jKprFGw==""
+              "boot_iso_url = "EXAMPLE_BOOT_ISO_URL""-->"boot_iso_url = "http://download.eng.pek2.redhat.com/pub/rhel/rel-eng/RHEL-7.4-20170711.0/compose/Server/x86_64/os/images/boot.iso""
+      install-pkgs: !extend
+          - seabios-bin
+          - glusterfs-server
+          - ceph-common
+      pr: !extend
+          - 'tp-libvirt 1234'
+          - 'avocado-vt 1272'
+      qemu-rhel: 'true'
+      qemu-rhev: 'true'
+      retain-fail: 'enable'
+      unstable-thld: 0
+      failure-thld: 5
+      enable-report: 'true'
+      feature: 'BIOS'
+
+    - when: test == 'libvirt.function.misc'
+      only: |
+          virsh.domblkinfo
+          virsh.domblkstat
+          virsh.domifstat
+          virsh.dominfo
+          virsh.dommemstat
+          virsh.domstats
+          virsh.event
+          virsh.nodedev_list
+          virsh.screenshot
+          virsh.freecell
+          virsh.help
+          virsh.hostname
+          virsh.itself
+          virsh.list
+          virsh.nodecpumap
+          virsh.nodedev_dumpxml
+          virsh.sysinfo
+          virsh.ttyconsole
+          virsh.uri
+          virsh.version
+          virsh.vncdisplay
+          virsh.connect
+          virsh.create_lxc
+          virsh.nodecpustats
+          virsh.nodedev_reset
+          virsh.nodememstats
+          virsh.nodesuspend
+          virsh.perf
+          virsh.qemu_attach
+          virsh.qemu_monitor_blockjob
+          virt_admin
+      ci-no: |
+          virsh.dominfo.normal_test.remote
+          virsh.dommemstat.normal_test.remote_option
+          virsh.list.special_test.remote
+          virsh.vncdisplay.normal_test.remote
+          virsh.uri.no_option.connect_to_remote
+      pr: !extend
+          - 'avocado-vt 1289'
+          - 'tp-libvirt 1177,1252,1357,1432'
+      replaces: |
+          # When host CPU is too many, for exp. 120. This test will take about
+          # 5 min for one loop, 5 loops will make the test timeout.
+          tp-libvirt libvirt/tests/cfg/virsh_cmd/host/virsh_nodecpustats.cfg:
+              "inner_test_iterations = 5"-->"inner_test_iterations = 2"
+          avocado-vt shared/cfg/base.cfg:
+              "ENTER.YOUR.LOCAL.EXAMPLE.COM"-->"$WORKER_IPV4ADDR"
+              "local_pwd = """-->"local_pwd = redhat"
+      additional-vms: 'vm2'
+      feature: 'Virsh cmd - Confirmed, Admin API'
+
+    - when: test == 'libvirt.function.lxc'
+      connect-uri: 'lxc:///'
+      only: lxc_life_cycle
+      feature: 'LXC'
+
+    - when: test == 'libvirt.function.misc_virtual_devices'
+      only: |
+          watchdog
+          input_devices
+          video_devices
+          virtual_devices.sound_device
+      pr: !extend
+          - 'tp-libvirt 1184,1242,1378,1424'
+      feature: 'virtual devices'
+
+    - when: test == 'libvirt.function.sriov'
+      # TODO: Location should be updated when ci/beaker can filter sriov machine.
+      location: 'dell-per730-59.lab.eng.pek2.redhat.com'
+      enable_iommu: true
+      only: |
+          sriov..ixgbe
+          virsh.nodedev_create_destroy
+          virsh.nodedev_event
+      pr: !extend
+          - 'tp-libvirt 1293,1436'
+      feature: 'sriov'
+
+    - when: product == 'RHEL-ALT' and (test == 'libvirt.function.snapshot' or test.startswith('libvirt.function.block'))
+      qemu-rhel: 'false'
+      qemu-rhev: 'true'
+
+    - when: test.startswith('installation.acceptance') and arch == 'ppc64le' and product == 'RHEL-ALT'
+      inst-guest-list: 'RHEL-ALT'
+      inst-arch-list: 'ppc64le'
+      only: |
+          domain_rhel_alt_latest
+
+    - when: test == 'libvirt.function.mem' and arch == 'ppc64le' and product == 'RHEL-ALT'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/libvirt_mem.cfg:
+              "2560000"-->"2097152"
+              "1024000"-->"1048576"
+              "512000"-->"524288"
+              "512001"-->"524289"
+              "1536000"-->"1048576"
+              "2609152"-->"2097152"
+              "page_size = 4"-->"page_size = 64"
+              "0x11f000000"-->"0x40000000"
+
+    - when: test == 'libvirt.function.cpu' and arch == 'ppc64le' and product == 'RHEL-ALT'
+      replaces: |
+          tp-libvirt libvirt/tests/cfg/libvirt_vcpu_plug_unplug.cfg:
+              "vcpu_max_num = "4""-->"vcpu_max_num = "20""
+          tp-libvirt libvirt/tests/cfg/virsh_cmd/domain/virsh_setvcpus.cfg:
+              "setvcpus_max = "4""-->"setvcpus_max = "20""
+              "sockets='1'"-->"sockets='2'"
+              "cores= '2'"-->"cores= '10'"
+              "threads= '2'"-->"threads= '1'"
+              "setvcpus_count = "8""-->"setvcpus_count = "24""
+          tp-libvirt libvirt/tests/cfg/virsh_cmd/domain/virsh_vcpucount.cfg:
+              "vcpucount_maxvcpu = 4"-->"vcpucount_maxvcpu = 20"
+
+    - when: test == 'libvirt.acceptance.general' and arch == 'ppc64le' and product == 'RHEL-ALT'
+      qemu-rhel: 'true'
+      qemu-rhev: 'true'
+
+    - when: component == 'libvirt' and product == 'RHEL-ALT' and arch == 'ppc64le'
+      img-url: 'http://download.libvirt.redhat.com/libvirt-CI-resources/RHEL-ALT-7.5-ppc64le-latest.qcow2'
+
+    - when: component == 'libvirt' and product == 'RHEL-ALT' and arch == 'ppc64le' and test.endswith('remote')
+      host: 'pok-virt7'
+      img-url: 'http://10.0.0.7/data/qcow/RHEL-ALT-ppc64le-latest.qcow2.xz'
+      pip-option: "--find-links http://10.0.0.7/data/pip/ --upgrade --trusted-host 10.0.0.7 --no-index"
+
+    #-------------------------------------------------
+    # Compatible parameters part:
+    #     Some new branch version may break on older system
+    #     so override them here
+    #
+    #-------------------------------------------------
+    #
+    - when: major == 6
+      pr: ''
+      custom-repo: |
+          avocado https://github.com/avocado-framework/avocado.git 36lts
+          avocado-vt https://github.com/avocado-framework/avocado-vt.git master:54.0
+          tp-libvirt https://github.com/autotest/tp-libvirt.git freeze
+      # RHEL6 uses 36lts which have some unmerged PR to backport
+      patch: 'avocado libvirt-avocado/add-cpu-online-list.patch,libvirt-avocado/Added-methods-to-get-total-online-cpus-count.patch'

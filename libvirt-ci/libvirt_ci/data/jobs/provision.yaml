@@ -1,0 +1,83 @@
+- defaults:
+    name: ci-provision
+    venv_dir: 'ci-provision'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    concurrent: false
+    block-downstream: true
+    quiet-period: '{quiet-period}'
+    auth-token: '{token}'
+    node: jslave-libvirt
+    properties:
+        - build-discarder:
+            days-to-keep: '{days-to-keep}'
+            num-to-keep: '{num-to-keep}'
+            artifact-days-to-keep: '{days-to-keep}'
+            artifact-num-to-keep: '{num-to-keep}'
+    parameters:
+        - provision:
+            provision-target: '{target}'
+            provision-arch: '{arch}'
+            provision-version: '{version}'
+            provision-product: '{product}'
+            provision-ndisk: '{ndisk}'
+            provision-need-numa: '{need_numa}'
+            provision-need-cpu-vendor: '{need_cpu_vendor}'
+            provision-need-1g-hugepage: '{need_1g_hugepage}'
+            provision-location: '{location}'
+            provision-need-westmere: '{need_westmere}'
+            provision-min-mem: '{min_mem}'
+            provision-min-disk: '{min_disk}'
+            provision-need-hvm: '{need_hvm}'
+            provision-enable-iommu: '{enable_iommu}'
+            provision-ignore-panic: '{ignore_panic}'
+            provision-hypervisor: '{hypervisor}'
+            provision-custom-playbook: '{custom-playbook}'
+            provision-only-rhel-repos: '{only-rhel-repos}'
+            provision-resource-host: '{resource-host}'
+            provision-reserve-days: '{reserve-days}'
+            resource-img-url: '{img-url}'
+            resource-img-dest: '{resource-img-dest}'
+            resource-guest-name: '{resource-guest-name}'
+    wrappers:
+        - default-ci-wrappers
+    triggers:
+        - timed: '{timed}'
+    builders:
+        - shell:
+            !include-raw:
+                - scripts/setup_venv.sh
+                - scripts/install_libvirt_ci.sh
+                - scripts/provision_slave.sh
+                - scripts/clear_venv.sh
+        - inject:
+            properties-file: $WORKSPACE/env.txt
+    publishers:
+      - archive:
+          artifacts: '*.txt, *.json, *.properties'
+          allow-empty: 'true'
+      - trigger-parameterized-builds:
+          - project: '{component}-{product}-{version}-runtest-{arch}-{job-suffix}'
+            current-parameters: true
+            condition: 'SUCCESS'
+            property-file: $WORKSPACE/env.txt
+            fail-on-missing: true
+          - project: '{component}-{product}-{version}-teardown-{arch}-{job-suffix}'
+            current-parameters: true
+            condition: 'UNSTABLE_OR_WORSE'
+            property-file: $WORKSPACE/env.txt
+            fail-on-missing: true
+      - default-ci-publishers
+
+
+- job-template:
+    name: '{component}-{product}-{version}-provision-{arch}-{job-suffix}'
+    defaults: ci-provision
+    trigger-package: '{trigger-package}'
+    trigger-by-tree: '{trigger-by-tree}'
+    target: '{target}'
+    quiet-period: '{quiet-period}'
+    ssh_keyfile: libvirt-ci/config/keys/libvirt-jenkins
+    tests_path: libvirt-ci/tests
+    project_defaults: libvirt-ci/config/project_defaults
+    topology_path: libvirt-ci/config

@@ -1,0 +1,26 @@
+- name: Update /etc/rc.d/rc.local to make jswarm a autostart daemon
+  lineinfile:
+      dest: '/etc/rc.d/rc.local'
+      regexp: ".*swarm-client.*"
+      line: >
+          unset http_proxy;
+          unset https_proxy;
+          nohup /usr/bin/java -Xmx2048m
+          -jar /root/swarm-client.jar
+          -master "{{ jenkins_master }}"
+          -name "{{ worker_name }}"
+          -labels "{{ label_name }}"
+          -executors "{{ executors }}"
+          -fsroot /home/jenkins
+          -mode exclusive
+          -disableSslVerification -deleteExistingClients -disableClientsUniqueId
+          -username libvirt-jenkins
+          -password b07e5009ee8552a46fe688eb9a9e2fe1
+          1>/tmp/jslave.log 2>&1 &
+      insertafter: EOF
+      state: present
+
+- name: Start swarm client
+  shell: 'bash -c "source /etc/rc.d/rc.local" &'
+  async: 10
+  poll: 0

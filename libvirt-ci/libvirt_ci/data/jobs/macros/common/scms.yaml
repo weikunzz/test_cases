@@ -1,0 +1,108 @@
+- scm:
+    name: libvirt-ci
+    scm:
+        - git:
+            url: 'https://code.engineering.redhat.com/gerrit/libvirt-ci'
+            branches:
+                - origin/${LIBVIRT_CI_BRANCH}
+            basedir: libvirt-ci
+
+
+- scm:
+    name: libvirt-ci-gerrit
+    scm:
+        - git:
+            url: '$GERRIT_SCHEME://libvirt-jenkins@$GERRIT_HOST:$GERRIT_PORT/$GERRIT_PROJECT'
+            credentials-id: 65b04dc0-ec96-4ed6-93c4-4ece3bf83216
+            refspec: '{refspec}'
+            branches:
+                - '{branch}'
+            basedir: libvirt-ci
+            choosing-strategy: gerrit
+
+
+- scm:
+    name: virt-test-ci
+    scm:
+        - git:
+            url: "https://github.com/Hao-Liu/virt-test-ci.git"
+            branches:
+                - new
+            basedir: "virt-test-ci"
+
+
+- scm:
+    name: autotest
+    scm:
+        - git:
+            url: 'https://github.com/libvirt-CI/autotest.git'
+            branches:
+                - origin/master
+            basedir: autotest
+
+
+- scm:
+    name: ci-ops-central
+    scm:
+        - git:
+            url: 'https://code.engineering.redhat.com/gerrit/ci-ops-central'
+            branches:
+                - origin/master
+            basedir: ci-ops-central
+
+
+- scm:
+    name: job-runner
+    scm:
+        - git:
+            url: 'https://code.engineering.redhat.com/gerrit/job-runner'
+            branches:
+                - origin/master
+            basedir: job-runner
+
+
+- scm:
+    name: test-api
+    scm:
+        - git:
+            url: 'http://git.host.prod.eng.bos.redhat.com/git/libvirt-test-API.git'
+            wipe-workspace: false
+            branches:
+                - origin/rhel7
+            basedir: libvirt-test-api
+
+
+- scm:
+    name: test-api-gerrit
+    scm:
+        - git:
+            url: '$GERRIT_SCHEME://libvirt-jenkins@$GERRIT_HOST:$GERRIT_PORT/$GERRIT_PROJECT'
+            credentials-id: 65b04dc0-ec96-4ed6-93c4-4ece3bf83216
+            refspec: '{refspec}'
+            branches:
+                - '{branch}'
+            basedir: libvirt-test-API
+            choosing-strategy: gerrit
+
+- scm:
+    name: libvirt-tck-gerrit
+    scm:
+        - git:
+            url: '$GERRIT_SCHEME://libvirt-jenkins@$GERRIT_HOST:$GERRIT_PORT/$GERRIT_PROJECT'
+            credentials-id: 65b04dc0-ec96-4ed6-93c4-4ece3bf83216
+            refspec: '{refspec}'
+            branches:
+                - '{branch}'
+            basedir: libvirt-tck
+            choosing-strategy: gerrit
+- scm:
+    name: libvirt-auto-doc-gerrit
+    scm:
+        - git:
+            url: '$GERRIT_SCHEME://libvirt-jenkins@$GERRIT_HOST:$GERRIT_PORT/$GERRIT_PROJECT'
+            credentials-id: 65b04dc0-ec96-4ed6-93c4-4ece3bf83216
+            refspec: '{refspec}'
+            branches:
+                - '{branch}'
+            basedir: libvirt-auto-doc
+            choosing-strategy: gerrit

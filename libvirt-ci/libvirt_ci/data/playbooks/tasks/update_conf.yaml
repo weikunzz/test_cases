@@ -1,0 +1,45 @@
+- name: Copy beaker conf dir files to provisioner beaker conf dir
+  copy: src=/etc/beaker/ dest=/etc/beaker/ owner=root group=root mode=0644
+  tags: provisioner
+
+- name: Copy keytab file to provisioner
+  copy:
+      src: /etc/jenkins-libvirt-ci.ci-hub.lab.eng.rdu2.redhat.com
+      dest: /etc
+      owner: root
+      group: root
+      mode: 0600
+  tags: provisioner
+
+- name: Copy kerberos config file to provisioner
+  copy:
+      src: /etc/krb5.conf
+      dest: /etc
+      owner: root
+      group: root
+      mode: 0600
+  tags: provisioner
+
+- name: Ensures /etc/ansible dir exists
+  file:
+      path: /etc/ansible
+      state: directory
+  tags: provisioner
+
+- name: Copy ansible config file to provisioner
+  copy:
+      src: templates/ansible.cfg.j2
+      dest: /etc/ansible/ansible.cfg
+      owner: root
+      group: root
+      mode: 0644
+  tags: provisioner
+
+- name: Copy jswarm service cfg to provisioner service dir
+  copy:
+      src: /usr/lib/systemd/system/jswarm.service
+      dest: /usr/lib/systemd/system/
+      owner: root
+      group: root
+      mode: 0644
+  tags: provisioner

@@ -1,0 +1,146 @@
+- defaults:
+    name: ci-runtest-test-runner
+    venv_dir: 'ci-runtest'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    concurrent: false
+    project-type: freestyle
+    auth-token: '{token}'
+    disabled: false
+    quiet-period: 5
+    block-downstream: false
+    block-upstream: false
+    retry-count: 3
+    properties:
+        - build-discarder:
+            days-to-keep: '{days-to-keep}'
+            num-to-keep: '{num-to-keep}'
+            artifact-days-to-keep: '{days-to-keep}'
+            artifact-num-to-keep: '{num-to-keep}'
+    parameters:
+        - teardown-slave-toggle
+        - force-report
+        - force-dashboard
+        - force-resultsdb
+        - force-metrics
+        - libvirt-ci-branch
+        - ci-brewtask-id
+        - node-label:
+            default: '{jslavename}'
+        - test-runner:
+            qemu-rhev: '{qemu-rhev}'
+            qemu-rhel: '{qemu-rhel}'
+            test-framework: '{test-framework}'
+            vt-type: '{vt-type}'
+            vm-type: '{vm-type}'
+            host: '{host}'
+            only: '{only}'
+            ci-no: '{ci-no}'
+            rhel-no: '{rhel-no}'
+            connect-uri: '{connect-uri}'
+            custom-repo: '{custom-repo}'
+            pr: '{pr}'
+            patch: '{patch}'
+            changes: '{changes}'
+            replaces: '{replaces}'
+            timeout: '{timeout}'
+            slice: '{slice}'
+            img-url: '{img-url}'
+            screenshots-url: '{screenshots-url}'
+            ci-password: '{ci-password}'
+            install-pkgs: '{install-pkgs}'
+            yum-repos: '{yum-repos}'
+            domxml: '{domxml}'
+            netxml: '{netxml}'
+            additional-vms: '{additional-vms}'
+            v2v-vms-src: '{v2v-vms-src}'
+            v2v-vms-list: '{v2v-vms-list}'
+            inst-guest-list: '{inst-guest-list}'
+            inst-arch-list: '{inst-arch-list}'
+            test-objects: '{test-objects}'
+            test-path: '{test-path}'
+            patch-url: '{patch-url}'
+            git-commit: '{git-commit}'
+            pip-option: '{pip-option}'
+            patch-expire-duration: '{patch-expire-duration}'
+            repo-expire-duration: '{repo-expire-duration}'
+            cobertura-xml: '{cobertura-xml}'
+            enable-coverage: '{enable-coverage}'
+    wrappers:
+        - default-ci-wrappers
+    builders:
+        - set-build-name-desc:
+            label-package: '{label-package}'
+            show-packages: '{show-packages}'
+            extra-desc: '{extra-desc}'
+        - shell:
+            !include-raw:
+                # Installing libvirt-ci for test runner don't suite virtualenv
+                # since testing component like libvirt-python is in real env.
+                - scripts/setup_system_venv.sh
+                - scripts/install_libvirt_ci.sh
+                - scripts/runtest.sh
+                - scripts/keep_latest_venv.sh
+                - scripts/setup_venv.sh
+                - scripts/install_libvirt_ci.sh
+                - scripts/report_result_to_jira.sh
+                - scripts/report_result_to_dashboard.sh
+                - scripts/report_result_to_resultsdb.sh
+                - scripts/report_result_to_metadash.sh
+                - scripts/publish_metricsdata.sh
+                - scripts/clear_venv.sh
+        - set-build-name-desc:
+            label-package: '{label-package}'
+            show-packages: '{show-packages}'
+            extra-desc: '{extra-desc}'
+
+
+- job-template:
+    defaults: ci-runtest-test-runner
+    name: '{component}-{product}-{version}-runtest-{arch}-{job-suffix}'
+    display-name: '{component}-{product}-{version}-runtest-{arch}-{job-suffix}'
+    publishers:
+        - html-publisher:
+            name: "Libvirt Code Coverage Report"
+            dir: "html_report"
+            files: "index.html"
+            allow-missing: true
+        - cobertura:
+            report-file: '{cobertura-xml}'
+            targets:
+                - files:
+                    healthy: 0
+                    unhealthy: 0
+                    failing: 0
+                - method:
+                    healthy: 0
+                    unhealthy: 0
+                    failing: 0
+                - classes:
+                    healthy: 0
+                    unhealthy: 0
+                    failing: 0
+                - line:
+                    healthy: 0
+                    unhealthy: 0
+                    failing: 0
+                - conditional:
+                    healthy: 0
+                    unhealthy: 0
+                    failing: 0
+        - test-runner-publisher:
+            teardown-project: '{component}-{product}-{version}-teardown-{arch}-{job-suffix}'
+            artifacts: '{artifacts}'
+            unstable-thld: '{unstable-thld}'
+            failure-thld: '{failure-thld}'
+            enable-report: '{enable-report}'
+            recipients: '{recipients}'
+
+
+- job-group:
+    name: 'job-workflow'
+    jslavename: 'jslave-{component}-{product}-{version}-{arch}-{job-suffix}'
+    jobs:
+        - '{component}-{product}-{version}-provision-{arch}-{job-suffix}'
+        - '{component}-{product}-{version}-runtest-{arch}-{job-suffix}'
+        - '{component}-{product}-{version}-teardown-{arch}-{job-suffix}'

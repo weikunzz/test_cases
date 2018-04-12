@@ -1,0 +1,22 @@
+- job-template:
+    name: 'libvirt-repo-updater'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    properties:
+        - build-discarder:
+            days-to-keep: '-1'
+            artifact-days-to-keep: '-1'
+    parameters:
+        - libvirt-ci-branch
+        - node-label:
+            default: jslave-libvirt
+    wrappers:
+        - default-ci-wrappers
+    scm:
+        - libvirt-ci:
+    builders:
+        - shell:
+            !include-raw:
+                - ../scripts/setup_venv.sh
+                - ../scripts/install_libvirt_ci.sh
+                - ../scripts/update_repo.sh

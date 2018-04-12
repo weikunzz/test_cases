@@ -1,0 +1,13 @@
+diff --git a/libvirt/tests/cfg/virsh_cmd/host/virsh_nodememstats.cfg b/libvirt/tests/cfg/virsh_cmd/host/virsh_nodememstats.cfg
+index 3918bb6..5b3aefc 100644
+--- a/libvirt/tests/cfg/virsh_cmd/host/virsh_nodememstats.cfg
++++ b/libvirt/tests/cfg/virsh_cmd/host/virsh_nodememstats.cfg
+@@ -6,7 +6,7 @@
+     # multiple iterations of this test (Still, the value needs to be
+     # reviewed/checked how much memory diference that can be allowed)
+     # in MBs
+-    delta = 200
++    delta = 300
+     # this is number of iterations the command will be executed and
+     # the actual delta values will be listed at the end of testcase for
+     # all iterations

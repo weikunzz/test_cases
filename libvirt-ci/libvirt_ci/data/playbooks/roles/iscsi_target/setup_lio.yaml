@@ -1,0 +1,66 @@
+# create lio iSCSI target
+- name: Check supported backstores
+  fail: msg="{{ backstore_type }} not implement yet"
+  when: backstore_type != 'fileio'
+
+- name: Create a fileio backstore
+  command: "targetcli /backstores/fileio create {{ backstore_name }} {{ iscsi_params.file_name }} {{iscsi_params.file_size}}"
+  register: cmd_ret
+  ignore_errors: True
+
+- name: Check create fileio backstore result
+  fail: msg="{{ cmd_ret.stderr }}"
+  when: cmd_ret.rc != 0 and not cmd_ret.stderr | search('already exists')
+
+- name: Create an iSCSI target
+  command: "targetcli /iscsi/ create {{ iscsi_params.target_name }}"
+  register: cmd_ret
+  ignore_errors: True
+
+- name: Check create iSCSI target result
+  fail: msg="{{ cmd_ret.stderr }}"
+  when: cmd_ret.rc != 0 and not cmd_ret.stderr | search('already exists')
+
+- name: Check portal
+  command: "targetcli /iscsi/{{ iscsi_params.target_name }}/tpg1/portals ls"
+  register: cmd_ret
+
+- name: Create portal(binding to INADDR_ANY 0.0.0.0)
+  command: "targetcli /iscsi/{{ iscsi_params.target_name }}/tpg1/portals/ create"
+  when: not cmd_ret.stdout | search('.*0.0.0.0.*')
+
+- name: Create LUN
+  command: "targetcli /iscsi/{{ iscsi_params.target_name }}/tpg1/luns create /backstores/fileio/{{ backstore_name }}"
+  register: cmd_ret
+  ignore_errors: True
+
+- name: Check create LUN result
+  fail: msg="{{ cmd_ret.stderr }}"
+  when: cmd_ret.rc != 0 and not cmd_ret.stderr | search('already exists')
+
+- name: Check firewalld state
+  command: "firewall-cmd --state"
+  ignore_errors: yes
+  register: cmd_ret
+
+- name: Enable firewalld port {{ iscsi_params.port }}
+  firewalld: port="{{iscsi_params.port}}/tcp" permanent=true state=enabled
+  when: cmd_ret.stdout == "running"
+
+- name: Setup CHAP authentication or ACLs
+  include: setup_lio_chap.yaml
+  when: ((iscsi_params.chap_user is defined) and (iscsi_params.chap_password is defined)) or iscsi_params.acl_client is defined
+
+- name: Disable authentication, and ignore ACLs mode, and enable r/w mode
+  command: "targetcli /iscsi/{{ iscsi_params.target_name }}/tpg1/ set attribute {{ item }}"
+  with_items:
+    - authentication=0
+    - generate_node_acls=1
+    - cache_dynamic_acls=1
+    - demo_mode_write_protect=0
+  when:
+    - (iscsi_params.chap_user is undefined) or (iscsi_params.chap_password is undefined)
+    - iscsi_params.acl_client is undefined
+
+- name: Save targetcli configuration
+  command: "targetcli / saveconfig"

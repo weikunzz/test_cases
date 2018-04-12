@@ -1,0 +1,46 @@
+- hosts: all
+  tasks:
+      - name: Install CPANM and other required yum packages
+        yum:
+            name: perl-App-cpanminus,expat-devel,libguestfs-tools,bc
+            state: latest
+
+      - name: Install CPAN packages
+        cpanm: name={{ item }}
+        with_items:
+            - Test::More
+            - Module::Build
+            - Config::Record
+            - IO::String
+            - Slurp
+            - Sub::Uplevel
+            - TAP::Formatter::HTML
+            - TAP::Formatter::JUnit
+            - TAP::Harness::Archive
+            - Test::Exception
+            - XML::Twig
+            - XML::Writer
+            - XML::XPath
+            - XML::XPath::XMLParser
+            - Net::SSH::Perl
+            - Net::SCP::Expect
+            - Expect
+            - accessors
+            - Test::Pod
+            - Test::Pod::Coverage
+            - IO::Stty
+            - IO::Interface::Simple
+
+      - name: Disable rpmbuild by exit before it
+        blockinfile:
+            dest: "{{ libvirt_tck_path }}/autobuild.sh"
+            insertbefore: ".*/usr/bin/rpmbuild.*"
+            block: "exit 0"
+
+      - name: Build libvirt-tck
+        shell: ./autobuild.sh
+        args:
+            chdir: '{{ libvirt_tck_path }}'
+
+      - name: Prepare required packages
+        get_url: url=http://download.libvirt.redhat.com/tck/qemu-guest-agent.rpm dest=/root/qemu-guest-agent.rpm force=yes timeout=1200

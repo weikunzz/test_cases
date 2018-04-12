@@ -1,0 +1,48 @@
+- hosts: all
+  tasks:
+      - name: Install required yum packages
+        yum:
+            name: swig,tog-pegasus,sblim-sfcb,sblim-wbemcli
+
+      - name: Install required pip packages
+        pip:
+            name: pywbem
+
+      - name: Config password for pegasus user
+        user:
+            name: pegasus
+            password: "$6$rounds=656000$dznIzDoo13vasyKU$gZPmCL2htUWN5UkjTqOws2g/mE/xMO9H0snfvmYUvkkaY7B/VLulVJ5EoDkDVFPBsXsVycv9Y7MC5Ns1mZdST."
+
+            #CIM_NS=root/virt CIM_USER=root CIM_PASS=redhat ./runtests libvirt-cim -v KVM localhost
+      - name: Config tog-pegasus
+        command: "cimconfig -s {{ item }}=true -p"
+        with_items:
+             - "enableHttpConnection"
+             - "enableHttpsConnection"
+             - "enableIndicationService"
+             - "repositoryIsDefaultInstanceProvider"
+
+      - name: Config sfcb
+        lineinfile:
+            dest: /etc/sfcb/sfcb.cfg
+            regexp: "^{{ item.key }}:"
+            line: "{{ item.key }}: {{ item.value }}"
+        with_items:
+            - key: "enableHttps"
+              value: "false"
+            - key: "enableHttp"
+              value: "false"
+            - key: "provProcs"
+              value: "64"
+
+
+      - name: Config sfcb
+        lineinfile:
+            dest: /etc/sfcb/sfcb.cfg
+            regexp: "enableHttps:"
+            line: "enableHttps:    false"
+
+      - name: Start services
+        service:
+            name: tog-pegasus
+            state: restarted

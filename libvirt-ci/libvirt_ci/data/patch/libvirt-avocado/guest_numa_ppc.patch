@@ -1,0 +1,83 @@
+From 1472a5762cac1b96700ab0881dfb6662dfcf0db0 Mon Sep 17 00:00:00 2001
+From: Wayne Sun <gsun@redhat.com>
+Date: Wed, 23 Mar 2016 16:20:29 +0800
+Subject: [PATCH] guest_numa: update test with only use node 0
+
+To avoid empty node and not skip testing, use only node 0 for
+it's with most chance as memory not empty.
+
+Signed-off-by: Wayne Sun <gsun@redhat.com>
+---
+ libvirt/tests/cfg/numa/guest_numa.cfg | 18 +++++++++---------
+ 1 file changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/libvirt/tests/cfg/numa/guest_numa.cfg b/libvirt/tests/cfg/numa/guest_numa.cfg
+index b5a8f20..5bd5ca4 100644
+--- a/libvirt/tests/cfg/numa/guest_numa.cfg
++++ b/libvirt/tests/cfg/numa/guest_numa.cfg
+@@ -17,29 +17,29 @@
+              variants:
+                  - numatune_mem:
+                      memory_placement = "static"
+-                     memory_nodeset = "0-1"
++                     memory_nodeset = "0"
+                      memory_mode = "strict"
+-                     qemu_cmdline_mem_backend_1 = "memory-backend-ram,.*?id=ram-node1,.*?host-nodes=0-1,policy=bind"
++                     qemu_cmdline_mem_backend_1 = "memory-backend-ram,.*?id=ram-node1,.*?host-nodes=0,policy=bind"
+                  - no_numatune_mem:
+              variants:
+                  - no_numatune_memnode:
+                      qemu_cmdline_numa_cell_0 = "node,nodeid=0,cpus=0-1,mem=512"
+                      qemu_cmdline_numa_cell_1 = "node,nodeid=1,cpus=2-3,mem=512"
+                  - numatune_memnode:
+-                     memnode_nodeset_0 = 1
++                     memnode_nodeset_0 = 0
+                      memnode_cellid_0 = 0
+                      qemu_cmdline_numa_cell_0 = "node,nodeid=0,cpus=0-1,memdev=ram-node0"
+                      qemu_cmdline_numa_cell_1 = "node,nodeid=1,cpus=2-3,memdev=ram-node1"
+                      variants:
+                          - m_strict:
+                              memnode_mode_0 = "strict"
+-                             qemu_cmdline_mem_backend_0 = "id=ram-node0,.*?host-nodes=1,policy=bind"
++                             qemu_cmdline_mem_backend_0 = "id=ram-node0,.*?host-nodes=0,policy=bind"
+                          - m_preferred:
+                              memnode_mode_0 = "preferred"
+-                             qemu_cmdline_mem_backend_0 = "id=ram-node0,.*?host-nodes=1,policy=preferred"
++                             qemu_cmdline_mem_backend_0 = "id=ram-node0,.*?host-nodes=0,policy=preferred"
+                          - m_interleave:
+                              memnode_mode_0 = "interleave"
+-                             qemu_cmdline_mem_backend_0 = "id=ram-node0,.*?host-nodes=1,policy=interleave"
++                             qemu_cmdline_mem_backend_0 = "id=ram-node0,.*?host-nodes=0,policy=interleave"
+              variants:
+                  - topology:
+                      sockets = "2"
+@@ -68,7 +68,7 @@
+                                  - 2M:
+                                      hugepage_size_0 = "2048"
+                                      page_num_0 = "256"
+-                                     page_nodenum_0 = "1"
++                                     page_nodenum_0 = "0"
+                                  - 1G:
+                                      max_mem = "2097152"
+                                      cell_memory_0 = "1048576"
+@@ -76,7 +76,7 @@
+                                      vmpage_size_0 = "1048576"
+                                      hugepage_size_0 = "1048576"
+                                      page_num_0 = "1"
+-                                     page_nodenum_0 = "1"
++                                     page_nodenum_0 = "0"
+                                  - 16M:
+                                      max_mem = "2097152"
+                                      cell_memory_0 = "1048576"
+@@ -84,7 +84,7 @@
+                                      vmpage_size_0 = "16384"
+                                      hugepage_size_0 = "16384"
+                                      page_num_0 = "65"
+-                                     page_nodenum_0 = "1"
++                                     page_nodenum_0 = "0"
+                          - host_total:
+                              nr_pagesize_total = "1024"
+         - negative_test:
+-- 
+1.8.3.1
+

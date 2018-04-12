@@ -1,0 +1,54 @@
+From 77b18dab8cb8281a873c4423a52c7379c7188d7e Mon Sep 17 00:00:00 2001
+From: Praveen K Pandey <praveen@linux.vnet.ibm.com>
+Date: Thu, 11 Aug 2016 19:52:52 +0200
+Subject: [PATCH 1/2] style-fixes :pep8
+
+Signed-off-by: Praveen K Pandey <praveen@linux.vnet.ibm.com>
+---
+ avocado/utils/cpu.py | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/avocado/utils/cpu.py b/avocado/utils/cpu.py
+index b4d5363c9..e7709da52 100644
+--- a/avocado/utils/cpu.py
++++ b/avocado/utils/cpu.py
+@@ -71,7 +71,8 @@ def get_cpu_vendor_name():
+     """
+     Get the current cpu vendor name
+ 
+-    :returns: string 'intel' or 'amd' or 'power7' depending on the current CPU architecture.
++    :returns: string 'intel' or 'amd' or 'power7' depending on the
++         current CPU architecture.
+     :rtype: `string`
+     """
+     vendors_map = {
+
+From dd1d5d8e3a3fd754ae965f768db8c32b2795f353 Mon Sep 17 00:00:00 2001
+From: Praveen K Pandey <praveen@linux.vnet.ibm.com>
+Date: Thu, 11 Aug 2016 19:52:54 +0200
+Subject: [PATCH 2/2] added a function that return online cpu number {list}
+
+Signed-off-by: Praveen K Pandey <praveen@linux.vnet.ibm.com>
+---
+ avocado/utils/cpu.py | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/avocado/utils/cpu.py b/avocado/utils/cpu.py
+index e7709da52..a647e5d0d 100644
+--- a/avocado/utils/cpu.py
++++ b/avocado/utils/cpu.py
+@@ -115,3 +115,14 @@ def get_cpu_arch():
+         return 'x86_64'
+     else:
+         return 'i386'
++
++
++def cpu_online_list():
++    """
++    Reports a list of indexes of the online cpus
++    """
++    cpus = []
++    for line in open('/proc/cpuinfo', 'r'):
++        if line.startswith('processor'):
++            cpus.append(int(line.split()[2]))  # grab cpu number
++    return cpus

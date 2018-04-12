@@ -1,0 +1,545 @@
+- parameter:
+    name: test-framework
+    parameters:
+        - string:
+            name: CI_TEST_FRAMEWORK
+            default: '{default}'
+            description: |
+                Choose test framework for the test.
+                Could be one of "avocado-vt", "test-api", "virtinst-test", "libvirt-tck" or "cimtest".
+                Default to "avocado-vt"
+
+- parameter:
+    name: vt-type
+    parameters:
+        - string:
+            name: CI_VT_TYPE
+            default: '{default}'
+            description: |
+                Choose test type (libvirt, v2v, libguestfs, lvsb).
+                Default: libvirt
+
+- parameter:
+    name: vm-type
+    parameters:
+        - string:
+            name: CI_VM_TYPE
+            default: '{default}'
+            description: |
+                Choose test vm machine type (i440fx, q35 on x86), please leave it empty for default value,
+                currently only set i440fx or q35 for x86 job is supported.
+                Default: i440fx
+
+- parameter:
+    name: pull-libvirt
+    parameters:
+        - string:
+            name: CI_PULL_LIBVIRT
+            default: '{default}'
+            description: |
+                Pull requests numbers need to merge on repo
+                <a href="https://github.com/autotest/tp-libvirt/pulls">tp-libvirt</a>.
+                <br/>
+                Multiple pull requests can be separated by ",". For example: "2078,2060"
+
+- parameter:
+    name: pull-virt-test
+    parameters:
+        - string:
+            name: CI_PULL_VIRT_TEST
+            default: '{default}'
+            description: |
+                Pull requests numbers need to merge on repo
+                <a href="https://github.com/autotest/virt-test/pulls">virt-test</a>.
+                <br/>
+                Multiple pull requests can be separated by ",". For example, "523,514"
+
+- parameter:
+    name: pr
+    parameters:
+        - text:
+            name: CI_PR
+            default: '{default}'
+            description: |
+                Merge specified pull requests.
+                <br/>
+                Format: 'repo1 pr1,pr2 repo2 pr3,pr4 ...'
+                <br/>
+                example: 'tp-libvirt 175,183 avocado-vt 12'
+
+- parameter:
+    name: changes
+    parameters:
+        - text:
+            name: CI_CHANGES
+            default: '{default}'
+            description: |
+                Cherry-pick gerrit changes.
+                <br/>
+                Format: 'repo1 change1,change2 repo2 change3,change4 ...'
+                <br/>
+                example: 'libvirt-test-API refs/changes/72/64672/1'
+
+- parameter:
+    name: host
+    parameters:
+        - string:
+            name: CI_HOST
+            default: '{default}'
+            description: |
+                 Remote host name or ip.
+                 <br/>
+                 Format: '192.168.122.8 or pok-virt6'
+                 <br/>
+                 example: 'pok-virt6'
+
+- parameter:
+    name: pip_option
+    parameters:
+        - string:
+            name: CI_PIP_OPTION
+            default: '{default}'
+            description: |
+                 The pip option used in playbook for remote runner
+                 <br/>
+                 Format: '--find-links http://10.0.0.7/data/pip/'
+                 <br/>
+                 example: '--find-links http://10.0.0.7/data/pip/ --upgrade --trusted-host 10.0.0.7 --no-index'
+
+- parameter:
+    name: only
+    parameters:
+        - text:
+            name: CI_ONLY
+            default: '{default}'
+            description: |
+                Selected cases to run. For example. <code>virsh.change_media.floppy_test.positive_test.insert</code>
+                <ul>
+                  <li>
+                You can use a partial selector to include all tests contain the same string.
+                    <br/>
+                    For example: <code>virsh.change_media</code> will include all test cases contains <code>virsh.chang_media</code>
+                  </li>
+                  <li>
+                    Multiple selection with OR operation can be separated by ",".
+                    <br/>
+                    For example: <code>virsh.start,virsh.console</code> will select all test cases contains <code>virsh.start</code> or <code>virsh.console</code>
+                  </li>
+                  <li>
+                    Multiple selection with AND operation can be separated by "..".
+                    <br/>
+                    For example: <code>virsh.start..domname</code> will select all test cases contains both <code>virsh.start</code> and <code>domname</code>
+                  </li>
+                <ul/>
+
+- parameter:
+    name: ci-no
+    parameters:
+        - text:
+            name: CI_NO
+            default: '{default}'
+            description: |
+                Selected cases to ignore. For example. <code>virsh.change_media.floppy_test.positive_test.insert</code>
+                <ul>
+                  <li>
+                You can use a partial selector to ignore all tests contain the same string.
+                    <br/>
+                    For example: <code>virsh.change_media</code> will exclude all test cases contain <code>virsh.chang_media</code>
+                  </li>
+                  <li>
+                    Multiple selection with OR operation can be separated by ",".
+                    <br/>
+                    For example: <code>virsh.start,virsh.console</code> will exclude all test cases contain <code>virsh.start</code> or <code>virsh.console</code>
+                  </li>
+                  <li>
+                    Multiple selection with AND operation can be separated by "..".
+                    <br/>
+                    For example: <code>virsh.start..domname</code> will exclude all test cases contain both <code>virsh.start</code> and <code>domname</code>
+                  </li>
+                <ul/>
+
+- parameter:
+    name: rhel-no
+    parameters:
+        - text:
+            name: CI_RHEL_NO
+            default: '{default}'
+            description: |
+                Selected cases to ignore for RHEL test only.
+
+
+- parameter:
+    name: connect-uri
+    parameters:
+        - string:
+            name: CI_CONNECT_URI
+            default: '{default}'
+            description: |
+                Which uri avocado-vt should be used to test with.
+
+- parameter:
+    name: custom-repo
+    parameters:
+        - text:
+            name: CI_CUSTOM_REPO
+            default: '{default}'
+            description: |
+                URL and branch for custom git repo.Format: 'repo url branch[:commit]'
+
+
+- parameter:
+    name: slice
+    parameters:
+        - string:
+            name: CI_SLICE
+            default: '{default}'
+            description: |
+                Selected cases to run with a given url, and the cases is store in a plain file, which could at local or on a web sever. e.g.
+                <ul>
+                  <li>
+                    Local file url: file:///tmp/slice_file
+                  </li>
+                  <li>
+                    http file url: http://server/path/to/file
+                  </li>
+                <ul/>
+
+- parameter:
+    name: yum-repos
+    parameters:
+        - text:
+            name: CI_YUM_REPOS
+            default: '{default}'
+            description: |
+                yum repos need to be prepared before test. Repo name and url are separated by "|".
+                <br/>
+                Example: <code>libvirt-coverage|http://download.libvirt.redhat.com/libvirt-CI-Coverage-repos/RHEL/7.5/x86_64/
+                 libvirt|http://download.libvirt.redhat.com/libvirt-CI-repos/RHEL/7.5/x86_64/</code>
+
+- parameter:
+    name: replaces
+    parameters:
+        - text:
+            name: CI_REPLACES
+            default: '{default}'
+            description: |
+                For example: the following setup
+                <pre>
+                path/to/file.cfg
+                    "EXAMPLE.BRIDGE.DEVICE"-->"$BRIDGE_DEVICE"
+                    "EXAMPLE.MACVTAP.DEVICE"-->"$BRIDGE_DEVICE"
+                </pre>
+                replaces strings matches EXAMPLE.BRIDGE.DEVICE and EXAMPLE.MACVTAP.DEVICE in file
+                path/to/file.cfg to $BRIDGE_DEVICE
+
+- parameter:
+    name: domxml
+    parameters:
+        - text:
+            name: CI_DOMXML
+            default: '{default}'
+            description: "Domain XML for the testing VM"
+
+- parameter:
+    name: netxml
+    parameters:
+        - text:
+            name: CI_NETXML
+            default: '{default}'
+            description: "Network XML for creating new network"
+
+- parameter:
+    name: img-url
+    parameters:
+        - text:
+            name: CI_IMG_URL
+            default: '{default}'
+            description: "Guest image URL"
+
+- parameter:
+    name: screenshots-url
+    parameters:
+        - text:
+            name: CI_SCREENSHOTS_URL
+            default: '{default}'
+            description: "Windows screenshots URL(v2v specific)"
+- parameter:
+    name: ci-password
+    parameters:
+        - string:
+            name: CI_PASSWORD
+            default: '{default}'
+            description: "Guest root login password."
+
+- parameter:
+    name: test-path
+    parameters:
+        - string:
+            name: CI_TEST_PATH
+            default: '{default}'
+            description: "This path is where a test build will run."
+
+- parameter:
+    name: report
+    parameters:
+        - string:
+            name: CI_REPORT
+            default: '{default}'
+            description: "JUnit XML report file location."
+
+- parameter:
+    name: os-variant
+    parameters:
+        - string:
+            name: CI_OS_VARIANT
+            default: '{default}'
+            description: "parameter used to specified --os-variant option for virt-install"
+
+- parameter:
+    name: install-pkgs
+    parameters:
+        - text:
+            name: CI_INSTALL_PKGS
+            default: '{default}'
+            description: "Packages need to be installed before tests"
+
+- parameter:
+    name: virt-test-patch
+    parameters:
+        - text:
+            name: CI_VIRT_TEST_PATCH
+            default: '{default}'
+            description: "parameter used to specified --virt-test-patch option, given patch files seperated with ','"
+
+- parameter:
+    name: libvirt-patch
+    parameters:
+        - text:
+            name: CI_LIBVIRT_PATCH
+            default: '{default}'
+            description: "parameter used to specified --libvirt-patch option, given patch files seperated with ','"
+
+- parameter:
+    name: patch
+    parameters:
+        - text:
+            name: CI_PATCH
+            default: '{default}'
+            description: |
+                Merge specified patch files.
+                <br/>
+                Format: 'repo1 patch1,patch2 repo2 patch3,patch4 ...'
+                <br/>
+                example: 'tp-libvirt /path/to/patch1,/path/to/patch2 avocado-vt /path/to/patch3'
+
+
+- parameter:
+    name: qemu-rhev
+    parameters:
+        - bool:
+            name: CI_QEMU_RHEV
+            default: '{default}'
+            description: "Whether test with qemu-rhev packages."
+
+
+- parameter:
+    name: qemu-rhel
+    parameters:
+        - bool:
+            name: CI_QEMU_RHEL
+            default: '{default}'
+            description: "Whether test with qemu-rhel packages."
+
+
+- parameter:
+    name: timeout
+    parameters:
+        - string:
+            name: CI_TIMEOUT
+            default: '{default}'
+            description: "Time limit in second for one single test case"
+
+
+- parameter:
+    name: additional-vms
+    parameters:
+        - text:
+            name: CI_ADDITIONAL_VMS
+            default: '{default}'
+            description: "Add addtional vms"
+
+
+- parameter:
+    name: v2v-vms-src
+    parameters:
+        - string:
+            name: CI_V2V_VMS_SRC
+            default: '{default}'
+            description: "Install KVM VMs from given NFS resources for v2v testing"
+
+- parameter:
+    name: v2v-vms-list
+    parameters:
+        - text:
+            name: CI_V2V_VMS_LIST
+            default: '{default}'
+            description: "KVM VM list for v2v testing"
+
+- parameter:
+    name: inst-guest-list
+    parameters:
+        - text:
+            name: CI_INST_GUEST_LIST
+            default: '{default}'
+            description: "Guest installation version list for libvirt-python testing"
+
+- parameter:
+    name: inst-arch-list
+    parameters:
+        - text:
+            name: CI_INST_ARCH_LIST
+            default: '{default}'
+            description: "Guest installation arch list for libvirt-python testing"
+
+- parameter:
+    name: test-objects
+    parameters:
+        - text:
+            name: CI_TEST_OBJECTS
+            default: '{default}'
+            description: |
+                Multiple lines represents multiple test objects, with each line
+                for one test object as key-value pairs in the format of
+                "key1:value1 key2:value2 ..."
+
+- parameter:
+    name: patch-url
+    parameters:
+        - text:
+            name: CI_PATCH_URL
+            default: '{default}'
+            description: "Patch URL for applying to latest libvirt repo when testing upstream libvirt"
+
+- parameter:
+    name: git-commit
+    parameters:
+        - text:
+            name: CI_GIT_COMMIT
+            default: '{default}'
+            description: "Git commit will be tested when testing upstream libvirt"
+
+- parameter:
+    name: repo-expire-duration
+    parameters:
+        - text:
+            name: CI_REPO_EXPIRE_DURATION
+            default: '{default}'
+            description: "Time duration before a repo is considered expired that need to sync with repo source."
+
+- parameter:
+    name: patch-expire-duration
+    parameters:
+        - text:
+            name: CI_PATCH_EXPIRE_DURATION
+            default: '{default}'
+            description: "Time duration before a patch/pr/change is condidered expired and need to refetch, reapply"
+
+- parameter:
+    name: enable-coverage
+    parameters:
+        - bool:
+            name: CI_ENABLE_COVERAGE
+            default: '{default}'
+            description: "Enable code coverage"
+
+- parameter:
+    name: cobertura-xml
+    parameters:
+        - string:
+            name: CI_COBERTURA_XML
+            default: '{default}'
+            description: "Cobertura xml path"
+
+- parameter:
+    name: test-runner
+    parameters:
+        - qemu-rhev:
+            default: '{qemu-rhev}'
+        - qemu-rhel:
+            default: '{qemu-rhel}'
+        - test-framework:
+            default: '{test-framework}'
+        - vt-type:
+            default: '{vt-type}'
+        - vm-type:
+            default: '{vm-type}'
+        - host:
+            default: '{host}'
+        - only:
+            default: '{only}'
+        - ci-no:
+            default: '{ci-no}'
+        - rhel-no:
+            default: '{rhel-no}'
+        - connect-uri:
+            default: '{connect-uri}'
+        - custom-repo:
+            default: '{custom-repo}'
+        - pr:
+            default: '{pr}'
+        - patch:
+            default: '{patch}'
+        - changes:
+            default: '{changes}'
+        - replaces:
+            default: '{replaces}'
+        - timeout:
+            default: '{timeout}'
+        - slice:
+            default: '{slice}'
+        - yum-repos:
+            default: '{yum-repos}'
+        - domxml:
+            default: '{domxml}'
+        - netxml:
+            default: '{netxml}'
+        - img-url:
+            default: '{img-url}'
+        - screenshots-url:
+            default: '{screenshots-url}'
+        - ci-password:
+            default: '{ci-password}'
+        - test-path:
+            default: '{test-path}'
+        - report:
+            default: '$WORKSPACE/result_$BUILD_NUMBER.xml'
+        - os-variant:
+            default: 'rhel7'
+        - install-pkgs:
+            default: '{install-pkgs}'
+        - additional-vms:
+            default: '{additional-vms}'
+        - v2v-vms-src:
+            default: '{v2v-vms-src}'
+        - v2v-vms-list:
+            default: '{v2v-vms-list}'
+        - inst-guest-list:
+            default: '{inst-guest-list}'
+        - inst-arch-list:
+            default: '{inst-arch-list}'
+        - test-objects:
+            default: '{test-objects}'
+        - patch-url:
+            default: '{patch-url}'
+        - git-commit:
+            default: '{git-commit}'
+        - pip_option:
+            default: '{pip-option}'
+        - patch-expire-duration:
+            default: '{patch-expire-duration}'
+        - repo-expire-duration:
+            default: '{repo-expire-duration}'
+        - enable-coverage:
+            default: '{enable-coverage}'
+        - cobertura-xml:
+            default: '{cobertura-xml}'

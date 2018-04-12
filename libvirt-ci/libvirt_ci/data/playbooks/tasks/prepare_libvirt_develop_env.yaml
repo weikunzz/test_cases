@@ -1,0 +1,155 @@
+- name: Check host distribution
+  fail:
+    msg: "Only support CentOS, Fedora and RHEL right now"
+  when: 'ansible_distribution not in ["RedHat", "CentOS", "Fedora"]'
+
+- name: Prepare basic packages
+  package: state=latest name={{ item }}
+  with_items:
+      - autoconf
+      - automake
+      - gettext-devel
+      - libtool
+      - git
+      - perl
+      - python
+      - libxml2-devel
+      - xhtml1-dtds
+      - libxslt
+      - readline-devel
+      - ncurses-devel
+      - gettext
+      - libtasn1-devel
+      - gnutls-devel
+      - libattr-devel
+      - libblkid-devel
+      - libpciaccess-devel
+      - yajl-devel
+      - sanlock-devel
+      - libpcap-devel
+      - avahi-devel
+      - libselinux-devel
+      - dnsmasq
+      - iptables
+      - radvd
+      - ebtables
+      - module-init-tools
+      - cyrus-sasl-devel
+      - polkit-devel
+      - util-linux
+      - lvm2
+      - iscsi-initiator-utils
+      - parted-devel
+      - device-mapper-devel
+      - netcf-devel
+      - audit-libs-devel
+      - systemtap-sdt-devel
+      - util-linux
+      - nfs-utils
+      - dbus-devel
+      - gawk
+      - scrub
+      - numad
+      - numactl-devel
+      - libcap-ng-devel
+      - rpm-build
+      - perl-XML-Parser
+      - perl-libxml-perl
+      - perl-XML-XPath
+      - perl-XML-XPathEngine
+      - augeas
+      - fuse-devel
+      - libcurl-devel
+      - libssh2-devel
+      - libwsman-devel
+      - wireshark-devel
+
+- name: Prepare extra packages for RHEL7
+  package: state=latest name={{ item }}
+  with_items:
+      - systemd-devel
+      - systemd-units
+      - perl-podlators
+      - libnl3-devel
+      - polkit
+      - librados2-devel
+      - librbd1-devel
+      - libacl-devel
+  when: 'ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version == "7"'
+
+- name: Prepare extra packages for RHEL6
+  package: state=latest name={{ item }}
+  with_items:
+      - libgcrypt-devel
+      - libudev-devel
+      - libnl-devel
+      - iptables-ipv6
+  when: 'ansible_distribution in ["RedHat", "CentOS"] and ansible_distribution_major_version == "6"'
+
+- name: Prepare extra rpms for Fedora
+  package: state=latest name={{ item }}
+  with_items:
+      - systemd-devel
+      - systemd-units
+      - perl-podlators
+      - libnl3-devel
+      - polkit
+      - ceph-devel
+      - sheepdog
+      - xen-devel
+      - libssh2-devel
+      - libssh-devel
+  when: 'ansible_distribution == "Fedora"'
+
+- name: Prepare extra rpms for x86_64
+  package: state=latest name={{ item }}
+  with_items:
+      - glusterfs-api-devel
+      - glusterfs-devel
+  when: 'ansible_architecture == "x86_64"'
+
+- name: Get libvirt patch
+  get_url:
+      url: "{{ patch_url }}"
+      dest: /tmp/libvirt_ci_upstream.patch
+      timeout: 60
+      force: yes
+  when: 'patch_url is defined and patch_url != ""'
+
+- name: Clean up existing splitted patches
+  file:
+      path: "{{ item }}"
+      state: absent
+  with_fileglob:
+      - /tmp/libvirt_patch*
+  when: 'patch_url is defined and patch_url != ""'
+
+- name: Split patchset into individual patches
+  shell: "csplit /tmp/libvirt_ci_upstream.patch '/^From: .* <.*@.*>/' '{*}' --prefix='libvirt_patch' -z"
+  args:
+      chdir: /tmp
+  when: 'patch_url is defined and patch_url != ""'
+
+- name: Reset git to specific commit
+  shell: git reset --hard {{ commit }}
+  when: 'commit is defined and commit != ""'
+  args:
+      chdir: "{{ git_repo_path }}"
+
+- block:
+    - name: Apply libvirt patches
+      shell: git am -3 /tmp/libvirt_patch*
+      when: 'patch_url is defined and patch_url != ""'
+      args:
+          chdir: "{{ git_repo_path }}"
+
+    - name: Apply local libvirt patches
+      shell: git am -3 {{ local_patch }}
+      when: 'local_patch is defined and local_patch != ""'
+      args:
+          chdir: "{{ git_repo_path }}"
+  rescue:
+    - name: Abort the patch apply
+      shell: git am --abort
+      args:
+          chdir: "{{ git_repo_path }}"

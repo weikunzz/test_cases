@@ -1,0 +1,4 @@
+[jenkins]
+user=libvirt-jenkins
+password=b07e5009ee8552a46fe688eb9a9e2fe1
+url=https://platform-stg-jenkins.rhev-ci-vms.eng.rdu2.redhat.com/

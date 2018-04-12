@@ -1,0 +1,33 @@
+---
+iscsi_params:
+  required_packages:
+    - iscsi-initiator-utils
+
+  # Backing store file for iSCSI target
+  file_name: /var/tmp/emulated-iscsi-image
+
+  # Size of the iSCSI disk you want
+  file_size: 1G
+
+  # iSCSI target iqn
+  target_name: iqn.2017-05.com.redhat.englab.nay:emulated-iscsi-target
+
+  # Use 'tgt'(Linux SCSI target framework), or 'lio'(Linux-IO Target)
+  # to emulate iSCSI target, 'auto' means detect it by system distribution
+  # version (tgt for RHEL6, lio for RHEL7)
+  required_method: auto
+
+  # CHAP authentication
+  # chap_user: tester
+  # chap_password: redhat
+
+  # For targetcli, authentication in a Normal session may be set at the
+  # TPG level(user/password), or per-ACL
+  # acl_client: iqn.2017-05.com.redhat.englab.nay:client
+
+  # Target portal, if iSCSI server and client on the same box, use 127.0.0.1
+  portal: 127.0.0.1
+  port: 3260
+
+  # Change cleanup to True when you want to logout and clean the iSCSI target
+  cleanup: False

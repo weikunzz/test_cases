@@ -1,0 +1,52 @@
+- name: Prepare provisioner environment
+  hosts: worker
+  tasks:
+    - name: Copy beaker conf dir files to provisioner beaker conf dir
+      copy:
+          src: /etc/beaker/
+          dest: /etc/beaker/
+          owner: root
+          group: root
+          mode: 0644
+
+    - name: Copy keytab file to provisioner
+      copy:
+          src: /etc/jenkins-libvirt-ci.ci-hub.lab.eng.rdu2.redhat.com
+          dest: /etc
+          owner: root
+          group: root
+          mode: 0600
+
+    - name: Copy kerberos config file to provisioner
+      copy:
+          src: /etc/krb5.conf
+          dest: /etc
+          owner: root
+          group: root
+          mode: 0600
+
+    - name: Ensure /etc/ansible dir exists
+      file:
+          path: /etc/ansible
+          state: directory
+
+    - name: Copy ansible config file to provisioner
+      copy:
+          src: templates/ansible.cfg.j2
+          dest: /etc/ansible/ansible.cfg
+          owner: root
+          group: root
+          mode: 0644
+
+    - name: Prepare required rpm packages
+      yum:
+          name: '{{ item }}'
+          state: 'present'
+      with_items:
+          # Extra package for provisioner
+          # required by pylint
+          - 'gcc-c++'
+          # required for kinit
+          - 'krb5-workstation'
+          # required for kinit
+          - 'python-pep8'

@@ -1,0 +1,107 @@
+- hosts: all
+  tasks:
+      - name: Clean up existing avocado installation
+        shell: 'rm -rf {{ item }}'
+        with_items:
+            - '/usr/lib/python*/site-packages/avocado*'
+            - '/usr/bin/avocado*'
+            - '/usr/share/avocado*'
+            - '/var/lib/avocado*'
+
+      - name: Install avocado requirements without libvirt-python
+        shell: "cat requirements.txt | sed '/^\\s*#/d' | cut -d\\; -f1 | grep -v libvirt-python | xargs -I REP pip install REP"
+        args:
+            chdir: "{{ avocado_path }}"
+
+      - name: Install avocado-vt requirements
+        shell: pip install -r requirements.txt --upgrade
+        args:
+            chdir: "{{ avocado_vt_path }}"
+
+      - name: Install basic package for RHEL
+        package: state=latest name={{ item }}
+        with_items:
+            - policycoreutils-python
+        when: "ansible_distribution == 'RedHat'"
+
+      - name: Install basic package for Fedora
+        package: state=latest name={{ item }}
+        with_items:
+            - policycoreutils-python-utils
+        when: "ansible_distribution == 'Fedora'"
+
+      - name: Change tp-libvirt URL in avocado-vt
+        lineinfile:
+            dest: "{{ avocado_vt_path }}/test-providers.d/io-github-autotest-libvirt.ini"
+            regexp: "uri: .*"
+            line: "uri: {{ tp_libvirt_path }}"
+
+      - name: Remove unused test providers in avocado-vt
+        file:
+            path: "{{ avocado_vt_path }}/test-providers.d/io-github-{{ item }}.ini"
+            state: absent
+        with_items:
+            - 'autotest-qemu'
+            - 'spiceqa-spice'
+
+      - name: Install avocado-vt
+        shell: python setup.py --quiet develop
+        args:
+            chdir: "{{ avocado_vt_path }}"
+
+      - name: Symlink avocado and avocado-vt
+        file:
+            src: "{{ item.src }}"
+            dest: "{{ item.dest }}"
+            state: link
+        with_items:
+            - src: '{{ autotest_path }}'
+              dest: '{{ avocado_path }}/autotest'
+            - src: '{{ avocado_vt_path }}/virttest'
+              dest: '{{ avocado_path }}/virttest'
+            - src: '{{ avocado_vt_path }}/etc/avocado/conf.d/vt.conf'
+              dest: '{{ avocado_path }}/etc/avocado/conf.d/vt.conf'
+
+      - name: Install avocado
+        shell: python setup.py --quiet develop
+        args:
+            chdir: "{{ avocado_path }}"
+
+      - name: Bootstrap avocado-vt
+        shell: "./scripts/avocado vt-bootstrap --yes-to-all --vt-type {{ vt_type }} --vt-no-downloads"
+        args:
+            chdir: "{{ avocado_path }}"
+
+      - name: Detect avocado data folder
+        stat:
+          path: /usr/share/avocado
+        register: legacy
+
+      - name: Bootstrap a legacy avocado vt
+        include: tasks/avocado_36lts_test_provider.yaml
+        when: (legacy.stat.isdir is defined and legacy.stat.isdir)
+
+      - name: Bootstrap a latest avocado vt
+        include: tasks/avocado_test_provider.yaml
+        when: not (legacy.stat.isdir is defined and legacy.stat.isdir)
+
+      - name: Bootstrap avocado-vt again to make linked tp_libvirt take effect
+        shell: "./scripts/avocado vt-bootstrap --yes-to-all --vt-type {{ vt_type }} --vt-no-downloads"
+        args:
+            chdir: "{{ avocado_path }}"
+
+      - name: Ensure kvm module loaded
+        shell: "modprobe kvm"
+        when: "ansible_machine == 's390x'"
+
+      - name: Restart firewalld service
+        service: name=firewalld state=restarted
+        ignore_errors: yes
+
+      - name: Restart virtlogd.socket
+        service: name=virtlogd.socket state=restarted
+        ignore_errors: yes
+
+      - name: Restart libvirtd service
+        service: name=libvirtd state=restarted
+        ignore_errors: yes

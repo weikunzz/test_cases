@@ -1,0 +1,16 @@
+---
+# Mount the nfs directory
+
+      - name: create mount point
+        file: dest=nfs_params.dest_dir owner=root group=root mode=644 state=directory
+
+      - name: echo
+        shell: echo '{{nfs_params.dest_dir}}' > /tmp/var_dest; echo '{{nfs_params.nfs_src}}' >/tmp/var_src
+
+      - name: hard mount the nfs dir to dest dir
+        shell: mount -o rw,hard,intr '{{nfs_params.nfs_src}}'  '{{nfs_params.dest_dir}}'
+        when: ( not nfs_params.cleanup and nfs_params.hard_mnt )
+
+      - name: soft mount the nfs dir to dest dir
+        shell: mount -o rw,soft '{{nfs_params.nfs_src}}'  '{{nfs_params.dest_dir}}'
+        when: ( not nfs_params.cleanup and not nfs_params.hard_mnt )

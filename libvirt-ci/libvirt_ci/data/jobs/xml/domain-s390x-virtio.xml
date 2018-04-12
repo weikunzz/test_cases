@@ -1,0 +1,52 @@
+<domain type="kvm">
+  <name>{{name}}</name>
+  <memory unit="KiB">1048576</memory>
+  <currentMemory unit="KiB">1048576</currentMemory>
+  <vcpu placement="static">2</vcpu>
+  <resource>
+    <partition>/machine</partition>
+  </resource>
+  <os>
+    <type arch="s390x" machine="s390-ccw-virtio">hvm</type>
+    <boot dev="hd"/>
+  </os>
+  <clock offset="utc"/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <emulator>/usr/libexec/qemu-kvm</emulator>
+    <disk type="file" device="disk">
+      <driver name="qemu" type="qcow2"/>
+      <source file="{{image_path}}"/>
+      <backingStore/>
+      <target dev="vda" bus="virtio"/>
+    </disk>
+    <controller type="scsi" index="0" model="virtio-scsi">
+    </controller>
+    <controller type="virtio-serial" index="0">
+    </controller>
+    <interface type="bridge">
+      <source bridge="virbr0"/>
+      <target dev="vnet0"/>
+      <model type="virtio"/>
+    </interface>
+    <serial type='pty'>
+    </serial>
+    <console type="pty" tty="/dev/pts/0">
+      <source path="/dev/pts/0"/>
+      <target type="virtio" port="0"/>
+    </console>
+    <memballoon model="virtio">
+    </memballoon>
+    <panic model="s390"/>
+  </devices>
+  <seclabel type="dynamic" model="selinux" relabel="yes">
+    <label>system_u:system_r:svirt_t:s0:c508,c708</label>
+    <imagelabel>system_u:object_r:svirt_image_t:s0:c508,c708</imagelabel>
+  </seclabel>
+  <seclabel type="dynamic" model="dac" relabel="yes">
+    <label>+107:+107</label>
+    <imagelabel>+107:+107</imagelabel>
+  </seclabel>
+</domain>

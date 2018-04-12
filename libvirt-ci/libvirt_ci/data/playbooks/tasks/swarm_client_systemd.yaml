@@ -1,0 +1,19 @@
+- name: Add jswarm systemd unit file
+  template:
+      src: templates/jswarm.service.j2
+      dest: /etc/systemd/system/jswarm.service
+      owner: root
+      group: root
+      mode: '0644'
+
+- name: restart jswarm service, also issue daemon-reload to pick up config changes
+  systemd:
+    state: restarted
+    daemon_reload: yes
+    name: jswarm
+
+- name: Enable jswarm service
+  systemd:
+      name: jswarm
+      enabled: yes
+      masked: no

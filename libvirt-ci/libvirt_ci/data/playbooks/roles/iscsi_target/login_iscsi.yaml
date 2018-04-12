@@ -1,0 +1,61 @@
+---
+# Discovery and login iSCSI target
+
+- name: Use iSCSI target iqn as initiator name
+  set_fact:
+    initiator_name: "{{ iscsi_params.target_name }}"
+  when: (iscsi_params.acl_client is undefined) or (required_method == 'tgt')
+
+- name: Use ACL client name as initiator name
+  set_fact:
+    initiator_name: "{{ iscsi_params.acl_client }}"
+  when:
+    - iscsi_params.acl_client is defined
+    - required_method == 'lio'
+
+- name: Update /etc/iscsi/initiatorname.iscsi
+  lineinfile:
+    path: /etc/iscsi/initiatorname.iscsi
+    regexp: "^InitiatorName="
+    line: "InitiatorName={{initiator_name}}"
+    state: present
+    backup: yes
+  register: initiator_file
+
+- name: Rename the backup file
+  command: "mv {{ initiator_file.backup }} /etc/iscsi/.initiatorname.iscsi.bk"
+  when: initiator_file.backup
+
+- name: Make sure iscsid is running
+  service:
+    name: iscsid
+    state: restarted
+
+- name: Discover the iSCSI target
+  open_iscsi:
+    show_nodes: True
+    discover: True
+    portal: "{{ iscsi_params.portal }}"
+    target: "{{ iscsi_params.target_name }}"
+
+- name: Set CHAP authentication for initiator
+  command: "iscsiadm --mode node --target {{ iscsi_params.target_name }} --op update --name {{ item.name }} --value {{ item.value }}"
+  with_items:
+    - {name: 'node.session.auth.authmethod', value: 'CHAP'}
+    - {name: 'node.session.auth.username', value: "{{ iscsi_params.chap_user }}"}
+    - {name: 'node.session.auth.password', value: "{{ iscsi_params.chap_password }}"}
+  when: (iscsi_params.chap_user is defined) and (iscsi_params.chap_password is defined)
+
+# - name: Discover the iSCSI target with CHAP authentication
+#   open_iscsi:
+#     show_nodes: True
+#     portal: "{{ iscsi_params.portal }}"
+#     target: "{{ iscsi_params.target_name }}"
+#     node_user: "{{ iscsi_params.chap_user }}"
+#     node_pass: "{{ iscsi_params.chap_password }}"
+#   when: (iscsi_params.chap_user is defined) and (iscsi_params.chap_password is defined)
+
+- name: Login the iSCSI target
+  open_iscsi:
+    login: True
+    target: "{{ iscsi_params.target_name }}"

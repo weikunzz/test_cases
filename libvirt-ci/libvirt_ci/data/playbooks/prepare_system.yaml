@@ -1,0 +1,166 @@
+- name: Wait for hosts to be connectible
+  hosts: all
+  gather_facts: no
+  tasks:
+    - name: Wait for hosts to be connectible
+      local_action: wait_for
+      args:
+          port: 22
+          host: "{{ inventory_hostname }}"
+          search_regex: 'OpenSSH'
+          delay: 3
+          timeout: "{{ connect_timeout }}"
+
+- name: Bootstrap test system
+  hosts: all
+  vars:
+      libvirt_ci_branch: "master"
+  vars_files:
+    - vars/password.yaml
+  tasks:
+    - name: Update SSH configuration files
+      lineinfile:
+        dest: "{{ item.dest }}"
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        state: present
+      register: ssh_config
+      with_items:
+          - regexp: '^UseDNS'
+            dest: '/etc/ssh/sshd_config'
+            line: "UseDNS no"
+          - regexp: '^UserKnownHostsFile'
+            dest: '/etc/ssh/ssh_config'
+            line: "\tUserKnownHostsFile=/dev/null"
+          - regexp: '^StrictHostKeyChecking'
+            dest: '/etc/ssh/ssh_config'
+            line: "\tStrictHostKeyChecking=no"
+          - regexp: '^CheckHostIP'
+            dest: '/etc/ssh/ssh_config'
+            line: "\tCheckHostIP=no"
+
+    - name: Restart SSH daemon
+      service:
+        name: sshd
+        state: restarted
+      when: 'ssh_config.changed'
+
+    - name: Enable CA cert update
+      command: 'update-ca-trust enable'
+
+    - name: Download CA certificates
+      get_url:
+          url: '{{ item }}'
+          dest: '/etc/pki/ca-trust/source/anchors/'
+          validate_certs: 'no'
+      with_items:
+          - 'https://password.corp.redhat.com/legacy.crt'
+          - 'https://password.corp.redhat.com/RH-IT-Root-CA.crt'
+          - 'https://engineering.redhat.com/Eng-CA.crt'
+
+    - name: Extract CA certs
+      command: 'update-ca-trust extract'
+
+    - name: Prepare yum repos
+      yum_repository:
+          name: '{{ item.name }}'
+          description: '{{ item.name }}'
+          baseurl: '{{ item.baseurl }}'
+          skip_if_unavailable: '{{ item.skip_if_unavailable }}'
+          gpgcheck: '{{ item.gpgcheck }}'
+          enabled: '{{ item.enabled }}'
+          exclude: '{{ item.exclude is defined | ternary(item.exclude, "") }}'
+      with_items: '{{ yum_repos }}'
+
+    - name: Prepare required rpm packages
+      yum:
+          name: '{{ item }}'
+          state: 'present'
+      with_items:
+          # pip is used by everyone
+          - 'python-pip'
+          # Install libvirt-ci using git URL requires git
+          - 'git'
+          # Jenkins swarm requires java
+          - 'java'
+          # yum provided pyparsing is confict with latest setuptools,
+          # Install pyparsing here to make sure later pip installed setuptools
+          # can't shadow yum provides version.
+          - 'pyparsing'
+          # Required for ansible pip installation
+          - 'python-devel'
+          # Required for pip install compiled packages like netifaces etc.
+          - 'gcc'
+          # Required for psycopg2 installation when running several provisioner
+          # tasks
+          - 'postgresql-devel'
+          # Required for ansible installation
+          - 'libffi-devel'
+          - 'openssl-devel'
+          # Required for ansible execution on SELinux enabled nodes
+          - 'libselinux-python'
+
+    - name: Prepare pip stack to avoid conflict
+      pip:
+          name: '{{ item }}'
+          state: 'latest'
+      with_items:
+          - 'pip'
+          - 'setuptools'
+          - 'virtualenv'
+
+    - name: Install/Update libvirt-ci package
+      pip:
+          name: 'git+http://git.host.prod.eng.bos.redhat.com/git/libvirt-ci@{{ libvirt_ci_branch }}'
+          editable: false
+
+    - include: tasks/prepare_parameters.yaml
+
+    - include: tasks/update_password.yaml
+
+
+- name: Prepare worker host environment
+  hosts: worker
+  tasks:
+    - name: Prepare jenkins group
+      group:
+          name: jenkins
+
+    - name: Prepare jenkins user
+      user:
+          name: jenkins
+          group: jenkins
+
+    - name: Allow jenkins to have passwordless sudo
+      lineinfile:
+          dest: /etc/sudoers
+          state: present
+          regexp: '^jenkins'
+          line: 'jenkins ALL=(ALL) NOPASSWD: ALL'
+          validate: visudo -cf %s
+
+    - name: Download swarm client
+      get_url:
+          url: 'http://libvirt-jenkins.rhev-ci-vms.eng.rdu2.redhat.com//userContent/swarm-client.jar'
+          dest: '/root/'
+
+    - include: tasks/swarm_client_sysv.yaml
+      when:
+          - ansible_os_family == "RedHat"
+          - ansible_distribution_major_version == "6"
+
+    - include: tasks/swarm_client_systemd.yaml
+      when:
+          - ansible_distribution_major_version|int > 6
+
+
+- name: Prepare resource host environment
+  hosts: resource
+  vars_files:
+    - vars/packages.yaml
+  tasks:
+    - include: tasks/install_packages_beaker.yaml
+    - include: tasks/prepare_image.yaml
+      when: 'img_url is defined and img_url != "" and img_dest != ""'
+    - include: tasks/install_guest.yaml
+      when: 'guest_name is defined and guest_name != ""'

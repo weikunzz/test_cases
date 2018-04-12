@@ -1,0 +1,5 @@
+[gerrit]
+host=code.engineering.redhat.com
+port=22
+project=libvirt-ci
+defaultbranch=master

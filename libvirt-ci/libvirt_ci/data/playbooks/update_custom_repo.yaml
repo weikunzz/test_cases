@@ -1,0 +1,61 @@
+- name: Download pkgs in repos
+  hosts: all
+  max_fail_percentage: 0
+  tasks:
+    - block:
+        # Use tempfile module after 2.3.0
+        - name: Create temp directories
+          shell: mktemp -d
+          register: "tempdir"
+
+
+        - block:
+            - name: Add rhpkg yum repo
+              template:
+                  src: templates/rhpkg.repo.j2
+                  dest: /etc/yum.repos.d/rhpkg.repo
+
+
+            - name: Update brew package
+              yum:
+                  name: brewkoji
+                  state: latest
+
+
+            - name: Download RPMs for each arch to temporary path
+              shell: "brew download-build {{ extra_opt }} --arch={{ item }} {{ package }}"
+              args:
+                  chdir: "{{ tempdir.stdout }}"
+              ignore_errors: yes
+              with_items: "{{ arch + ['noarch'] }}"
+              when: '{{ package is defined and package != "" }}'
+
+
+            - name: Download RPMs for each arch to temporary path from task id
+              shell: "brew download-task {{ task_id }}"
+              args:
+                  chdir: "{{ tempdir.stdout }}"
+              when: '{{ task_id is defined and task_id != "" }}'
+
+
+            - include: tasks/prepare_pkgs_in_repos.yaml work_dir={{ tempdir.stdout }}
+              with_items: "{{ repo_list }}"
+              loop_control:
+                  loop_var: repo_path
+          always:
+            - name: Clean up temp directory
+              file:
+                  path: "{{ tempdir.stdout }}"
+                  state: absent
+      when: "{{ prepare_pkgs is defined and prepare_pkgs == 'true' }}"
+
+
+- name: Create repos database
+  hosts: all
+  tasks:
+    - block:
+        - include: tasks/create_repos_db.yaml
+          with_items: "{{ repo_list }}"
+          loop_control:
+              loop_var: repo_path
+      when: "{{ create_repo is defined and create_repo == 'true' }}"

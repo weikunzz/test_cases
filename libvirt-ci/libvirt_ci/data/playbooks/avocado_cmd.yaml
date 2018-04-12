@@ -1,0 +1,10 @@
+- hosts: "{{remote}}"
+  gather_facts: no
+  tasks:
+      - name: Cleanup left qemu process
+        shell: "pkill qemu"
+        ignore_errors: yes
+
+      - name: Run avocado command
+        shell: "source {{venv_path}}/bin/activate && source ~/.bashrc &&
+                timeout {{timeout}} avocado {{ avocado_cmd }} {{ options }}"

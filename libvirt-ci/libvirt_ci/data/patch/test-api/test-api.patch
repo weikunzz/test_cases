@@ -1,0 +1,39 @@
+diff --git a/repos/domain/update_devflag.py b/repos/domain/update_devflag.py
+index 3f7d530..e0a700b 100644
+--- a/repos/domain/update_devflag.py
++++ b/repos/domain/update_devflag.py
+@@ -161,7 +161,7 @@ def update_devflag(params):
+     floppy_path = params.get('floppy_path', '/tmp/floppy.img')
+ 
+     pwd = os.getcwd()
+-    result = re.search('(.*)libvirt-test-API', pwd)
++    result = re.search('(.*)test-api', pwd)
+     homepath = result.group(0)
+ 
+     conn = sharedmod.libvirtobj['conn']
+diff --git a/templates/consumption_snapshot_iscsi.conf b/templates/consumption_snapshot_iscsi.conf
+index 379d660..a117965 100644
+--- a/templates/consumption_snapshot_iscsi.conf
++++ b/templates/consumption_snapshot_iscsi.conf
+@@ -22,7 +22,7 @@ domain:install_linux_cdrom
+     memory
+         #MEMORY#
+     diskpath
+-        /dev/disk/by-path/ip-10.66.90.100:3260-iscsi-iqn.2001-05.com.equallogic:0-8a0906-6eb1f7d03-30cf49b25f24f94d-libvirt-1-150313-lun-0
++        /dev/disk/by-path/ip-127.0.0.1:3260-iscsi-iqn.2016-03.com.redhat.englab.nay:libvirt-test-api-logical-lun-0
+     hddriver
+         #VBD#
+     nicdriver
+diff --git a/utils/utils.py b/utils/utils.py
+index 9bb753b..ca9c024 100644
+--- a/utils/utils.py
++++ b/utils/utils.py
+@@ -349,7 +349,7 @@ def parse_xml(file, element):
+ def locate_utils():
+     """Get the directory path of 'utils'"""
+     pwd = os.getcwd()
+-    result = re.search('(.*)libvirt-test-API(.*)', pwd)
++    result = re.search('(.*)test-api(.*)', pwd)
+     return result.group(0) + "/utils"
+ 
+ def mac_to_ip(mac, timeout, br = 'virbr0'):

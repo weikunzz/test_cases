@@ -1,0 +1,117 @@
+- job-template:
+    name: '{component}-{product}-{version}-runtest-{arch}-coverage_build'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    parameters:
+        - libvirt-ci-branch
+        - node-label:
+            default: '{jslavename}'
+        - string:
+            name: CI_PATCH_URL
+            default: '{patch-url}'
+            description: "Patch URL for applying to libvirt repo"
+        - string:
+            name: CI_COVERAGE_SERVER
+            default: '{coverage-server}'
+            description: Coverage pool address
+        - string:
+            name: CI_GIT_COMMIT
+            default: '{git-commit}'
+            description: "Git commit or tag will be used"
+    scm:
+        - libvirt-ci
+    wrappers:
+        - default-ci-wrappers
+    builders:
+        - shell:
+            !include-raw:
+                - scripts/setup_venv.sh
+                - scripts/install_libvirt_ci.sh
+                - scripts/build_coverage_package.sh
+                - scripts/clear_venv.sh
+
+    publishers:
+        - test-runner-publisher:
+            teardown-project: '{component}-{product}-{version}-teardown-{arch}-{job-suffix}'
+            artifacts: '**'
+            unstable-thld: '0'
+            failure-thld: '100'
+            enable-report: 'false'
+            recipients: 'lhuang@redhat.com'
+
+
+- job-group:
+    name: coverage_rpm_build-provision-runtest-teardown
+    venv_dir: 'coverage_package_builder'
+    project: 'coverage_rpm_build'
+    component: 'libvirt'
+    job-suffix: 'coverage_build'
+    jslavename: 'jslave-libvirt-{product}-{version}-coverage_rpm_build-{arch}'
+    brew-packages: 'libvirt'
+    trigger-package: 'libvirt'
+    timed: ''
+    token: 'd41d8cd98f00b204e9800998ecf8427ea'
+    location: 'US'
+    ndisk: ''
+    need_numa: false
+    need_cpu_vendor: ''
+    need_westmere: false
+    min_mem: '7000'
+    min_disk: '70000'
+    need_hvm: false
+    need_1g_hugepage: false
+    reserve-days: 1
+    custom-playbook: ''
+    only-rhel-repos: true
+    enable_iommu: false
+    ignore_panic: false
+    quiet-period: 180
+    img-url: ''
+    resource-img-dest: ''
+    resource-guest-name: ''
+    days-to-keep: -1
+    num-to-keep: -1
+    repo-path: '/srv/www/html/libvirt-CI-Coverage-repos'
+    patch-url: ''
+    coverage-server: '10.66.4.127:8000'
+    libvirt-repo: 'git://git.host.prod.eng.bos.redhat.com/libvirt-rhel.git'
+    git-commit: ''
+    virtcov: 'https://github.com/LuyaoHuang/virtcov.git'
+    jobs:
+        - '{component}-{product}-{version}-provision-{arch}-{job-suffix}'
+        - '{component}-{product}-{version}-runtest-{arch}-coverage_build'
+        - '{component}-{product}-{version}-teardown-{arch}-{job-suffix}'
+
+
+- project:
+    name: coverage-rpm-build-jobs-x86_64
+    arch: 'x86_64'
+    skip-scratch: 'TRUE'
+    resource-host: false
+    product: 'RHEL'
+    target: ci-osp
+    hypervisor: ''
+    version:
+        - '6.9'
+        - '7.2'
+        - '7.3'
+        - '7.4'
+        - '7.5'
+    jobs:
+        - coverage_rpm_build-provision-runtest-teardown
+
+- project:
+    name: coverage-rpm-build-jobs-ppc64le
+    arch: 'ppc64le'
+    skip-scratch: 'TRUE'
+    resource-host: false
+    product: 'RHEL'
+    target: bkr
+    hypervisor: 'kvm'
+    version:
+        - '7.2'
+        - '7.3'
+        - '7.4'
+        - '7.5'
+    jobs:
+        - coverage_rpm_build-provision-runtest-teardown

@@ -1,0 +1,25 @@
+---
+# Cleanup the nfs configuration
+
+      - name: delete shared directory
+        file: dest=nfs_params.shared_dir  state=absent
+
+      - name: modify exports file
+        lineinfile:
+            dest: /etc/exports
+            regexp: '[\s\S]*'
+            state: absent
+
+      - name: start nfs-server service for rhel7
+        service: name=nfs-server state=restarted enabled=yes
+        when: ansible_os_family == "RedHat" and ansible_distribution_major_version == '7'
+
+      - name: start nfs service for rhel6
+        service: name=nfs state=restarted enabled=yes
+        when: ansible_os_family == "RedHat" and ansible_distribution_major_version == '6'
+
+      - name: start rpcbind service
+        service: name=rpcbind state=restarted enabled=yes
+
+      - name: run exportfs
+        shell: exportfs

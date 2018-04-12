@@ -1,0 +1,5 @@
+- name: Update yum repo data
+  shell: createrepo .
+  args:
+      chdir: "{{ repo_path }}/{{ item }}"
+  with_items: "{{ arch }}"

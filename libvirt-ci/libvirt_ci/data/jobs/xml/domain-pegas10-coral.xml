@@ -1,0 +1,87 @@
+<domain type='kvm'>
+  <name>avocado-vt-vm1</name>
+  <memory unit='KiB'>20971520</memory>
+  <currentMemory unit='KiB'>20971520</currentMemory>
+  <vcpu placement='static'>20</vcpu>
+  <cputune>
+    <vcpupin vcpu='0' cpuset='10'/>
+    <vcpupin vcpu='1' cpuset='10'/>
+    <vcpupin vcpu='2' cpuset='10'/>
+    <vcpupin vcpu='3' cpuset='10'/>
+    <vcpupin vcpu='4' cpuset='18'/>
+    <vcpupin vcpu='5' cpuset='18'/>
+    <vcpupin vcpu='6' cpuset='18'/>
+    <vcpupin vcpu='7' cpuset='18'/>
+    <vcpupin vcpu='8' cpuset='26'/>
+    <vcpupin vcpu='9' cpuset='26'/>
+    <vcpupin vcpu='10' cpuset='26'/>
+    <vcpupin vcpu='11' cpuset='26'/>
+    <vcpupin vcpu='12' cpuset='34'/>
+    <vcpupin vcpu='13' cpuset='34'/>
+    <vcpupin vcpu='14' cpuset='34'/>
+    <vcpupin vcpu='15' cpuset='34'/>
+    <vcpupin vcpu='16' cpuset='42'/>
+    <vcpupin vcpu='17' cpuset='42'/>
+    <vcpupin vcpu='18' cpuset='42'/>
+    <vcpupin vcpu='19' cpuset='42'/>
+  </cputune>
+  <numatune>
+    <memory mode='preferred' nodeset='0'/>
+  </numatune>
+  <resource>
+    <partition>/machine</partition>
+  </resource>
+  <os>
+    <type arch='ppc64le' machine='pseries'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <cpu>
+    <topology sockets='2' cores='10' threads='1'/>
+  </cpu>
+  <clock offset='utc'/>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>restart</on_crash>
+  <devices>
+    <emulator>/usr/libexec/qemu-kvm</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' cache='none'/>
+      <source file='/var/lib/avocado/data/avocado-vt/images/jeos-27-x86_64.qcow2'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <target dev='sda' bus='scsi'/>
+      <readonly/>
+    </disk>
+    <controller type='usb' index='0' model='qemu-xhci'>
+    </controller>
+    <controller type='pci' index='0' model='pci-root'>
+    </controller>
+    <controller type='scsi' index='0'>
+    </controller>
+    <controller type='virtio-serial' index='0'>
+    </controller>
+    <interface type='network'>
+      <source network='default'/>
+      <model type='virtio'/>
+    </interface>
+    <serial type='pty'>
+      <target type='isa-serial' port='0'/>
+    </serial>
+    <graphics type='vnc' port='-1' autoport='yes'/>
+    <console type='pty'>
+      <target type='serial' port='0'/>
+    </console>
+    <channel type='unix'>
+      <target type='virtio' name='org.qemu.guest_agent.0'/>
+      <address type='virtio-serial' controller='0' bus='0' port='1'/>
+    </channel>
+    <memballoon model='virtio'>
+    </memballoon>
+    <panic model='pseries'/>
+  </devices>
+  <seclabel type='none' model='none'/>
+  <seclabel type='dynamic' model='dac' relabel='yes'/>
+</domain>
+

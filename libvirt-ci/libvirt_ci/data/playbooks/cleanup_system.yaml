@@ -1,0 +1,27 @@
+- name: Cleanup test system
+  hosts: all
+  tasks:
+    - name: Remove line in /etc/rc.d/rc.local to disable swarm from autostart
+      lineinfile:
+          dest: '/etc/rc.d/rc.local'
+          regexp: ".*swarm-client.*"
+          insertafter: EOF
+          state: absent
+      ignore_errors: yes
+          - ansible_os_family == "RedHat"
+          - ansible_distribution_major_version == "6"
+
+    - name: Kill jswarm process
+      command: pkill -f swarm
+      ignore_errors: yes
+      when:
+          - ansible_os_family == "RedHat"
+          - ansible_distribution_major_version == "6"
+
+    - name: Stop and disable jswarm service
+      systemd:
+          name: jswarm
+          state: stopped
+          enabled: no
+      when:
+          - ansible_distribution_major_version|int > 6

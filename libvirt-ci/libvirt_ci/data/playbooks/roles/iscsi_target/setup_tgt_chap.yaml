@@ -1,0 +1,15 @@
+- name: List the current CHAP account
+  command: "tgtadm --lld iscsi --op show --mode account"
+  register: cmd_ret
+
+- name: Add CHAP authentication account
+  command: "tgtadm --lld iscsi --mode account --op new --user {{ iscsi_params.chap_user }} --password {{ iscsi_params.chap_password }}"
+  when: not cmd_ret.stdout | search(iscsi_params.chap_user)
+
+- name: Get the target account information
+  command: "tgtadm --lld iscsi --mode target --op show"
+  register: cmd_ret
+
+- name: Bind account to the target device
+  command: "tgtadm --lld iscsi --mode account --op bind --tid 1 --user {{ iscsi_params.chap_user }}"
+  when: not cmd_ret.stdout | search(iscsi_params.chap_user)

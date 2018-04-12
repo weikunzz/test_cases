@@ -1,0 +1,42 @@
+From a5459a64468f2a5d7a99b38813615a189fbd3fbd Mon Sep 17 00:00:00 2001
+From: Dan Zheng <dzheng@redhat.com>
+Date: Wed, 22 Nov 2017 17:18:44 +0800
+Subject: [PATCH] utils/cpu: Check cpu list for s390x
+
+The output in /proc/cpuinfo is different between s390x and other archs.
+This is to support to parse the output on s390x.
+
+Signed-off-by: Dan Zheng <dzheng@redhat.com>
+---
+ avocado/utils/cpu.py | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/avocado/utils/cpu.py b/avocado/utils/cpu.py
+index cac3b27c6..0245fcbdc 100644
+--- a/avocado/utils/cpu.py
++++ b/avocado/utils/cpu.py
+@@ -22,6 +22,7 @@
+ 
+ import re
+ import os
++import platform
+ 
+ 
+ def _list_matches(lst, pattern):
+@@ -134,9 +135,14 @@ def cpu_online_list():
+     Reports a list of indexes of the online cpus
+     """
+     cpus = []
++    search_str = 'processor'
++    index = 2
++    if platform.machine() == 's390x':
++        search_str = 'cpu number'
++        index = 3
+     for line in open('/proc/cpuinfo', 'r'):
+-        if line.startswith('processor'):
+-            cpus.append(int(line.split()[2]))  # grab cpu number
++        if line.startswith(search_str):
++            cpus.append(int(line.split()[index]))  # grab cpu number
+     return cpus
+ 
+ 

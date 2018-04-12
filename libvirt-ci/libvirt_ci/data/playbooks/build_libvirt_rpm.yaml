@@ -1,0 +1,101 @@
+- name: Build libvirt rpm
+  hosts: work_host
+  max_fail_percentage: 0
+  tasks:
+    - block:
+        - include: tasks/prepare_libvirt_develop_env.yaml
+
+        - name: Prepare qemu-img package
+          package: state=latest name=qemu-img
+
+        - name: Setup build environment
+          shell: ./autogen.sh
+          args:
+              chdir: "{{ git_repo_path }}"
+
+        - name: Clean up existing rpm packages
+          file:
+              path: "{{ rpm_dir }}/{{ item }}"
+              state: absent
+          with_items:
+              - "{{ arch }}"
+
+        - name: Build libvirt RPM packages
+          shell: make rpm
+          args:
+              chdir: "{{ git_repo_path }}"
+
+      always:
+        - name: Remove local tmp patch
+          file:
+              path: "{{ local_patch }}"
+              state: absent
+
+        - name: Clean libvirt repo
+          shell: git reset --hard origin
+          args:
+              chdir: "{{ git_repo_path }}"
+
+        - name: Clean the libvirt dir
+          shell: git clean -d -f
+          args:
+              chdir: "{{ git_repo_path }}"
+
+- name: Update coverage repo
+  hosts: storage_host
+  max_fail_percentage: 0
+  tasks:
+    - block:
+        - name: Ensures repo dir exists
+          file:
+              path: "{{ repo_path }}"
+              state: directory
+
+        - name: Create directories for each arch
+          file:
+              path: "{{ repo_path }}/{{ item }}"
+              state: directory
+          with_items:
+              - "{{ arch }} + ['noarch', 'temp', 'backup']"
+
+        - name: Copy coverage packages to storage host
+          copy:
+              src: "{{ rpm_dir }}/{{ item }}"
+              dest: "{{ repo_path }}/temp"
+          with_items: "{{ arch }}"
+
+        - name: Copy all RPMs to backup directory
+          shell: "cp {{ repo_path }}/temp/{{ item }}/*.rpm {{ repo_path }}/backup"
+          ignore_errors: yes
+          with_items: "{{ arch }}"
+
+        - name: Check if any noarch PRMs exists
+          find:
+              paths: "{{ repo_path }}/temp"
+              patterns: "*.noarch.rpm"
+          register: "found_noarch"
+
+        - name: Copy noarch RPMs to each arch
+          shell: "cp {{ repo_path }}/temp/{{ item }}/*.noarch.rpm {{ repo_path }}/{{ item }}"
+          ignore_errors: yes
+          when: "{{ found_noarch.matched > 0 }}"
+          with_items: "{{ arch }}"
+
+        - name: Copy specific arch RPMs to each arch
+          shell: "cp {{ repo_path }}/temp/{{ item }}/*.{{ item }}.rpm {{ repo_path }}/{{ item }}"
+          ignore_errors: yes
+          with_items: "{{ arch }}"
+
+        - name: Update yum repo data
+          shell: createrepo .
+          args:
+              chdir: "{{ repo_path }}/{{ item }}"
+          with_items: "{{ arch }}"
+
+      always:
+        - name: Clean up temp directory
+          file:
+              path: "{{ repo_path }}/temp"
+              state: absent
+
+      when: repo_path != ""

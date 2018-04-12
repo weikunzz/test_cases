@@ -1,0 +1,17 @@
+- hosts: all
+  vars:
+      git_repo_path: "{{ libvirt_path }}"
+      patch_url: "{{ lookup('env','CI_PATCH_URL') }}"
+      commit: "{{ lookup('env','CI_GIT_COMMIT') }}"
+  tasks:
+    - include: tasks/prepare_libvirt_develop_env.yaml
+
+    - name: Setup build environment
+      shell: ./autogen.sh --enable-werror
+      args:
+          chdir: "{{ libvirt_path }}"
+
+    - name: Compile libvirt source code
+      shell: make all -j 4
+      args:
+          chdir: "{{ libvirt_path }}"

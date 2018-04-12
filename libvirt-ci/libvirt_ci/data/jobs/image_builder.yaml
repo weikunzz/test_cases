@@ -1,0 +1,176 @@
+- job-template:
+    name: 'image_build-{product}-{version}-runtest-{arch}-{job-suffix}'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    concurrent: false
+    project-type: freestyle
+    disabled: false
+    quiet-period: 5
+    block-downstream: false
+    block-upstream: false
+    retry-count: 3
+    parameters:
+        - libvirt-ci-branch
+        - teardown-slave-toggle
+        - ci-message
+        - node-label:
+            default: '{jslavename}'
+        - string:
+            name: URL_PREFIX
+            default: '{url-prefix}'
+            description: URL prefix of product yum tree
+        - string:
+            name: DISTRO
+            default: '{distro}'
+            description: Distro of updating image
+    wrappers:
+        - default-ci-wrappers
+    scm:
+        - libvirt-ci
+    builders:
+        - shell:
+            !include-raw:
+                - scripts/setup_venv.sh
+                - scripts/install_libvirt_ci.sh
+                - scripts/build_image.sh
+                - scripts/clear_venv.sh
+    publishers:
+        - test-runner-publisher:
+            teardown-project: '{component}-{product}-{version}-teardown-{arch}-{job-suffix}'
+            artifacts: '**'
+            unstable-thld: '100'
+            failure-thld: '100'
+            enable-report: 'true'
+            recipients: 'gsun@redhat.com'
+
+- job-group:
+    name: 'image-build-workflow'
+    venv_dir: 'image-builder'
+    component: 'image_build'
+    jslavename: 'jslave-{component}-{product}-{version}-{arch}-{job-suffix}'
+    timed: ''
+    token: 'd41d8cd98f00b204e9800998ecf8427ea'
+    target: bkr
+    brew-packages: ''
+    location: '{job-suffix}'
+    ndisk: ''
+    need_numa: false
+    need_cpu_vendor: ''
+    need_westmere: false
+    need_1g_hugepage: false
+    reserve-days: 1
+    custom-playbook: ''
+    hypervisor: ''
+    only-rhel-repos: false
+    enable_iommu: false
+    ignore_panic: false
+    quiet-period: 180
+    img-url: ''
+    resource-img-dest: ''
+    resource-guest-name: ''
+    url-prefix: ''
+    distro: ''
+    resource-host: false
+    days-to-keep: -1
+    num-to-keep: -1
+    jobs:
+        - '{component}-{product}-{version}-provision-{arch}-{job-suffix}'
+        - 'image_build-{product}-{version}-runtest-{arch}-{job-suffix}'
+        - '{component}-{product}-{version}-teardown-{arch}-{job-suffix}'
+
+
+- project:
+    name: image-build-RHEL-jobs-x86_64
+    arch: 'x86_64'
+    job-suffix:
+        - 'CN'
+        - 'US'
+    product: 'RHEL'
+    min_mem: '7000'
+    min_disk: '70000'
+    need_hvm: true
+    version:
+        - '6.9'
+        - '6.10'
+        - '7.3'
+        - '7.4'
+        - '7.5'
+    jobs:
+        - 'image-build-workflow'
+
+
+- project:
+    name: image-build-RHEL-jobs-ppc64le
+    arch: 'ppc64le'
+    job-suffix: 'US'
+    product: 'RHEL'
+    min_mem: '7000'
+    min_disk: '70000'
+    need_hvm: true
+    version:
+        - '7.3'
+        - '7.4'
+        - '7.5'
+    jobs:
+        - 'image-build-workflow'
+
+
+- project:
+    name: image-build-RHEL-ALT-jobs
+    arch:
+        - 'ppc64le'
+    job-suffix: 'US'
+    product: 'RHEL-ALT'
+    min_mem: '7000'
+    min_disk: '70000'
+    need_hvm: true
+    version: '7.5'
+    jobs:
+        - 'image-build-workflow'
+
+
+- project:
+    name: image-build-Fedora-jobs
+    arch:
+        - 'x86_64'
+        - 'ppc64le'
+    job-suffix:
+        - 'CN'
+        - 'US'
+    product: 'Fedora'
+    min_mem: '7000'
+    min_disk: '70000'
+    need_hvm: true
+    version:
+        - '23'
+        - '24'
+    jobs:
+        - 'image-build-workflow'
+
+
+- project:
+    name: image-build-RHEL-ALT-jobs-s390x
+    arch: 's390x'
+    job-suffix: 'US'
+    product: 'RHEL-ALT'
+    min_mem: '2000'
+    min_disk: '10000'
+    need_hvm: false
+    version:
+        - '7.5'
+    jobs:
+        - 'image-build-workflow'
+
+
+- project:
+    name: image-build-RHEL-ALT-jobs-aarch64
+    arch: 'aarch64'
+    job-suffix: 'US'
+    product: 'RHEL-ALT'
+    min_mem: '2000'
+    min_disk: '10000'
+    need_hvm: false
+    version:
+        - '7.5'
+    jobs:
+        - 'image-build-workflow'

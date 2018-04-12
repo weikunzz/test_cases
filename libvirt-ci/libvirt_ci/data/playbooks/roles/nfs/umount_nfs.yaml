@@ -1,0 +1,8 @@
+---
+# Umount the nfs directory
+
+      - name: delete shared directory
+        file:  dest=nfs_params.dest_dir  state=absent
+
+      - name: umount the nfs dir
+        shell: cd; umount '{{nfs_params.dest_dir}}'

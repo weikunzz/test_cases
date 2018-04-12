@@ -1,0 +1,7 @@
+#!/bin/bash
+
+unset http_proxy
+unset https_proxy
+
+python utils/jobs_generator.py config/jobs.yaml
+jenkins-jobs --conf jobs/config update -r jobs $1

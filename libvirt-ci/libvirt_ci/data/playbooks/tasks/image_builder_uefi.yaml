@@ -1,0 +1,62 @@
+- name: Install UEFI packages for x86_64
+  yum:
+      name: "OVMF"
+      state: "present"
+  when: ansible_machine == "x86_64"
+
+- name: Install UEFI packages for aarch64
+  yum:
+      name: "AAVMF"
+      state: "present"
+  when: ansible_machine == "aarch64"
+
+- name: Create image file
+  command: qemu-img create {{ img_path_uefi }} -f qcow2 10G -o preallocation=off
+
+- name: Install VM with UEFI boot option
+  command: virt-install -n image-builder -r 2048 --vcpus=2 --disk path={{ img_path_uefi }} {{ boot }} --location={{ url }} --disk /tmp/ks.iso,device=cdrom -x "ks=cdrom:ks.cfg" --noreboot --wait -1
+
+- name: Undefine VM
+  command: virsh undefine image-builder --nvram
+
+- name: Cleanup image
+  command: virt-sysprep -a {{ img_path_uefi }}
+
+- name: Workaround aarch64 bug 1486376
+  shell: 'guestfish add {{ img_path_uefi }} : run : mount /dev/sda1 / : cp /EFI/BOOT/fbaa64.efi /EFI/BOOT/BOOTAA64.EFI'
+  when: ansible_machine == "aarch64"
+
+- name: Compress image
+  command: xz -z -k {{ img_path_uefi }}
+
+- name: Move x86_64 ovmf image to shared directory
+  command: cp {{ img_path_uefi }} {{ tgt_path_ovmf }}
+  when: ansible_machine == "x86_64"
+
+- name: Move x86_64 ovmf compressed image to shared directory
+  command: cp {{ img_path_uefi }}.xz {{ tgt_path_ovmf }}.xz
+  when: ansible_machine == "x86_64"
+
+- name: Link latest x86_64 ovmf to new image
+  file:
+      src: "{{ img_name_ovmf }}"
+      dest: "{{ tgt_dir }}/{{ product }}-{{ version }}-{{ arch }}-latest-ovmf.qcow2"
+      state: link
+      force: yes
+  when: ansible_machine == "x86_64"
+
+- name: Move image to shared directory
+  command: cp {{ img_path_uefi }} {{ tgt_path }}
+  when: ansible_machine == "aarch64"
+
+- name: Move compressed image to shared directory
+  command: cp {{ img_path_uefi }}.xz {{ tgt_path }}.xz
+  when: ansible_machine == "aarch64"
+
+- name: Link latest to new image
+  file:
+      src: "{{ img_name }}"
+      dest: "{{ tgt_dir }}/{{ product }}-{{ version }}-{{ arch }}-latest.qcow2"
+      state: link
+      force: yes
+  when: ansible_machine == "aarch64"

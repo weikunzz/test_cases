@@ -1,0 +1,47 @@
+- hosts: all
+  vars:
+      arch: 'x86_64'
+      task_id: "{{ lookup('env','BREW_TASKID') }}"
+      ci_brewtask_id: "{{ lookup('env','CI_BREWTASK_ID') }}"
+      rpm_path: '/tmp'
+  tasks:
+      - name: Install required yum packages
+        yum:
+            name: rhpkg,brewkoji
+
+      - name: Clean up existing rpm packages
+        file:
+            path: "{{ item }}"
+            state: absent
+        with_fileglob:
+            - "{{ rpm_path }}/*.rpm"
+
+      - name: Download RPMs for required arch to temporary path
+        shell: "brew download-task --arch={{ item }} {{ task_id }}"
+        args:
+            chdir: "{{ rpm_path }}"
+        ignore_errors: yes
+        when: task_id != ''
+        with_items:
+            - "{{ arch }}"
+            - 'noarch'
+
+      - name: Download RPMs for required arch to temporary path if manually set
+        shell: "brew download-task --arch={{ item }} {{ ci_brewtask_id }}"
+        args:
+            chdir: "{{ rpm_path }}"
+        ignore_errors: yes
+        when: ci_brewtask_id != ''
+        with_items:
+            - "{{ arch }}"
+            - 'noarch'
+
+      - name: Install RPM packages using yum first to resolve dependency
+        shell: yum install -y {{ rpm_path }}/*.rpm
+        ignore_errors: yes
+        register: result
+        when: task_id != '' or ci_brewtask_id != ''
+
+      - name: Install RPM packages using rpm if yum failed
+        shell: rpm -U --force {{ rpm_path }}/*.rpm
+        when: (task_id != '' or ci_brewtask_id != '') and result|failed

@@ -1,0 +1,88 @@
+- job-template:
+    name: 'ci-message-publisher'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    concurrent: true
+    parameters:
+        - libvirt-ci-branch
+        - node-label:
+            default: jslave-libvirt
+        - choice:
+            name: MESSAGE_TYPE
+            choices:
+                - 'tier-0-testing-done'
+                - 'pull-request'
+                - 'code-quality-checks-done'
+                - 'security-checks-done'
+                - 'peer-review-done'
+                - 'component-build-done'
+                - 'unit-test-coverage-done'
+                - 'tier-1-testing-done'
+                - 'update-defect-status'
+                - 'test-coverage-done'
+                - 'tier-2-integration-testing-done'
+                - 'product-build-done'
+                - 'tier-2-validation-testing-done'
+                - 'product-test-coverage-done'
+                - 'early-performance-testing-done'
+                - 'early-security-testing-done'
+                - 'functional-testing-done'
+                - 'tier-3-testing-done'
+                - 'nonfunctional-testing-done'
+                - 'product-accepted-for-release-testing'
+                - 'product-build-in-staging'
+                - 'ootb-testing-done'
+                - 'image-uploaded'
+                - 'testing-started'
+                - 'testing-completed'
+            description: "Which CI Message Type this message is?"
+            default: 'tier-0-testing-done'
+        - string:
+            name: PACKAGE
+            default: 'ci-test'
+            description: |
+                The package name in the CI Message, e.g. 'ci-test'
+        - string:
+            name: VERSION
+            default: '1.3.5'
+            description: |
+                The package version in the CI Message
+        - string:
+            name: RELEASE
+            default: '1'
+            description: |
+                Customized package release number in CI Message
+        - string:
+            name: ARCH
+            default: 'noarch'
+            description: |
+                Customized package arch in CI Message
+        - string:
+            name: TARGET
+            default: 'rhel-7.3-candidate'
+            description: |
+                Customized package brew target in CI Message header
+        - string:
+            name: OWNER
+            default: 'libvirt-ci'
+            description: |
+                The package build owner in CI Message header
+        - choice:
+            name: SCRATCH
+            choices:
+                - 'TRUE'
+                - 'FALSE'
+                - 'true'
+                - 'false'
+            default: 'ture'
+            description: |
+                The package scratch value (TRUE, FALSE, true, false) in CI Message header
+    scm:
+        - libvirt-ci:
+    builders:
+        - shell:
+            !include-raw:
+                - ../scripts/setup_venv.sh
+                - ../scripts/install_libvirt_ci.sh
+                - ../scripts/publish_message.sh
+                - ../scripts/clear_venv.sh

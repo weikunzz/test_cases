@@ -1,0 +1,41 @@
+- job-template:
+    name: 'libvirt-ma-bug-reporter'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    concurrent: true
+    parameters:
+        - libvirt-ci-branch
+        - node-label:
+            default: jslave-libvirt
+    scm:
+        - libvirt-ci:
+    triggers:
+        - timed: "@midnight"
+    builders:
+        - shell:
+            !include-raw:
+                - ../scripts/setup_venv.sh
+                - ../scripts/install_libvirt_ci.sh
+                - ../scripts/bug_report.sh
+                - ../scripts/clear_venv.sh
+
+- job-template:
+    name: 'libvirt-x86-bug-reporter'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    concurrent: true
+    parameters:
+        - libvirt-ci-branch
+        - node-label:
+            default: jslave-libvirt
+    scm:
+        - libvirt-ci:
+    triggers:
+        - timed: "0 20 * * *"
+    builders:
+        - shell:
+            !include-raw:
+                - ../scripts/setup_venv.sh
+                - ../scripts/install_libvirt_ci.sh
+                - ../scripts/x86_bug_report.sh
+                - ../scripts/clear_venv.sh

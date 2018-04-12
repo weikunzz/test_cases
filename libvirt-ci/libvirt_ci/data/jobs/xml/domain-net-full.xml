@@ -1,0 +1,20 @@
+<network>
+  <name>{{net_name}}</name>
+  <uuid>fa83c712-b179-4da9-914d-ccd327727a07</uuid>
+  <forward mode='nat'>
+    <nat>
+      <port start='1024' end='65535'/>
+    </nat>
+  </forward>
+  <bridge name='virbr0' stp='on' delay='0'/>
+  <mac address='52:54:00:4e:d6:b5'/>
+  <bandwidth>
+    <inbound average='1000' peak='5000' burst='5120'/>
+    <outbound average='128' peak='256' burst='256'/>
+  </bandwidth>
+  <ip address='192.168.122.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='192.168.122.2' end='192.168.122.254'/>
+    </dhcp>
+  </ip>
+</network>

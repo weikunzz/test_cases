@@ -1,0 +1,33 @@
+- defaults:
+    name: ci-teardown
+    venv_dir: 'ci-teardown'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    concurrent: true
+    node: jslave-libvirt
+    properties:
+        - build-discarder:
+            days-to-keep: '{days-to-keep}'
+            num-to-keep: '{num-to-keep}'
+            artifact-days-to-keep: '{days-to-keep}'
+            artifact-num-to-keep: '{num-to-keep}'
+    wrappers:
+        - default-ci-wrappers
+    builders:
+        - shell:
+            !include-raw:
+                - scripts/setup_venv.sh
+                - scripts/install_libvirt_ci.sh
+                - scripts/teardown_slave.sh
+                - scripts/clear_venv.sh
+
+
+- job-template:
+    name: '{component}-{product}-{version}-teardown-{arch}-{job-suffix}'
+    defaults: ci-teardown
+    target: '{target}'
+    teardown_srv_url: 'http://caselink.lab.eng.pek2.redhat.com:9999/LibvirtCINodeManagerService/machine/teardown'
+    ssh_keyfile: libvirt-ci/config/keys/libvirt-jenkins
+    tests_path: libvirt-ci/tests
+    project_defaults: libvirt-ci/config/project_defaults
+    topology_path: libvirt-ci/config

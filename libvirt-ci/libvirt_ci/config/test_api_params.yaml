@@ -1,0 +1,133 @@
+defaults:
+  IFACENAME: eth0
+  IFACETYPE: ethernet
+  PCIADDRESS: '00:19.0'
+  BRIDGEIP: 192.168.111.1
+  BRIDGENAME: TestBr
+  BRIDGENETMASK: 255.255.255.0
+  CAPACITY: '1048576'
+  CPULIST: 0-1
+  DYNAMIC_OWNERSHIP: disable
+  GROUP: libvirt
+  GUESTARCH: x86_64
+  GUESTNAME: virtlab_test
+  GUESTOS: rhel7
+  GUESTTYPE: kvm
+  GUESTVIDEO: qxl
+  GUESTGRAPHIC: spice
+  IMAGETYPE: qcow2
+  ISCSIPOOLNAME: iscsi_pool
+  ISCSISOURCEHOST: 127.0.0.1
+  ISCSISOURCEPATH: iqn.2016-03.com.redhat.englab.nay:libvirt-test-api-logical
+  ISCSITARGETDISK: ip-127.0.0.1:3260-iscsi-iqn.2016-03.com.redhat.englab.nay:libvirt-test-api-logical-lun-0
+  MAXVCPU: '4'
+  MEMORY: '4194304'
+  NETEND: 192.168.111.254
+  NETMETHOD: http
+  NETSTART: 192.168.111.2
+  NETWORKNAME: TestNetwork
+  NFSPOOLNAME: netfs_pool
+  NFSSOURCEHOST: download.libvirt.redhat.com
+  NFSSOURCEPATH: /shared/test_API_nfs
+  NIC: virtio
+  POOLNAME: dir_pool
+  ROOT_SQUASH: 'yes'
+  SCREENSHOT: screenshot
+  SOURCEHOST: 127.0.0.1
+  SOURCENAME: logical_pool
+  SOURCEPATH: iqn.2016-03.com.redhat.englab.nay:libvirt-test-api-logical
+  TARGETPATH: /var/lib/libvirt/images/dir_pool
+  TYPE: define
+  UNIXRO: none
+  UNIXRW: sasl
+  USE_NFS: enable
+  VBD: virtio
+  VCPU: '1'
+  VIRT_USE_NFS: 'on'
+  VOLCLONENAME: vol_dir_clone.img
+  VOLFORMAT: raw
+  VOLNAME: vol_dir_pool.img
+  STATIC_UUID: 05867c1a-afeb-300e-e55e-2673391ae080
+  TARGET_MACHINE: $RESOURCE_IPV4ADDR
+  TARGET_USER: root
+  TARGET_PASSWD: redhat
+  PAGE_OFFSET: '0xffff880000000000'
+  CEPHSERVER: 10.73.75.154
+  CEPHSERVERPOOL: test-api-pool
+  RHEL_NEWEST: ''
+  RHEL_ALT_NEWEST: ''
+
+overrides:
+  - when: test == 'acceptance_numa_param.conf'
+    VCPU: '2'
+
+  - when: test == 'acceptance_storage_dir.conf'
+    CAPACITY: '1G'
+
+  - when: test == 'storage_disk.conf'
+    CAPACITY: '500M'
+    POOLNAME: disk_pool
+    SOURCEPATH: /dev/sdc
+    VOLNAME: vol_disk_pool
+
+  - when: test == 'storage_disk_build_on_active.conf'
+    CAPACITY: '500M'
+    POOLNAME: disk_pool
+    SOURCEPATH: /dev/sdc
+    VOLNAME: vol_disk_pool
+
+  - when: test == 'acceptance_storage_iscsi.conf'
+    POOLNAME: iscsi_pool
+
+  - when: test == 'acceptance_storage_logical.conf' or test == 'storage_logical.conf'
+    CAPACITY: '1000'
+    POOLNAME: logical_pool
+    SOURCEPATH: /dev/sdb1
+    VOLCLONENAME: vol_logical_clone
+    VOLNAME: vol_logical_pool
+
+  - when: test == 'acceptance_storage_mpath.conf'
+    POOLNAME: mpath_pool
+
+  - when: test == 'acceptance_snapshot_rhev_specific_iscsi.conf'
+    SOURCEPATH: /dev/sdd1
+
+  - when: test == 'acceptance_storage_netfs.conf'
+    CAPACITY: '1G'
+    POOLNAME: netfs_pool
+    SOURCEPATH: /shared/test_API_nfs
+    SOURCEHOST: download.libvirt.redhat.com
+    TARGETPATH: /tmp/netfs
+    VOLCLONENAME: vol_netfs_clone
+    VOLFORMAT: qcow2
+    VOLNAME: vol_netfs_pool.qcow2
+
+  - when: test == 'acceptance_storage_scsi.conf'
+    POOLNAME: scsi_pool
+    SOURCENAME: host0
+
+  - when: info.dist_major == 6
+    GUESTOS: rhel6u7
+
+  - when: test == 'domain_win_cdrom_inst.conf'
+    GUESTOS: win2008r2
+    NIC: e1000
+    VBD: ide
+    VCPU: '2'
+
+  - when: info.host_arch == 'ppc64le'
+    GUESTARCH: ppc64le
+    PAGE_OFFSET: '0xc000000000000000'
+    GUESTVIDEO: vga
+    GUESTGRAPHIC: vnc
+    CPULIST: '0'
+
+  - when: test == 'storage_rbd.conf'
+    POOLNAME: rbd_pool
+    VOLNAME: vol_rbd_pool.img
+
+  - when: test == 'storage_dir.conf'
+    CAPACITY: '1G'
+
+  - when: test == 'domain_basic_rhev.conf'
+    SOURCEPATH: /dev/sdb

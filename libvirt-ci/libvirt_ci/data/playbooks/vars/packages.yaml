@@ -1,0 +1,23 @@
+libvirt_packages:
+  - libvirt
+  - libvirt-client
+  - libvirt-debuginfo
+  - libvirt-devel
+  - net-tools
+  - nmap
+  - numactl
+  - pexpect
+  - qemu-kvm-rhev
+  - tcpdump
+  - virt-install
+  - cyrus-sasl-gssapi
+provisioner_packages:
+  - patch
+  - python-keystoneclient
+  - python-novaclient
+  - python-neutronclient
+  - python-glanceclient
+  - postgresql
+  - postgresql-devel
+  - koji
+  - brewkoji

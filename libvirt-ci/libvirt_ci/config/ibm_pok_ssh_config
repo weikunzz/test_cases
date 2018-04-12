@@ -1,0 +1,16 @@
+Host jumpbox
+        ForwardAgent yes
+        Hostname 129.40.28.33
+Host pok-virt2
+        ProxyJump jumpbox
+        Hostname 10.0.0.39
+Host pok-virt6
+        ProxyJump jumpbox
+        Hostname 10.0.1.28
+Host pok-virt7
+        ProxyJump jumpbox
+        Hostname 10.0.1.32
+Host pok-data
+        ProxyJump jumpbox
+        Hostname 10.0.0.7
+        User wayne

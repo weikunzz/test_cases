@@ -1,0 +1,232 @@
+- job-template:
+    name: 'libvirt-jobs-updater'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    parameters:
+        - node-label:
+            default: jslave-libvirt
+    scm:
+        - libvirt-ci-gerrit:
+            refspec: '+refs/heads/*:refs/remotes/origin/*'
+            branch: 'master'
+    triggers:
+        - gerrit:
+            trigger-on:
+                - ref-updated-event
+            projects:
+                - project-compare-type: 'PLAIN'
+                  project-pattern: 'libvirt-ci'
+                  branches:
+                    - branch-compare-type: 'PLAIN'
+                      branch-pattern: 'master'
+    builders:
+        - shell:
+            !include-raw:
+                - ../scripts/setup_venv.sh
+                - ../scripts/update_jobs.sh
+                - ../scripts/clear_venv.sh
+    publishers:
+        - archive:
+            artifacts: 'libvirt-ci/docs/build/**'
+            allow-empty: 'true'
+
+- job-template:
+    name: 'libvirt-auto-doc-updater'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    parameters:
+        - node-label:
+            default: jslave-libvirt
+    scm:
+        - libvirt-auto-doc-gerrit:
+            refspec: '+refs/heads/*:refs/remotes/origin/*'
+            branch: 'master'
+    triggers:
+        - gerrit:
+            trigger-on:
+                - ref-updated-event
+            projects:
+                - project-compare-type: 'PLAIN'
+                  project-pattern: 'libvirt-auto-doc'
+                  branches:
+                    - branch-compare-type: 'PLAIN'
+                      branch-pattern: 'master'
+    builders:
+        - shell:
+            !include-raw:
+                - ../scripts/setup_venv.sh
+                - ../scripts/build_libvirt_auto_doc.sh
+                - ../scripts/clear_venv.sh
+    publishers:
+        - archive:
+            artifacts: 'libvirt-auto-doc/build/**'
+            allow-empty: 'true'
+
+- job-template:
+    name: 'libvirt-auto-doc-checker'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    concurrent: true
+    parameters:
+        - node-label:
+            default: jslave-libvirt
+    properties:
+        - build-discarder:
+            days-to-keep: '30'
+            artifact-days-to-keep: '30'
+    scm:
+        - libvirt-auto-doc-gerrit:
+            refspec: '$GERRIT_REFSPEC'
+            branch: '$GERRIT_TOPIC'
+    triggers:
+        - gerrit:
+            trigger-on:
+                - patchset-created-event
+            projects:
+                - project-compare-type: 'PLAIN'
+                  project-pattern: 'libvirt-auto-doc'
+                  branches:
+                    - branch-compare-type: 'PLAIN'
+                      branch-pattern: 'master'
+    builders:
+        - shell:
+            !include-raw:
+                - ../scripts/setup_venv.sh
+                - ../scripts/build_libvirt_auto_doc.sh
+                - ../scripts/clear_venv.sh
+
+- job-template:
+    name: 'libvirt-jobs-checker'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    concurrent: true
+    parameters:
+        - node-label:
+            default: jslave-libvirt
+    properties:
+        - build-discarder:
+            days-to-keep: '30'
+            artifact-days-to-keep: '30'
+    scm:
+        - libvirt-ci-gerrit:
+            refspec: '$GERRIT_REFSPEC'
+            branch: '$GERRIT_TOPIC'
+    triggers:
+        - gerrit:
+            trigger-on:
+                - patchset-created-event
+            projects:
+                - project-compare-type: 'PLAIN'
+                  project-pattern: 'libvirt-ci'
+                  branches:
+                    - branch-compare-type: 'PLAIN'
+                      branch-pattern: 'master'
+    builders:
+        - shell:
+            !include-raw:
+                - ../scripts/setup_venv.sh
+                - ../scripts/check_libvirt_ci.sh
+                - ../scripts/clear_venv.sh
+    publishers:
+        - cobertura:
+            report-file: "libvirt-ci/coverage.xml"
+            targets:
+                - files:
+                    healthy: 0
+                    unhealthy: 0
+                    failing: 0
+                - method:
+                    healthy: 0
+                    unhealthy: 0
+                    failing: 0
+                - classes:
+                    healthy: 0
+                    unhealthy: 0
+                    failing: 0
+                - line:
+                    healthy: 0
+                    unhealthy: 0
+                    failing: 0
+                - conditional:
+                    healthy: 0
+                    unhealthy: 0
+                    failing: 0
+        - shining-panda:
+            html-reports-directory: "libvirt-ci/htmlcov"
+
+
+- job:
+    name: 'libvirt-python-test-API-checker'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    concurrent: true
+    parameters:
+        - node-label:
+            default: jslave-libvirt
+    properties:
+        - build-discarder:
+            days-to-keep: '30'
+            artifact-days-to-keep: '30'
+    scm:
+        - test-api-gerrit:
+            refspec: '$GERRIT_REFSPEC'
+            branch: '$GERRIT_TOPIC'
+    triggers:
+        - gerrit:
+            trigger-on:
+                - patchset-created-event
+            projects:
+                - project-compare-type: 'PLAIN'
+                  project-pattern: 'libvirt-test-API'
+                  branches:
+                    - branch-compare-type: 'PLAIN'
+                      branch-pattern: 'master'
+                    - branch-compare-type: 'PLAIN'
+                      branch-pattern: 'rhel7'
+                    - branch-compare-type: 'PLAIN'
+                      branch-pattern: 'rhel6'
+                    - branch-compare-type: 'PLAIN'
+                      branch-pattern: 'rhel7_ppc'
+    builders:
+        - shell:
+            !include-raw:
+                - ../scripts/setup_venv.sh
+                - ../scripts/check_test_api.sh
+                - ../scripts/clear_venv.sh
+
+- job:
+    name: 'libvirt-tck-checker'
+    description: |
+        Managed by Jenkins Job Builder. Do not edit via web.
+    concurrent: true
+    parameters:
+        - node-label:
+            default: jslave-libvirt
+    properties:
+        - build-discarder:
+            days-to-keep: '30'
+            artifact-days-to-keep: '30'
+    scm:
+        - libvirt-tck-gerrit:
+            refspec: '$GERRIT_REFSPEC'
+            branch: '$GERRIT_TOPIC'
+    triggers:
+        - gerrit:
+            trigger-on:
+                - patchset-created-event
+            projects:
+                - project-compare-type: 'PLAIN'
+                  project-pattern: 'libvirt-tck-zpeng'
+                  branches:
+                    - branch-compare-type: 'PLAIN'
+                      branch-pattern: 'master'
+                    - branch-compare-type: 'PLAIN'
+                      branch-pattern: 'rhel7'
+                    - branch-compare-type: 'PLAIN'
+                      branch-pattern: 'rhel6'
+    builders:
+        - shell:
+            !include-raw:
+                - ../scripts/setup_venv.sh
+                - ../scripts/check_libvirt_tck.sh
+                - ../scripts/clear_venv.sh

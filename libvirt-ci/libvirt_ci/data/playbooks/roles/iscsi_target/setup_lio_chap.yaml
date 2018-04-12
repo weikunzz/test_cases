@@ -1,0 +1,37 @@
+- name: Enable generate_node_acls mode(ignore ACLs mode)
+  command: "targetcli /iscsi/{{ iscsi_params.target_name }}/tpg1/ set attribute {{ item }}"
+  with_items:
+    - generate_node_acls=1
+  when:
+    - iscsi_params.acl_client is undefined
+
+- name: Setup chap user and password
+  command: "targetcli /iscsi/{{ iscsi_params.target_name }}/tpg1/ set auth {{ item }}"
+  with_items:
+    - userid="{{ iscsi_params.chap_user }}"
+    - password="{{ iscsi_params.chap_password }}"
+  when:
+    - iscsi_params.acl_client is undefined
+
+- name: Disable generate_node_acls (enable ACLs mode)
+  command: "targetcli /iscsi/{{ iscsi_params.target_name }}/tpg1/ set attribute {{ item }}"
+  with_items:
+    - generate_node_acls=0
+  when:
+    - iscsi_params.acl_client is defined
+
+- name: Setup ACLs
+  command: "targetcli /iscsi/{{ iscsi_params.target_name }}/tpg1/acls create {{ iscsi_params.acl_client }}"
+  when:
+    - iscsi_params.acl_client is defined
+  ignore_errors: True
+
+- name: Setup user and password for Individual ACL entry
+  command: "targetcli /iscsi/{{ iscsi_params.target_name }}/tpg1/acls/{{ iscsi_params.acl_client }}/ set auth {{ item }}"
+  with_items:
+    - userid="{{ iscsi_params.chap_user }}"
+    - password="{{ iscsi_params.chap_password }}"
+  when:
+    - iscsi_params.chap_user is defined
+    - iscsi_params.chap_password is defined
+    - iscsi_params.acl_client is defined

@@ -1,0 +1,120 @@
+- name: Update installation file
+  hosts: all
+  tasks:
+      - name: Set OS tree URL
+        set_fact:
+            url: "{{ url_prefix }}/{{ distro }}/compose/Server/{{ arch }}/os/"
+
+      - name: Update url in kickstart file
+        lineinfile: "dest={{ item }} regexp='url --url=.*' line='url --url={{ url }}'"
+        with_items:
+            - "/srv/www/html/test-api-ks/http-ks/ks-{{ file_path }}.cfg"
+            - "/srv/www/html/test-api-ks/pxe-ks/ks-{{ file_path }}.cfg"
+
+      - name: Update baseurl in kickstart file
+        lineinfile: "dest={{ item }} regexp='baseurl=.*' line='baseurl={{ url }}'"
+        with_items:
+            - "/srv/www/html/test-api-ks/http-ks/ks-{{ file_path }}.cfg"
+            - "/srv/www/html/test-api-ks/pxe-ks/ks-{{ file_path }}.cfg"
+        when: "'RHEL-7' in distro and 'x86_64' in arch"
+
+      - name: Update vmlinuz in pxe file for rhel 7
+        lineinfile: "dest=/srv/www/html/test-api-pxe/{{ file_path }}/default regexp='kernel .*' line='kernel {{ url }}/images/pxeboot/vmlinuz biosdevname=0 root=live:{{ url }}/LiveOS/squashfs.img'"
+        when: "'RHEL-7' in distro and 'x86_64' in arch"
+
+      - name: Update vmlinuz in pxe file for rhel 6
+        lineinfile: "dest=/srv/www/html/test-api-pxe/{{ file_path }}/default regexp='kernel .*' line='kernel {{ url }}/images/pxeboot/vmlinuz'"
+        when: "'RHEL-6' in distro and 'x86_64' in arch"
+
+      - name: Update initrd in pxe file for rhel 7
+        lineinfile: "dest=/srv/www/html/test-api-pxe/{{ file_path }}/default regexp='append .* ks=http:.*' line='append initrd={{ url }}/images/pxeboot/initrd.img ks=http://download.libvirt.redhat.com/test-api-ks/pxe-ks/ks-{{ file_path }}.cfg'"
+        when: "'RHEL-7' in distro and 'x86_64' in arch"
+
+      - name: Update initrd in pxe file for rhel 6
+        lineinfile: "dest=/srv/www/html/test-api-pxe/{{ file_path }}/default regexp='append .* ks=http:.*' line='append initrd={{ url }}/images/pxeboot/initrd.img ks=http://download.libvirt.redhat.com/test-api-ks/pxe-ks/ks-{{ file_path }}.cfg ip=dhcp inst.cmdline'"
+        when: "'RHEL-6' in distro and 'x86_64' in arch"
+
+      - name: Update grub.cfg in pxe file for rhel 7
+        lineinfile: "dest=/srv/www/html/test-api-pxe/{{ file_path }}/grub.cfg regexp='inst.repo.*' line='      inst.repo={{ url }}  inst.ks=http://download.libvirt.redhat.com/test-api-ks/pxe-ks/ks-{{ file_path }}.cfg ro'"
+        when: "('RHEL-7' in distro or 'RHEL-ALT-7' in distro) and 'ppc64' in arch"
+
+      - name: Update yaboot.cfg in pxe file for rhel 6
+        lineinfile: "dest=/srv/www/html/test-api-pxe/{{ file_path }}/yaboot.conf regexp='append=.*' line='\tappend=\"ks=http://download.libvirt.redhat.com/test-api-ks/pxe-ks/ks-{{ file_path }}.cfg\"'"
+        when: "'RHEL-6' in distro and 'ppc64' in arch"
+
+      - name: Update nfs file for local server
+        lineinfile: "dest=/srv/www/html/test-api-ks/nfs-ks/ks-{{ file_path }}.cfg regexp='nfs --server.*' line='nfs --server storage.eng.pek2.redhat.com --dir /pub/rhel/rel-eng/{{ distro }}/compose/Server/{{ arch }}/os/'"
+        when: "'download.eng.pek2.redhat.com' in url_prefix"
+
+      - name: Update nfs file for remote server
+        lineinfile: "dest=/srv/www/html/test-api-ks/nfs-ks/ks-{{ file_path }}.cfg regexp='nfs --server.*' line='nfs --server ntap-bos-c01-eng01-nfs01b.storage.bos.redhat.com --dir /devops_engineering_nfs/devarchive/redhat/rel-eng/{{ distro }}/compose/Server/{{ arch }}/os/ '"
+        when: "'download.eng.bos.redhat.com' in url_prefix"
+
+      - name: Update ftp file for local server
+        lineinfile: "dest=/srv/www/html/test-api-ks/ftp-ks/ks-{{ file_path }}.cfg regexp='url --url=ftp:.*' line='url --url=ftp://download.eng.pek2.redhat.com/pub/rhel/rel-eng/{{ distro }}/compose/Server/{{ arch }}/os/'"
+        when: "'download.eng.pek2.redhat.com' in url_prefix"
+
+      - name: Update ftp file for remote server
+        lineinfile: "dest=/srv/www/html/test-api-ks/ftp-ks/ks-{{ file_path }}.cfg regexp='url --url=ftp:.*' line='url --url=ftp://download.eng.bos.redhat.com/redhat/rel-eng/{{ distro }}/compose/Server/{{ arch }}/os/'"
+        when: "'download.eng.bos.redhat.com' in url_prefix"
+
+      - name: Set ISO url
+        set_fact:
+            bootiso_url: "{{ url_prefix }}/{{ distro }}/compose/Server/{{ arch }}/os/images/boot.iso"
+
+      - name: Set ISO dir
+        set_fact:
+            iso_dir: "/srv/www/html/test-api-iso/"
+
+      - name: Download boot.iso
+        shell: "wget -N {{ bootiso_url }} -P {{ iso_dir }}"
+        when: "'ppc64' in arch"
+
+      - name: Get Volume id
+        shell: "isoinfo -d -i {{ iso_dir }}/boot.iso | grep 'Volume id:' | awk '{print $3}'"
+        register: volume_id
+        when: "'ppc64' in arch"
+
+      - name: Mount boot.iso
+        mount:
+            name: "{{ dirpath }}"
+            src: "{{ iso_dir }}/boot.iso"
+            fstype: "iso9660"
+            opts: "ro"
+            state: "mounted"
+        when: "'ppc64' in arch"
+
+      - name: Delete custom directory if it existed
+        file: path=/mnt/custom state=absent
+
+      - name: Copy bootiso to custom directory
+        shell: "cp -rf {{ dirpath }} /mnt/custom"
+        when: "'ppc64' in arch"
+
+      - name: Add kickstart.cfg
+        shell: "cp /srv/www/html/test-api-ks/http-ks/ks-{{file_path}}.cfg /mnt/custom"
+        when: "'ppc64' in arch"
+
+      - name: Modify grub.cfg with RHEL-7
+        lineinfile: "dest=/mnt/custom/boot/grub/grub.cfg regexp='linux /ppc/ppc64/vmlinuz  ro' line='      linux /ppc/ppc64/vmlinuz inst.repo=cdrom:sr0 inst.ks=cdrom:sr0:ks-{{ file_path }}.cfg ro'"
+        when: "('RHEL-7' in distro or 'RHEL-ALT-7' in distro) and 'ppc64' in arch"
+
+      - name: Modify yaboot.cfg with RHEL-6
+        lineinfile: "dest=/mnt/custom/etc/yaboot.conf regexp='timeout=.*?' line='timeout=5'"
+        when: "'RHEL-6' in distro and 'ppc64' in arch"
+
+      - name: Modify yaboot.cfg with RHEL-6
+        lineinfile: "dest=/mnt/custom/etc/yaboot.conf regexp='append=.*' line='\tappend=\"ks=http://download.libvirt.redhat.com/test-api-ks/pxe-ks/ks-{{ file_path }}.cfg\"'"
+        when: "'RHEL-6' in distro and 'ppc64' in arch"
+
+      - name: mkisofs boot
+        shell: "mkisofs -R -V {{ volume_id.stdout_lines[0] }} -sysid PPC -chrp-boot -U -prep-boot ppc/ppc64/initrd.img -hfs-bless ppc/mac -no-desktop -allow-multidot -volset 4 -volset-size 1 -volset-seqno 1 -hfs-volid 4 -o /srv/www/html/test-api-bootiso/{{ file_path }}.iso /mnt/custom/"
+        when: "'ppc64' in arch"
+
+      - name: Umount bootiso
+        mount:
+            name: "{{ dirpath }}"
+            src: "{{ iso_dir }}/boot.iso"
+            fstype: "iso9660"
+            state: "unmounted"
+        when: "'ppc64' in arch"

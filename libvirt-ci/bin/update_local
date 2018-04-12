@@ -1,0 +1,10 @@
+#!/bin/bash
+
+unset http_proxy
+unset https_proxy
+
+sed -i "1,10 s/master/`git rev-parse --abbrev-ref HEAD`/g" jobs/macros/common/scms.yaml
+sed -e '/jms/ s/".*"/"never_trigger"/' -i jobs/provision.yaml
+
+python utils/jobs_generator.py config/jobs.yaml
+jenkins-jobs --ignore-cache --conf jobs/local_config update -x jobs/projects/jobs_gate.yaml -r jobs $1

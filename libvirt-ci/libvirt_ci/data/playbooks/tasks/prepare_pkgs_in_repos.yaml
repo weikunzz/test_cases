@@ -1,0 +1,31 @@
+- name: Ensures repo dir exists
+  file:
+      path: "{{ repo_path }}"
+      state: directory
+
+
+- name: Create directories for each arch
+  file:
+      path: "{{ repo_path }}/{{ item }}"
+      state: directory
+  with_items: "{{ arch }}"
+
+
+- name: Check if any noarch PRMs exists
+  find:
+      paths: "{{ work_dir }}"
+      patterns: "*.noarch.rpm"
+  register: "found_noarch"
+
+
+- name: Copy noarch RPMs to each arch
+  shell: "cp {{ work_dir }}/*.noarch.rpm {{ repo_path }}/{{ item }}"
+  ignore_errors: yes
+  when: "{{ found_noarch.matched > 0 }}"
+  with_items: "{{ arch }}"
+
+
+- name: Copy specific arch RPMs to each arch
+  shell: "cp {{ work_dir }}/*.{{ item }}.rpm {{ repo_path }}/{{ item }}"
+  ignore_errors: yes
+  with_items: "{{ arch }}"

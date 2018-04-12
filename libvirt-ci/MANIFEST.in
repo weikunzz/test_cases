@@ -1,0 +1,8 @@
+recursive-include libvirt_ci/config *
+recursive-include libvirt_ci/data *
+recursive-include docs *
+include AUTHORS.txt
+include MANIFEST.in
+include Makefile
+include README
+include README.rst

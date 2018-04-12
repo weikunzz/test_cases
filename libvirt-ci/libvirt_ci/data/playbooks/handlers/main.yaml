@@ -1,0 +1,5 @@
+- name: Restart Libvirtd
+  service: name=libvirtd state=restarted
+- name: Restart virtlogd.socket
+  service: name=virtlogd.socket state=restarted
+  ignore_errors: yes

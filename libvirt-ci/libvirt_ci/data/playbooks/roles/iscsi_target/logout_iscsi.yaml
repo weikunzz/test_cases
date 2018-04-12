@@ -1,0 +1,28 @@
+---
+# logout and delete iSCSI target
+
+- name: Make sure iscsid is running
+  service:
+    name: iscsid
+    state: started
+
+- name: Logout the iSCSI target
+  open_iscsi:
+    login: False
+    portal: "{{ iscsi_params.portal }}"
+    target: "{{ iscsi_params.target_name }}"
+  ignore_errors: True
+
+- name: Delete target node record
+  command: "iscsiadm -m node -o delete --targetname {{ iscsi_params.target_name }} -p {{ iscsi_params.portal }}:{{ iscsi_params.port }}"
+  ignore_errors: True
+
+- name: Check if backup file exist
+  stat:
+    path: /etc/iscsi/.initiatorname.iscsi.bk
+  register: file_stat
+
+- name: Restore /etc/iscsi/initiatorname.iscsi
+  command: "mv /etc/iscsi/.initiatorname.iscsi.bk /etc/iscsi/initiatorname.iscsi"
+  when:
+    - file_stat.stat.exists

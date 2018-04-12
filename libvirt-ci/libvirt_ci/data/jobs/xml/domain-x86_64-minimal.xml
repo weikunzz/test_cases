@@ -1,0 +1,24 @@
+<domain type='kvm'>
+  <name>{{name}}</name>
+  <memory unit='KiB'>1048576</memory>
+  <currentMemory unit='KiB'>1048576</currentMemory>
+  <vcpu placement='static'>1</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <devices>
+    <emulator>/usr/libexec/qemu-kvm</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' cache='none'/>
+      <source file='{{image_path}}'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>
+    <interface type='bridge'>
+      <mac address='52:54:00:cb:dd:86'/>
+      <source bridge='virbr0'/>
+      <model type='virtio'/>
+    </interface>
+    <serial type='pty'/>
+  </devices>
+</domain>

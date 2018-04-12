@@ -1,0 +1,17 @@
+- wrapper:
+    name: default-ci-wrappers
+    wrappers:
+        - ansicolor
+        - workspace-cleanup
+        - timestamps
+
+
+- wrapper:
+    name: default-ci-build-timeout-wrapper
+    wrappers:
+        - timeout:
+            timeout-var: 'BUILD_TIMEOUT'
+            fail: true
+            elastic-percentage: 150
+            elastic-default-timeout: 90
+            type: elastic

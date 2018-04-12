@@ -1,0 +1,16 @@
+module libvirt_ci 1.0;
+
+require {
+type tmp_t;
+type svirt_t;
+type user_tmp_t;
+type virt_image_t;
+type unconfined_t;
+type var_run_t;
+class unix_stream_socket { read lock write ioctl getattr append relabelfrom relabelto };
+class file { unlink read lock write ioctl getattr open append relabelfrom relabelto };
+}
+
+#============= svirt_t ==============
+allow svirt_t virt_image_t:file { read write ioctl open };
+allow svirt_t unconfined_t:unix_stream_socket { read write ioctl getattr };

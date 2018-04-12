@@ -1,0 +1,1605 @@
+# Blacklist types are classified into following categories:
+# 1) not-supported
+#
+#     This type is used for indicate the case should be skipped since it
+#     requires feature not supported on testing environment.
+#
+#     * required key: feature
+#       Short description on feature is not supported.
+#
+#
+# 2) bug-wont-fix
+#
+#     This type is used for indicating that a WONTFIX bug exists and the bug
+#     will make the case fail or skip.
+#
+#     * required key: bug
+#       Bugzilla number
+#
+# 3) bug-not-fixed
+#
+#     This type is used for indicating that an open bug exists and the bug
+#     will make the case fail or skip.
+#
+#     * required key: bug
+#       Bugzilla number
+#
+# 4) case-updating
+#
+#     This type is used for indicating that the case need update.
+#
+#     * required key: task
+#       Jira task ID
+#
+# 5) hazardous-case
+#
+#     This type is used for indication the case is causing irreversible issue
+#     to test environment and will making other test fail. But there no plan to
+#     fix the case.
+#
+#     * required key: reason
+#       Short description of why the case is hazardous.
+#
+# 6) need-env
+#
+#     This type is used for indication the case requires special testing
+#     environment and it's still can't be identified by current CI script.
+#
+#     * required key: env
+#       Short description of the environment required.
+#
+#
+# 1) not-in-plan
+#
+#     This type is used for indicate the case is not in test plan for some
+#     reason. Requires reason why this case is not in plan.
+#
+#     * required key: reason
+#       Short description on why this case is not in plan.
+#
+#
+
+#-----------------------------------------------------------------------------
+# This blacklist is for any condition
+#-----------------------------------------------------------------------------
+- description: 'for any condition'
+  not-supported:
+      - test: virsh.vol_create.positive_test.fs_like_pool.vol_format.v_iso
+        feature: 'create iso volume'
+      - test: virsh.migrate.there_direct
+        feature: 'direct migration'
+      - test: virsh.migrate_vm..with_s3_s4
+        feature: 'migration with S3/S4'
+      - test: virtual_disks.gluster..test_dompmsuspend
+        feature: 'Guest vm S3 & S4'
+      - test:
+          - libvirt_vcpu_plug_unplug..suspend_to_mem
+          - libvirt_vcpu_plug_unplug..suspend_to_disk
+        feature: 'vcpu plug/unplug with S3/S4'
+      - test:
+          - virsh.setmaxmem..current.running
+          - virsh.setmaxmem..live
+          - virsh.setmaxmem..live_and_config
+        feature: 'setmaxmem --live option'
+      - test:
+          - virtual_disks.ceph..disk_pool
+        feature: 'rbd pool type source discovery'
+  case-updating:
+      - test:
+          - acceptance_basic_interface
+          - acceptance_basic_nodedevice
+        task:
+      - test:
+          - virsh.migrate.there_seamless_migration_with_graphicsuri
+          - virsh.migrate..with_mem_hotplug
+          - virsh.migrate..without_mem_hotplug
+          - virsh.migrate..with_cpu_hotplug
+        task: 'LIBVIRTAT-136'
+  need-env:
+      - test:
+          - virsh.migrate_vm.positive_testing.cross_rhel_platform_migration.with_cpu_model.amd
+          - virsh.migrate_vm.positive_testing.live_migration.diff_cpu_vendor
+          - virsh.migrate_vm.positive_testing.cross_rhel_platform_migration.with_cpu_model.intel
+        env: 'special cpu model'
+      - test:
+          - virsh.migrate_vm.positive_testing.migration_with_gluster.rdma
+        env: 'rdma'
+      - test:
+          - virsh.migrate_vm.negative_testing.cross_rhel_platform_migration.with_disabled_device.sound_device
+          - virsh.migrate_vm.negative_testing.cross_rhel_platform_migration.with_disabled_device.with_host_cdrom
+        env: 'two machines with rhel release 6 and 7 respectively'
+      - test:
+          - virsh.remote_with_ssh.positive_testing.ssh_diff_libvirt_version
+        env: 'different libvirt versions'
+  bug-not-fixed:
+      - test:
+          - virtual_disks.virtual_disks.multidisks.hotplug.multi_disks_test.disk_virtio_iothread.attach_disk
+        bug: '1430275'
+        skip-test: false
+        fail-regex:
+          - "unsupported configuration: IOThreads are only available for virtio pci and virtio ccw disk"
+      - test:
+          - virsh.migrate_vm.negative_testing.live_migration.with_hugepages.no_config_target
+          - virsh.migrate_vm.negative_testing.live_migration.with_hugepages.no_restart_target_libvirtd
+          - virsh.migrate_vm.negative_testing.live_migration.with_hugepages.source_hugemem_less_than_vm_mem
+          - virsh.migrate_vm.negative_testing.live_migration.with_hugepages.target_hugemem_less_than_vm_mem
+        bug: '1296800'
+      - test:
+          - virsh.migrate_vm.positive_testing.live_migration.track_statistics
+          - virsh.migrate_vm.positive_testing.live_migration.set_cache_size
+        bug: '1325800'
+        skip-test: false
+        fail-regex:
+          - "The job info on both local and remote are not matched."
+      - test:
+          - virsh.blkdeviotune..upper_maximum_boundary
+        bug: '1329041'
+        skip-test: false
+        fail-regex:
+          - "Unexpected return code 0"
+      - test:
+          - convert_vm_to_ovirt.kvm..win7
+          - convert_vm_to_ovirt.kvm..win2008r2
+        bug: '1356550'
+        skip-test: false
+        fail-regex:
+          - "\\['Not find driver: QXL'\\]"
+      - test:
+          - convert_vm_to_ovirt..win2012
+          - convert_vm_to_libvirt..win2012
+        bug: '1357427'
+        skip-test: false
+        fail-regex:
+          - 'Failed to connect to windows guest'
+      - test:
+          - v2v_options.positive_test.quiet.input_mode.libvirt.xen.output_mode.libvirt
+        bug: '1358142'
+        skip-test: false
+        fail-regex:
+          - 'Output is not empty in quiet mode'
+      - test:
+          - v2v_options.positive_test.option_of.from_disk
+          - v2v_options.positive_test.option_oc.privileged.input_mode.disk..output_mode.libvirt
+        bug: '1372671'
+        skip-test: false
+        fail-regex:
+          - "Command '/bin/virsh start .*? ' failed"
+      - test:
+          - function_test_xen.positive_test.libvirt.pool_uuid.output_mode.libvirt
+        bug: '1141631'
+        skip-test: false
+        fail-regex:
+          - 'Start vm failed'
+      - test:
+          - function_test_xen.positive_test.libvirt.windows.rhev_file.output_mode.libvirt
+        bug: '1161019'
+        skip-test: false
+        fail-regex:
+          - 'RHEV file exists after convert to kvm'
+      - test:
+          - function_test_esx.positive_test.esx_snapshot
+        bug: '1172425'
+        skip-test: false
+        fail-regex:
+          - 'TestFail: virt-v2v:'
+      - test:
+          - function_test_xen.positive_test..encryped
+        bug: '666175'
+        skip-test: false
+        fail-regex:
+          - 'TestFail: virt-v2v:'
+      - test:
+          - specific_kvm.positive_test.linux.floppy
+        bug: '1318999'
+        skip-test: false
+        fail-regex:
+          - 'Floppy not found'
+      - test:
+          - convert_from_file.positive_test.linux.input_mode.ova.parse.invalid_line_in_manifest
+        bug: ''
+        skip-test: false
+        fail-regex:
+          - 'Check v2v log failed'
+      - test:
+          - function_test_xen..windows.default_install
+        bug: ''
+        skip-test: false
+        fail-regex:
+          - 'TestError: Failed to connect to windows guest'
+      - test:
+          - virtual_disks.gluster.disk_qcow2
+          - virsh.snapshot_create_as..gluster
+          - virsh.snapshot_disk..gluster
+        bug: '1392769'
+        skip-test: false
+        fail-regex:
+          - 'internal error:? process exited while connecting to monitor:'
+          - 'internal error:? qemu unexpectedly closed the monitor:'
+          - 'internal error:? early end of file from monitor:'
+          - 'Unable to read from monitor: Connection reset by peer'
+      - test:
+          - virsh.change_media_matrix.pre_vm_state_running.cdrom_test.config.action_twice.live_config.eject_insert
+        bug: '1243342'
+        skip-test: false
+        fail-regex:
+          - "Run '/bin/virsh change-media .*' expect fail, but run successfully"
+      - test:
+          - virsh.pool_edit.positive_test.name_option.disk_pool.edit_pool_format.mac
+          - virsh.pool_edit.positive_test.uuid_option.disk_pool.edit_pool_format.mac
+        bug: '1458146'
+        skip-test: false
+        fail-regex:
+          - 'Fail to start pool after edit it'
+      - test:
+          - virsh.blockcopy.positive_test.non_acl.nfs_disk.dest_nfs.no_blockdev.shallow.reuse_external
+        bug: '1519511'
+        skip-test: false
+        fail-regex:
+          - 'Failed to lock byte 100'
+      - test:
+          - virsh.blockcommit.normal_test.single_chain.file_disk.local.relative_path.notimeout.shallow.top_inactive
+        bug: '1519745'
+        skip-test: false
+        fail-regex:
+            - "commit of .* active layer requires active flag"
+  bug-wont-fix:
+      - test:
+          - virsh.pool_autostart..pool_type_dir
+          - virsh.pool_autostart..pool_type_scsi
+        bug: '1238610'
+      - test:
+          - virsh.nodeinfo
+        bug: '1192360'
+        skip-test: false
+        fail-regex:
+          - "Virsh nodeinfo output didn't match"
+  not-in-plan:
+      - test:
+          - v2v_options.positive_test.option_vdsm.input_mode.libvirt.kvm.default.output_mode.vdsm
+        reason: 'Cases about VDSM do not need to be tested any more.'
+      - test:
+          - virsh.dompmsuspend
+        reason: 'S3 & S4'
+
+
+
+#-----------------------------------------------------------------------------
+# Shared blacklist for qemu-kvm package and RHEL6 qemu-kvm-rhev package
+#-----------------------------------------------------------------------------
+- when: params.qemu_pkg == 'rhel' or info.dist_major <= 6
+  description: 'using qemu-kvm package or in RHEL6 or older'
+  not-supported:
+      - test:
+          - attach_detach_interface.normal_test.vm_running.direct.at_detach_device.domname
+        feature: 'virtio rx_queue_size'
+      - test:
+          - virtual_disks..iothread
+          - virtual_disks..disk_virtio_iothread
+          - acceptance_linux_domain_rhev_specific
+          - sched_params
+        feature: 'iothread'
+      - test: libvirt_mem
+        feature: 'memory hotplug/hot-unplug'
+      - test:
+          - acceptance_basic_blockjob
+          - acceptance_basic_blockjob_rhev_specific
+        feature: 'block* subcommands'
+      - test:
+          - libvirt_vcpu_plug_unplug
+          - vcpu_hotpluggable
+        feature: 'CPU hotplug'
+      - test:
+          - pool_type_gluster
+          - gluster_pool
+        feature: 'gluster pool'
+      - test:
+          - virsh.blockcopy..blockdev
+        feature: '--blockdev option'
+      - test:
+          - virsh.blockcommit..top_active
+          - virsh.blockcommit..snap_in_mirror
+        feature: 'blockcommit on active top'
+      - test:
+          - guest_numa.hugepage
+          - guest_numa..numatune_memnode
+        feature: 'per numa node hugepage'
+      - test:
+          - virtual_disks.multidisks.coldplug.single_disk_test.disk_bus_device_option.disk_bus_ide.device_disk
+          - virtual_disks.multidisks.coldplug.single_disk_test.disk_bus_device_option.disk_bus_ide.device_block
+          - virtual_disks.multidisks.coldplug.single_disk_test.disk_bus_device_option.disk_bus_ide.device_cdrom
+        feature: 'disk, block and cdrom on IDE bus'
+      - test:
+          - virtual_disks.gluster..multiple_volume_hosts
+        feature: gluster multiple volume hosts feature
+      - test:
+          - qemu_conf.set_virtlogd.negative_test.invalid
+        feature: 'stdio_handler'
+  hazardous-case:
+      - test:
+          - virtual_network.iface_options.iface_macvtap..mode_passthrough
+          - virtual_network.iface_network.net_macvtap
+        reason: 'macvtap passthrough may destroy host network'
+  bug-not-fixed:
+      # This is a not filed bug fixed in RHEL7.3 and later
+      - test:
+          - conf_file.libvirtd_conf.host_uuid.negative_test.all_same_uuid
+        bug: ''
+        skip-test: false
+        fail-regex:
+            - 'Libvirtd is not expected to be started with host_uuid = "22222222-2222-2222-2222-222222222222"'
+
+#-----------------------------------------------------------------------------
+# Blacklist for qemu-kvm package and RHEL7 version
+#-----------------------------------------------------------------------------
+- when: params.qemu_pkg == 'rhel' and info.dist_major >= 7 and info.dist_name == 'redhat'
+  description: 'using qemu-kvm package and in RHEL7'
+  bug-not-fixed:
+      - test:
+          - ssh_persistent_paused_no_dst
+          - ssh_persistent_paused_with_dst
+          - ssh_persistent_running_no_dst
+          - ssh_persistent_running_with_dst
+          - ssh_transient_paused_no_dst
+          - ssh_transient_paused_with_dst
+          - ssh_transient_running_no_dst
+          - ssh_transient_running_with_dst
+          - tcp_persistent_paused_no_dst
+          - tcp_persistent_paused_with_dst
+          - tcp_persistent_running_no_dst
+          - tcp_persistent_running_with_dst
+          - tcp_sasl_persistent_paused_no_dst
+          - tcp_sasl_persistent_paused_with_dst
+          - tcp_sasl_persistent_running_no_dst
+          - tcp_sasl_persistent_running_with_dst
+          - tcp_sasl_transient_paused_no_dst
+          - tcp_sasl_transient_paused_with_dst
+          - tcp_sasl_transient_running_no_dst
+          - tcp_sasl_transient_running_with_dst
+          - tcp_transient_paused_no_dst
+          - tcp_transient_paused_with_dst
+          - tcp_transient_running_no_dst
+          - tcp_transient_running_with_dst
+          - tls_persistent_paused_no_dst
+          - tls_persistent_paused_with_dst
+          - tls_persistent_running_no_dst
+          - tls_persistent_running_with_dst
+          - tls_sasl_persistent_paused_no_dst
+          - tls_sasl_persistent_paused_with_dst
+          - tls_sasl_persistent_running_no_dst
+          - tls_sasl_persistent_running_with_dst
+          - tls_sasl_transient_paused_no_dst
+          - tls_sasl_transient_paused_with_dst
+          - tls_sasl_transient_running_no_dst
+          - tls_sasl_transient_running_with_dst
+          - tls_transient_paused_no_dst
+          - tls_transient_paused_with_dst
+          - tls_transient_running_no_dst
+          - tls_transient_running_with_dst
+        bug: '1320847'
+        skip-test: false
+        fail-regex:
+          - 'internal error: early end of file from monitor, possible problem: warning: host does not support requested feature: CPUID.80000001H:ECX.svm'
+
+
+#-----------------------------------------------------------------------------
+# Blacklist for qemu-kvm package dependent cases
+#-----------------------------------------------------------------------------
+- when: params.qemu_pkg == 'rhel' and info.dist_name == 'redhat'
+  description: 'using qemu-kvm package'
+  not-supported:
+      - test:
+          - virsh.blockjob
+          - virsh.blockcommit
+          - virsh.blockcopy
+          - virsh.blockpull
+        feature: 'block* subcommands'
+      - test:
+          - virsh.snapshot_create_as
+          - virsh.snapshot_par_cur
+          - virsh.snapshot_edit
+          - acceptance_snapshot_rhev_specific
+          - acceptance_snapshot_rhev_specific_nfs
+          - acceptance_snapshot_rhev_specific_iscsi
+          - virtual_disks.multidisks.coldplug.single_disk_test.disk_option_bootdisk.disk_virtio_snapshot.disk_snapshot_external.normal_test
+          - virtual_disks.multidisks.coldplug.single_disk_test.disk_option_bootdisk.disk_virtio_bootorder_snapshot
+          - virtual_disks.ceph.cold_plug.without_auth.domain_operation.snapshot.disk_snap_with_sanlock
+        feature: 'live snapshot'
+      - test:
+          - guest_numa.possitive_test.hugepage.per_node.2M.topology.numatune_memnode.m_strict.no_numatune_mem
+          - guest_numa.possitive_test.hugepage.per_node.2M.no_topo.numatune_memnode.m_strict.no_numatune_mem
+          - guest_numa..hugepage..2M.topology.numatune_memnode..numatune_mem
+        feature: 'TODO: several hugepage related cases'
+      - test:
+          - libvirt_vcpu_plug_unplug
+          - vcpu_hotpluggable
+        feature: 'CPU hotplug'
+      - test:
+          - virsh.migrate..with_postcopy
+          - virsh.migrate_vm..with_postcopy
+        feature: 'postcopy'
+      - test:
+          - domain_basic_rhev
+        feature: 'nvram'
+      - test:
+          - pci.plug.unplug.positive_tests.pxb_pcie
+        feature: ' pxb-pcie controller'
+      - test:
+          - virsh.vol_resize..luks_encrypt
+          - virsh.vol_clone_wipe..luks_encrypt
+          - virsh.vol_download_upload..luks_encrypt
+          - virsh.vol_create..luks_encrypt
+          - virsh.vol_create_from..luks_encrypt
+        feature: 'Storage'
+      - test:
+          - virsh.migrate_vm.positive_testing.live_migration.iothread.without_postcopy
+        feature: 'iothread'
+      - test:
+          - qemu-xhci_model
+        feature: 'USB'
+      - test:
+          - migrate_options_shared..native_tls
+          - migrate_vm..with_tls
+        feature: 'Migration'
+
+
+#-----------------------------------------------------------------------------
+# Blacklist for distro version dependent cases
+#-----------------------------------------------------------------------------
+- when: info.dist_major <= 6 and info.dist_name == 'redhat'
+  description: 'in RHEL6 or older'
+  not-supported:
+      - test:
+          - virsh.event
+          - virsh.net_event
+          - virsh.metadata
+          - virsh.freepages
+          - virsh.nodecpumap
+          - virsh.domstats
+          - virsh.domcapabilities
+          - virsh.net_dhcp_leases
+          - virsh.cpu_models
+          - virsh.domfstrim
+          - virsh.domtime
+        feature: 'new commands'
+      - test: virsh.blkdeviotune
+        feature: 'block I/O throttling'
+      - test: virsh.node_memtune.negative_testing.set_node_memory_parameter.invalid_value.shm_merge_across_nodes.invalid_operation
+        feature: 'TODO: kernel can accept this kind of value(>2)'
+      - test:
+          - v_qcow2_with_prealloc
+        feature: '--prealloc-metadata flag'
+      - test:
+          - virsh.pool..pool_type_gluster
+        feature: 'gluster'
+      - test:
+          - virsh.vol_resize..allocate_capacity
+        feature: '--allocate flag'
+      - test:
+          - acl_test
+        feature: 'API acl test'
+      - test: virsh.qemu_monitor_command.normal_test.pretty_qmp
+        feature: '--pretty option'
+      - test: conf_file.qemu_conf.seccomp_sandbox
+        feature: 'seccomp sandboxes'
+      - test: virsh.snapshot.live.no_halt
+        feature: 'internal snapshot'
+      - test: libvirtd_start.with_firewalld
+        feature: 'firewalld service'
+      - test: conf_file.sysconfig_libvirtd.libvirtd_config.negative_test.invalid
+        feature: 'invalid config file'
+      - test:
+          - virtual_disks.multidisks.coldplug.single_disk_test.disk_bus_device_option.disk_bus_sata
+        feature: 'SATA'
+      - test: virtual_disks.iscsi.iscsi_test
+        feature: 'iscsi protocol'
+      - test: virsh.attach_device.character
+        feature: 'chardev hot plug/unplug'
+      - test:
+          - libvirt_hooks.save_restore
+          - libvirt_hooks.managedsave_t
+        feature: 'hook of save'
+      - test:
+          - dac_per_disk_hotplug
+          - dac_vm_per_image_start
+        feature: 'per-disk dac'
+      - test:
+          - dac_start_destroy.positive_test.sec_label.static.with_name.s_root.relabel_no.no_mix.without_qemu_conf
+          - dac_start_destroy.positive_test.sec_label.static.with_name.s_root.relabel_yes.mix_together.with_qemu_conf.disable_dynamic_ownership.qemu_usr
+          - dac_start_destroy.positive_test.sec_label.static.with_name.s_root.relabel_yes.mix_together.with_qemu_conf.enable_dynamic_ownership.qemu_usr
+          - dac_start_destroy.positive_test.sec_label.static.with_id.0.relabel_no.no_mix.without_qemu_conf
+          - dac_start_destroy.positive_test.sec_label.static.with_id.0.relabel_yes.mix_together.with_qemu_conf.disable_dynamic_ownership.qemu_usr
+          - dac_start_destroy.positive_test.sec_label.static.with_id.0.relabel_yes.mix_together.with_qemu_conf.enable_dynamic_ownership.qemu_usr
+        feature: 'per-vm dac'
+      - test:
+          - virsh.pool.positive_test.pool_type_iscsi.ipv6_target
+          - virsh.pool_autostart..ipv6_target
+        feature: 'IPv6 pool'
+      - test: virsh.snapshot_create_as.negative_tests.invalid_compress_format
+        feature: 'snapshot_image_format'
+      - test:
+          - virsh.migrate_vm.negative_testing.live_migration.invalid_listen_address
+          - virsh.migrate_vm.negative_testing.p2p_migration.invalid_listen_address.with_ssh
+          - virsh.migrate_vm.negative_testing.p2p_migration.invalid_listen_address.with_tcp
+          - virsh.migrate_vm.negative_testing.p2p_migration.invalid_listen_address.with_tls
+          - virsh.migrate_vm.negative_testing.rdma_migration.no_memory_hard_limit
+          - virsh.migrate_vm.negative_testing.rdma_migration.no_rdma_env
+          - virsh.migrate_vm.negative_testing.rdma_migration.no_rdma_env_rdma_pin_all
+          - virsh.migrate_vm.negative_testing.rdma_migration.no_rdma_env_turn_off_rdma_pin_all
+          - virsh.migrate_vm.positive_testing.live_migration.listen_address
+          - virsh.migrate_vm.positive_testing.p2p_migration.listen_address.with_ssh
+          - virsh.migrate_vm.positive_testing.p2p_migration.listen_address.with_tcp
+          - virsh.migrate_vm.positive_testing.p2p_migration.listen_address.with_tls
+          - virsh.migrate_vm.positive_testing.live_migration.listen_address
+        feature: 'migrate option --listen-address & rdma'
+      - test:
+          - virsh.migrate_vm.positive_testing.live_migration.iscsi.ipv4
+          - virsh.migrate_vm.positive_testing.live_migration.iscsi.ipv6
+        feature: 'iscsi protocol'
+      - test:
+          - virsh.migrate_vm.positive_testing.live_migration.track_statistics
+        feature: 'domjobinfo option --completed'
+      - test:
+          - virsh.migrate_vm.positive_testing.live_migration.default_cache_size
+          - virsh.migrate_vm.positive_testing.live_migration.set_cache_size
+          - virsh.migrate-compcache
+        feature: 'migrate-compcache and migrate option --migrate-compcache'
+      - test:
+          - virsh.migrate.there_seamless_migration_with_graphicsuri
+        feature: 'migrate option --graphicsuri'
+      - test:
+          - virsh.migrate.there_compressed
+        feature: 'migrate option --compressed'
+      - test:
+          - virsh.migrate.there_direct
+        feature: 'Direct migration'
+      - test:
+          - virsh.migrate.there_and_back_with_numa.with_numa_pinning.memnode_with_strict_interleave
+          - virsh.migrate.there_and_back_with_numa.with_numa_pinning.memnode_with_interleave_preferred
+          - virsh.migrate.there_and_back_with_numa.with_numa_pinning.memnode_with_preferred_strict
+          - virsh.migrate.there_and_back_with_numa.with_numa_pinning.memnode_with_strict_interleave
+          - virsh.migrate.there_live_with_numa.with_numa_pinning.memnode_with_interleave_preferred
+          - virsh.migrate.there_live_with_numa.with_numa_pinning.memnode_with_preferred_strict
+          - virsh.migrate.there_live_with_numa.with_numa_pinning.memnode_with_strict_interleave
+          - virsh.migrate.there_online_with_numa.with_numa_pinning.memnode_with_interleave_preferred
+          - virsh.migrate.there_online_with_numa.with_numa_pinning.memnode_with_preferred_strict
+          - virsh.migrate.there_online_with_numa.with_numa_pinning.memnode_with_strict_interleave
+        feature: 'memnode'
+      - test:
+          - virsh.migrate_vm.positive_testing.live_storage_migration.with_migrate_disks.no_migrate_disks
+          - virsh.migrate_vm.positive_testing.live_storage_migration.with_migrate_disks.all_non_shared_disks
+          - virsh.migrate_vm.positive_testing.live_storage_migration.with_migrate_disks.part_non_shared_disks
+        feature: 'migrate option --migrate-disks'
+      - test:
+          - virsh.migrate.there_offline
+        feature: 'migration option --offline'
+      - test:
+          - virsh.migrate_vm.positive_testing.live_storage_migration.raw_to_raw_target_image_format
+        feature: 'Storage preallocation on target host for migration'
+  case-updating:
+      - test:
+          - virsh.migrate_vm.positive_testing.cross_rhel_platform_migration.vm_without_video
+          - virsh.migrate_vm.positive_testing.live_storage_migration.backing_file_with_copy_storage_inc
+          - virsh.migrate_vm.positive_testing.migration_with_gluster.gluster
+          - virsh.migrate_vm.positive_testing.migration_with_nbd.nbd_port
+          - virsh.migrate_vm.negative_testing.live_storage_migration.cancel_migration.copy_storage_all
+          - virsh.migrate_vm.negative_testing.live_storage_migration.mutually_exclusive_options
+          - virsh.migrate_vm.positive_testing.live_migration.bi_directional
+          - virsh.migrate_vm.positive_testing.p2p_migration.bi_directional
+          - virsh.migrate_vm.positive_testing.tunnelled_migration.bi_directional
+          - virsh.migrate_copy_storage
+          - virsh.migrate_setmaxdowntime
+          - virsh.migrate_set_get_speed
+          - virsh.migrate.there_timeout_suspend
+          - virsh.migrate..with_HP_only
+          - virsh.migrate..with_numa_and_HP.with_HP
+          - virsh.migrate..with_numa_and_HP.with_HP_pin
+        task: 'LIBVIRTAT-136'
+  bug-wont-fix:
+      - test: qemu_conf.auto_dump.disable_bypass_cache
+        bug: '1138179'
+      - test:
+          - virsh.sendkey.params_test.non_acl.os-x_name
+          - virsh.sendkey.params_test.non_acl.os-x_keycode
+        bug: '1044810'
+      - test:
+          - graphics.functional.negative_tests.vnc_only.no_autoport.port_-2
+          - graphics.functional.negative_tests.vnc_only.no_autoport.port_0
+          - graphics.functional.negative_tests.vnc_only.no_autoport.port_65536
+        bug: '1208039'
+      - test:
+          - graphics.functional.positive_tests.vnc_only.vnc_listen_non_exist
+          - graphics.functional.negative_tests.vnc_only.without_cert
+          - graphics.functional.negative_tests.spice_only.spice_tls_disabled_with_secure_channel
+        bug:
+      - test: daemon.functional.opt_timeout_3
+        bug: '885386'
+      - test: virsh.nwfilter_define.negative_test.invalid_rule_action
+        bug: '981106'
+      - test:
+          - virtual_disks..disk_virtio_scsi_cdrom_multi_queue
+          - virtual_disks..disk_virtio_scsi_multi_queue
+        bug: '911390'
+      - test:
+          - virtual_disks..scsi_ioeventfd..ioeventfd_on
+          - virtual_disks..scsi_ioeventfd..ioeventfd_off
+        bug: '1150484'
+      - test:
+          - virtual_disks..test_vendor_product
+        bug: '729635'
+      - test:
+          - virtual_disks.multidisks.hotplug.multi_disks_test.disks_bootorder_error_test
+        bug: '1007754'
+      - test:
+          - virtual_disks.multidisks.coldplug.single_disk_test.disk_option_bootdisk.disk_virtio_snapshot.disk_snapshot_no.error_test2
+        bug: '1106416'
+      - test: libvirt_hooks.virsh_attach
+        bug:
+      - test:
+          - virsh.pool_autostart.negative_test.multiple_source_path
+        bug: '1181087'
+      - test:
+          - virsh.blockcopy.negative_test.block_lun.block_type
+        bug: '1209802'
+
+- when: info.dist_major >= 7 and info.dist_name == 'redhat'
+  description: 'in RHEL7 or newer'
+  not-supported:
+      - test:
+          - virsh.blockresize..qed_type
+          - virsh.snapshot_disk..attach_img_qed
+        bug: '731570'
+        feature: 'QED image'
+        fail-regex:
+          - 'TestSkipError: QED support changed'
+  bug-not-fixed:
+      - test:
+          - guest_numa.possitive_test.hugepage
+        bug: '1495511'
+        skip-test: false
+        fail-regex:
+          - "can't open backing store /dev/hugepages(16M|2M|1G)/libvirt/qemu/.+ for guest RAM: No such file or directory"
+      - test:
+          - virsh.vol_create_from..dest_pool_type.disk
+        bug: '1487068'
+        skip-test: false
+        fail-regex:
+          - "Device is too small"
+      - test:
+          - virsh.domtime.positive.managedsave_vm
+        bug: ''
+        skip-test: false
+        fail-regex:
+          - "For domtime, expect get time .+?, got .+?, time diff: .+"
+      - test:
+          - virsh.qemu_agent_command.error_test.no_ga
+        bug: ''
+        skip-test: false
+        fail-regex:
+          - 'Client process terminated'
+      - test:
+          - virsh.save_image_edit.running
+        bug: '1229255'
+        skip-test: false
+        fail-regex:
+          - 'new xml too large to fit in file'
+      - test:
+          - virsh.vol_create..disk_pool
+          - virsh.vol_create_from
+          - virsh.vol_download_upload..disk_pool
+          - virsh.vol_clone_wipe..pool_type.disk
+          - virsh.volume_application..disk
+          - virsh.pool..pool_type_disk
+          - virsh.pool_acl..pool_type_disk
+          - virsh.snapshot_disk..disk_pool
+          - svirt_attach_disk..disk_pool
+          - virsh.blockcopy.positive_test..block_disk.disk_t.volume_type
+          - virsh.blockcopy.positive_test..local_disk.blockdev
+          - virsh.pool_autostart..source_format_mac
+        bug: '1264719'
+        skip-test: false
+        fail-regex:
+          - 'error: Storage volume not found: no storage vol with matching path'
+          - "error: cannot open volume '.*': No such file or directory"
+          - 'Prepare pool failed'
+          - 'Prepare volume failed'
+          - "Expect pool '.*' doesn't exist"
+          - "No volume in pool"
+          - "Command 'qemu-img convert -f qcow2 -O qcow2 .*lun-0'"
+          - "unable to execute QEMU command 'drive-mirror': Could not open '.*': No such device or address"
+          - "unable to execute QEMU command 'drive-mirror': Could not write refcount table: Input/output error"
+          - "Fail to get info of volume"
+          - "Pool State isn't active as expected"
+      - test:
+          - virsh.volume.dir_pool.vol_encrypt_default
+          - virsh.volume.dir_pool.vol_encrypt_qcow
+        bug: '1375887'
+        skip-test: false
+        fail-regex:
+          - "LibvirtXMLNotFoundError: Error in Getter for property"
+      - test:
+          - virsh.blockcopy.positive_test.non_acl.block_disk.lun_t
+          - virsh.blockcopy.negative_test.block_lun
+          - virsh.attach_detach_disk.attach_disk.normal_test.attach_disk_type.block_disk_type_lun
+          - virtual_disks.iscsi.iscsi_test.normal_test.device_lun.iothread
+          - installation_matrix_rhel6_release
+          - installation_matrix_win_2
+          - virsh.snapshot_create_as.negative_tests.network_disk.iscsi.device_lun
+          - svirt_attach_disk.positive_test.cap_rawio.iscsi_pool.disk_label_svirt_image_MCS1.sec_relabel_yes.sec_type_dynamic
+          - svirt_attach_disk.positive_test.cap_rawio.disk_pool.disk_label_svirt_image_MCS1.sec_relabel_yes.sec_type_dynamic
+        bug: '1365823'
+        skip-test: false
+        fail-regex:
+          - "VM failed to start"
+          - "virsh attach-disk failed"
+          - "Please set scsi=off for virtio-blk devices in order to use virtio 1.0"
+          - "device virtio-blk-pci,scsi=on,bus=pci.0"
+      - test:
+          - virsh.vol_create_from
+        bug: '1318993'
+        skip-test: false
+        fail-regex:
+          - "error: cannot sync data to file '.*': Input/output error"
+      - test:
+          - virsh.vol_resize..netfs
+        bug: '1077068'
+        skip-test: false
+        fail-regex:
+          - "Volume .* resize check fail"
+      - test:
+          - virsh.blockcopy.positive_test.non_acl.block_disk..network_type..no_shallow
+        bug: '1257119'
+        skip-test: false
+        fail-regex:
+          - "TestFail:"
+      - test:
+          - virsh.blockcopy.negative_test.block_lun.block_type
+        bug: '1209802'
+        skip-test: false
+        fail-regex:
+          - 'Expect fail, but run successfully'
+      - test:
+          - tcp_sasl_persistent_paused_no_dst
+          - tcp_sasl_persistent_paused_with_dst
+          - tcp_sasl_persistent_running_no_dst
+          - tcp_sasl_persistent_running_with_dst
+          - tcp_sasl_transient_paused_no_dst
+          - tcp_sasl_transient_paused_with_dst
+          - tcp_sasl_transient_running_no_dst
+          - tcp_sasl_transient_running_with_dst
+          - tls_sasl_persistent_paused_no_dst
+          - tls_sasl_persistent_paused_with_dst
+          - tls_sasl_persistent_running_no_dst
+          - tls_sasl_persistent_running_with_dst
+          - tls_sasl_transient_paused_no_dst
+          - tls_sasl_transient_paused_with_dst
+          - tls_sasl_transient_running_no_dst
+          - tls_sasl_transient_running_with_dst
+          - consumption_unixsocket_sasl
+        bug: '1345743'
+        skip-test: false
+        fail-regex:
+          - 'Failed to create SASL client context: -7'
+      - test:
+          - acceptance_storage_logical
+        bug: '1359679'
+        skip-test: false
+        fail-regex:
+          - "cannot sync data to file '.*': Input/output error"
+          - "Storage volume not found: no storage vol"
+      - test:
+          - acceptance_attach_detach_readonlydisk
+        bug: '1359702'
+        skip-test: false
+        fail-regex:
+          - 'wrong fs type, bad option, bad superblock on'
+      - test:
+          - libvirt_mem.negative_test.attach_error.attach_invalid_size
+        bug: '1358682'
+        skip-test: false
+        fail-regex:
+          - "Expect fail, but run successfully"
+      - test:
+          - virsh.managedsave.functional_test.saved_file
+        bug: '1460962'
+        skip-test: false
+        fail-regex:
+          - "Guest should be active"
+      - test:
+          - virsh.managedsave.functional_test.cpu_mode
+        bug: '1473516'
+        skip-test: false
+        fail-regex:
+          - "guest CPU doesn't match specification"
+      - test:
+          - virsh.net_update.normal-test.add_delete.forward_interface.macvtap.net_active.options_no.default_opt.use-in-guest
+        bug: '1332758'
+        skip-test: false
+        fail-regex:
+          - "Attribute connections not found on element networ"
+      - test:
+          - virsh.qemu_attach.normal_test
+        bug: '844845'
+        skip-test: false
+        fail-regex:
+          - "error: Failed to attach to pid"
+
+- when: (( info.dist_major == 7 and info.dist_minor <= 2 ) or ( info.dist_major < 7 )) and info.dist_name == 'redhat'
+  description: 'in RHEL7.2 or older'
+  not-supported:
+      - test:
+          - virt_admin
+        feature: 'Admin API'
+      - test:
+          - storage_disk_build_on_active
+        feature: 'activate_pool flag'
+      - test:
+          - domain_rename
+        feature: 'domain rename'
+      - test:
+          - virsh.migrate_vm.positive_testing.live_storage_migration.disk_ports
+        feature: 'migrate option --disk-ports'
+      - test:
+          - virsh.migrate.postcopy_migration.postcopy_after_precopy
+        feature: 'migrate option --postcopy'
+      - test:
+          - virsh.migrate.postcopy_migration.postcopy
+        feature: 'migrate-postcopy'
+      - test:
+          - virsh.migrate.there_timeout_suspend
+        feature: 'migrate option --timeout-suspend'
+      - test:
+          - vcpu_hotpluggable
+        feature: 'VCPU hotpluggable'
+      - test:
+          - pci.plug.unplug.positive_tests.pxb_pcie
+        feature: 'pxb-pcie controller'
+      - test:
+          - virtual_disks.gluster..multiple_volume_hosts
+        feature: bz1247521 gluster multiple volume hosts feature
+      - test:
+          - virsh.domrename
+        feature: 'virsh domrename'
+
+  bug-not-fixed:
+      - test:
+          - virtual_network.iface_options.iface_type.type_user
+        bug: '1147238'
+        skip-test: false
+        fail-regex:
+          - 'Duplicated IP address on guest. Check bug: .*1147238'
+      - test:
+          - virsh.blockcopy.positive_test.non_acl..no_shallow
+        bug: '1359679'
+        skip-test: false
+        fail-regex:
+          - "No blockjob find for 'vda'"
+      - test:
+          - virsh.blockcopy.positive_test.non_acl..pivot_option
+          - virsh.blockcopy.positive_test.non_acl..pivot_async_option
+        bug: '1197592'
+        skip-test: false
+        fail-regex:
+          - "Block Copy: .* disk 'vda' not ready for pivot yet"
+      - test:
+          - virsh.migrate.there_dname
+        bug: '1294617'
+        skip-test: false
+        fail-regex:
+          - "Failed to bind socket to .*org.qemu.guest_agent.0: No such file or directory"
+      - test:
+          - memory
+        bug: '1311058'
+        skip-test: false
+        fail-regex:
+          - "OverflowError: long too big to convert"
+      - test:
+          - ssh_persistent_paused_no_dst
+          - ssh_persistent_paused_with_dst
+          - ssh_transient_paused_no_dst
+          - ssh_transient_paused_with_dst
+          - tcp_persistent_paused_no_dst
+          - tcp_persistent_paused_with_dst
+          - tcp_sasl_persistent_paused_no_dst
+          - tcp_sasl_persistent_paused_with_dst
+          - tcp_sasl_transient_paused_no_dst
+          - tcp_sasl_transient_paused_with_dst
+          - tcp_transient_paused_no_dst
+          - tcp_transient_paused_with_dst
+          - tls_persistent_paused_no_dst
+          - tls_persistent_paused_with_dst
+          - tls_sasl_persistent_paused_no_dst
+          - tls_sasl_persistent_paused_with_dst
+          - tls_sasl_transient_paused_no_dst
+          - tls_sasl_transient_paused_with_dst
+          - tls_transient_paused_no_dst
+          - tls_transient_paused_with_dst
+        bug: '1273720'
+        skip-test: false
+        fail-regex:
+          - "domain is no longer running"
+
+- when: info.dist_major == 7 and info.dist_minor <= 2 and info.dist_name == 'redhat'
+  description: 'in RHEL7 (7.2 or older)'
+  bug-not-fixed:
+      # This is a not filed bug fixed in RHEL7.3 and later
+      - test:
+          - conf_file.libvirtd_conf.host_uuid.negative_test.all_same_uuid
+        bug: ''
+        skip-test: false
+        fail-regex:
+            - 'Libvirtd is not expected to be started with host_uuid = "22222222-2222-2222-2222-222222222222"'
+      - test:
+          - perf_events
+          - storage_disk
+          - storage_rbd
+        bug: ''
+        skip-test: false
+        fail-regex:
+          - "'virDomain' object has no attribute 'perfEvents'"
+          - "'virDomain' object has no attribute 'setPerfEvents'"
+          - "'virConnect' object has no attribute 'storagePoolEventRegisterAny'"
+          - "failed to remove volume .*: Directory not empty"
+          - "wiping algorithm 9 not supported"
+
+- when: info.dist_major >= 7 and info.dist_minor >= 2 and info.dist_name == 'redhat'
+  description: 'in RHEL7.2 or newer'
+  case-updating:
+      - test: virsh.define.number
+        task: 'LIBVIRTAT-147'
+  bug-not-fixed:
+      - test:
+          - virsh.blockcommit.normal_test.single_chain.network_disk.gluster..with_ga.timeout.nobase.top_inactive
+        bug: '1340748'
+        skip-test: false
+        fail-regex:
+          - 'Block commit: [100 %]error: failed to abort job for disk'
+      - test:
+          - libvirt_mem.positive_test
+        bug: '1340976'
+        skip-test: false
+        fail-regex:
+          - 'LoginProcessTerminatedError: Client process terminated'
+      - test:
+          - virsh.attach_device.block.single_scsi_file..normal_test.hot_attach_hot_vm
+          - virsh.attach_device.controller.type_scsi..normal_test.hot_attach_hot_vm
+        bug: '1344899'
+        skip-test: false
+        fail-regex:
+          - 'Positive operational test failed'
+      - test:
+          - libvirt_mem.positive_test.cold_plug
+        bug: '1344892'
+        skip-test: false
+        fail-regex:
+          - 'Found unmatched memory setting from domain xml'
+      - test:
+            acceptance_storage_mpath
+        bug: '1346724'
+        skip-test: false
+        fail-regex:
+          - 'missing backend for pool type 7 (mpath)'
+      - test:
+          - virsh.save_image_define
+          - virsh.save_image_edit
+        bug: '1229255'
+        skip-test: false
+        fail-regex:
+          - "error: operation failed: new xml too large to fit in file"
+      - test:
+          - libvirt_hooks.virsh_attach
+        bug: '1378401'
+        skip-test: false
+        fail-regex:
+          - "Command '/bin/virsh qemu-attach --pid .*' failed"
+
+- when: info.dist_major >= 7 and info.dist_minor >= 3 and info.dist_name == 'redhat'
+  description: 'in RHEL7.3 or newer'
+  bug-not-fixed:
+      - test:
+          - virsh.snapshot_create_as.positive_tests..file_disk.no_snapshot_attr.live_memspec.compress_format.raw
+        bug: '1402726'
+        skip-test: false
+        fail-regex:
+          - 'Run failed with right command'
+      - test:
+          - perf
+        bug: ''
+        skip-test: false
+        fail-regex:
+          - 'unable to enable host cpu perf event for'
+          - 'unable to open host cpu perf event for'
+      - test:
+          - virtual_disks.ceph..attach_disk
+        bug: ''
+        skip-test: false
+        fail-regex:
+          - 'No such file or directory'
+      - test:
+          - virsh.domrename.error_test.invalid_new_name.invalid_char_new_name
+        bug: '1333232'
+        skip-test: false
+        fail-regex:
+          - "Run '/bin/virsh domrename  avocado-vt-vm1  / ' expect fail, but run successfully"
+
+- when: info.dist_major == 7 and info.dist_minor <= 3 and info.dist_name == 'redhat'
+  description: 'in RHEL7 (7.3 or older)'
+  bug-not-fixed:
+      # This is a not filed bug fixed in RHEL7.3 and later
+      - test:
+          - secret
+        bug: ''
+        skip-test: false
+        fail-regex:
+          - 'is illegal or not supportedby this version'
+  bug-wont-fix:
+      - test:
+          - virsh.resume.error_test.vm_running
+        bug: "1009008"
+
+- when: info.dist_major >= 7 and info.dist_minor >= 4 and info.dist_name == 'redhat'
+  description: 'in RHEL7.4 or newer'
+  bug-not-fixed:
+      - test:
+          - virsh.qemu_agent_command..invalid_arguments
+          - virsh.qemu_agent_command..sync_extra
+        bug: ''
+        skip-test: false
+        fail-regex:
+          - "Expect succeed, but run fail"
+      - test:
+          - virsh.qemu_agent_command.error_test.vm_pm_suspend
+        bug: ''
+        skip-test: false
+        fail-regex:
+          - 'Expect fail but run successfully'
+
+- when: info.dist_major >= 7 and info.dist_minor >= 5 and info.dist_name == 'redhat'
+  description: 'in RHEL7.5 or newer'
+  bug-not-fixed:
+      - test:
+          - virsh.attach_detach_disk.detach_disk.normal_test
+          - virsh.attach_device_matrix..at_okay_dt_okay
+          - virsh.attach_detach_disk_matrix..at_okay_dt_okay
+        bug: '1530577'
+        skip-test: false
+        fail-regex:
+          - "Active domain XML not updated when --(live|current) options used for detachment"
+          - "Error parsing XML"
+          - "See device in xml file after detach"
+      - test:
+          - virtual_disks.multivms.coldplug.vms_sgio_share_error_test
+          - virtual_disks.multivms..vms_sgio_share_normal_test..filtered_shareable_option1
+          - virtual_disks.multivms..vms_sgio_share_normal_test..filtered_shareable_option2
+          - virtual_disks.multivms..vms_sgio_share_normal_test..filtered_shareable_option3
+          - virtual_disks.multivms..vms_sgio_share_normal_test..filtered_shareable_option5
+        bug: '1518482'
+        skip-test: false
+        fail-regex:
+          - "Property '.share-rw' not found"
+          - "Failed to hotplug disk device"
+      - test:
+          - virsh.vol_resize.positive_test.luks_encrypt
+        bug: '1490279'
+        skip-test: false
+        fail-regex:
+          - "Volume .+? resize check fail"
+      - test:
+          - virsh.blockcopy.positive_test.non_acl
+        bug: '1490826'
+        skip-test: false
+        fail-regex:
+          - "Backing file not supported for file format 'raw'"
+      - test:
+          - domain_basic_rhev
+        bug: '1494327'
+        skip-test: false
+        fail-regex:
+          - "Operation not supported: threshold currently can't be set for block device"
+      - test:
+          - acceptance_basic_blockjob
+        bug: '1491217'
+        skip-test: false
+        fail-regex:
+          - "Operation not supported: peeking is supported only for RAW disks"
+      - test:
+          - virsh.domxml_to_native.no_file_extra_option
+        bug: '1494400'
+        skip-test: false
+        fail-regex:
+          - 'Run successfully with wrong command'
+      - test:
+          - acceptance_managedsave
+          - virsh.dump.positive_test
+          - virsh.managedsave.functional_test.bypass_cache
+          - virsh.managedsave.functional_test.libvirt_guests.single_guest
+        bug: '1501715'
+        skip-test: false
+        fail-regex:
+          - 'domain save job: unexpectedly failed'
+          - 'Requested operation is not valid'
+          - 'LibvirtXMLError: Failed to undefine avocado-vt-vm1'
+          - 'TestFail: Checking flags 16384 failed'
+      - test:
+          - virtual_disks.encryption..qcow2_internal
+        bug: '1526382'
+        skip-test: false
+        fail-regex:
+          - "Parameter 'encrypt.key-secret' is required for cipher"
+      - test:
+          - linux_domain
+        bug: '1530577'
+        skip-test: false
+        fail-regex:
+          - "libvirt call failed: XML error: target .* duplicated for disk sources"
+      - test:
+          - virsh.help.normal_test.all_command_option
+        bug: '1509870'
+        skip-test: false
+        fail-regex:
+          - "virsh help command or groups test failed"
+
+- when: info.dist_major >= 7 and info.dist_minor >= 4 and info.dist_codename == 'RHEL-ALT'
+  description: 'in Pegas 7.4 and RHEL-ALT 7.5'
+  bug-not-fixed:
+      # bug 1443486 cause host crash and block testing
+      - test:
+          - virsh.blockcopy..blockdev..no_shallow
+        bug: '1443486'
+        skip-test: true
+      - test:
+          - vcpu_hotpluggable
+        bug: '1482437'
+        skip-test: false
+        fail-regex:
+          - 'cpu number in VM is not correct, it should be'
+          - 'vcpucount: current live info is not correct'
+  not-supported:
+      - test:
+          - virsh.migrate_vm.positive_testing.live_storage_migration
+        feature: 'migrate option --migrate-disks'
+      # remove live snapshot for RHV acceptance job
+      - test:
+          - virsh.snapshot_create_as
+          - virsh.snapshot_par_cur
+          - virsh.snapshot_edit
+          - virtual_disks.multidisks.coldplug.single_disk_test.disk_option_bootdisk.disk_virtio_snapshot.disk_snapshot_external.normal_test
+          - virtual_disks.multidisks.coldplug.single_disk_test.disk_option_bootdisk.disk_virtio_bootorder_snapshot
+        feature: 'live snapshot'
+      - test:
+          - guest_numa..16M
+          - guest_numa..1G
+        feature: "16M & 1G hugepage size"
+
+
+- when: info.dist_major >= 23 and info.dist_name == 'fedora'
+  description: 'in fedora 23 or newer'
+  bug-not-fixed:
+      - test:
+          - virsh.attach_device.block.single_scsi_file..normal_test.hot_attach_hot_vm
+          - virsh.attach_device.controller.type_scsi..normal_test.hot_attach_hot_vm
+        bug: '1344899'
+        skip-test: false
+        fail-regex:
+          - 'Positive operational test failed'
+      - test:
+          - virsh.save_image_define
+          - virsh.save_image_edit
+        bug: '1229255'
+        skip-test: false
+        fail-regex:
+          - "error: operation failed: new xml too large to fit in file"
+
+#-----------------------------------------------------------------------------
+# Blacklist for CPU arch dependent cases
+#-----------------------------------------------------------------------------
+- when: info.host_arch == 'x86_64'
+  description: 'on x86_64 machine'
+  not-supported:
+      - test: guest_numa..16M
+        feature: '16M'
+      - test: conf_file.qemu_conf.auto_dump..pseries_model
+        feature: 'pseries'
+      - test: multiple_controller_ppc
+        feature: 'multiple vPHB'
+      # TODO: This issue should be dealt with properly in test case since
+      # simply skipping this test case will make one test case not covered
+      - test: libvirt_mem.positive_test.without_numa_save_restore
+        feature: 'mem_numa'
+
+- when: info.host_arch == 'ppc64le'
+  description: 'on ppc64le machine'
+  not-supported:
+      - test:
+          - virtual_disks.usb..usb2_0
+          - virtual_disks.usb..usb1_1
+        feature: 'USB'
+      - test:
+          - virtual_devices.video_devices..primary_video.qxl
+          - virtual_devices.video_devices..secondary_video.qxl
+          - virtual_devices.video_devices..primary_video.cirrus
+          - virtual_devices.video_devices..secondary_video.cirrus
+        feature: "qxl and cirrus video"
+      - test:
+          - watchdog..model_ib700
+        feature: "ib700"
+      - test:
+          - startup_policy.startupPolicy..sata_bus
+        feature: 'SATA'
+      - test:
+          - virtual_disks.multidisks.hotplug.multi_disks_test.virtio_disks_duplicate_wwn_disk
+          - virtual_disks.multidisks.hotplug.multi_disks_test.virtio_disks_duplicate_wwn_disk_attach_by_disk
+          - virtual_disks.multidisks.hotplug.multi_disks_test.virtio_disks_duplicate_serial_disk_attach_by_disk
+          - virtual_disks.multidisks.hotplug.single_disk_test.disk_bus_device_option.disk_bus_virtio.volume_lun.default
+        feature: 'spapr-vscsi does not support hotplug'
+      - test:
+          - virtual_disks.encryption.encryption_test.normal_test
+          - virtual_disks.multidisks.hotplug.single_disk_test.disk_duplicate_scsi_controller_index_error_test.ide
+        feature: 'IDE controllers are unsupported'
+      - test: startup_policy.startupPolicy..device_type.floppy
+        feature: 'Floppy not supported on PPC'
+      - test: daemon.crash_regression.pm_test
+        feature: 'S3 not supported'
+      - test: controller.functional.positive_tests.pci_root
+        feature: '64-bit PCI hole size'
+      - test: controller.functional.positive_tests.pcie_root
+        feature: 'pcie-root'
+      - test: controller.functional.positive_tests.usb_controller
+        feature: 'usb-ehci'
+      - test: guest_numa.negative_test.strict_memnode_insufficent
+        feature: TODO
+      - test:
+          - virsh.pool.positive_test.pool_type_fs.source_format_vfat
+          - virsh.pool_autostart.positive_test..pool_type_fs.source_format_vfat
+        feature: 'mkfs.vfat'
+      - test:
+          - dumpxml..with_cpu
+          - emulatorpin..ranges
+          - emulatorpin..excluding
+          - vcpupin..cpu_list_x-y
+          - vcpupin..cpu_list_exclude
+          - vcpupin..cpu_list_r
+          - vcpupin..multi_dom
+          - cpu_compare..delete_feature
+          - cpu_compare..modify_feature_policy
+          - cpu_compare..modify_feature_name
+          - cpu_compare..modify_mode.host_model
+          - cpu_compare..modify_model.cpu64-rhel5
+          - cpu_compare..modify_model.cpu64-rhel6
+        feature: >
+          TODO The cases are filter out by case owner after debug, which are
+          not fit for ppc testing. feature policy and name not valid on ppc.
+      - test:
+          - timer_management..kvmclock
+          - timer_management..hpet
+          - timer_management.specific_timer.multi_timers.hpet_tsc.present_yes
+          - timer_management.specific_timer.multi_timers.hpet_tsc.present_mix
+        feature: 'timer kvmclock, hpet'
+      - test:
+          - libvirt_qemu_cmdline..pv_eoi
+        feature: 'pv_eoi'
+      - test:
+          - startup_policy..cdrom
+          - virtual_disks..disks_bootorder
+          - virtual_disks..disk_bus_ide
+          - virtual_disks..disk_readonly_nfs_cdrom
+          - virtual_disks..disk_virtio_scsi_cdrom_multi_queue
+          - virtual_disks..disk_bus_sata
+          - virtual_disks..disk_ide_place_correct_boot_order
+          - virtual_disks..disk_virtio_bootorder_snapshot
+          - virtual_disks..disk_cdrom_update_boot_order
+          - virtual_disks..vms_readonly_test
+          - virtual_disks..disk_source_file_name
+          - change_media..ide_
+          - update_device..ide_option
+        feature: 'ide bus'
+      - test:
+          - virtual_disks..disk_bus_usb.device_disk.normal_test
+        feature: 'piix3-usb-uhci'
+      - test:
+          - graphics..spice_only
+          - graphics..spice_vnc
+          - virsh.domdisplay..spice_t
+        feature: 'spice graphics'
+      - test:
+          - windows
+          - windows_domain
+          - domain_win_cdrom_inst
+        feature: 'windows vm'
+      - test:
+          - timer_management..inject_nmi
+        feature: 'vm inject nmi'
+      - test:
+          - migrate_vm..attach_floppy
+          - startup_policy..floppy
+          - virtual_disks.multidisks..disk_readonly_nfs_floppy
+          - virtual_disks.multidisks..disk_floppy_update_boot_order
+        feature: 'floppy device'
+      - test:
+          - virtual_network.iface_hotplug..model_e1000
+          - virtual_network.iface_hotplug..model_rtl8139
+          - virsh.domiflist..e1000_iface
+          - virsh.domiflist..rtl8139_iface
+          - virtual_network.iface_coalesce.negative_testing.model_type_e1000 
+          - virtual_network.iface_coalesce.negative_testing.model_type_e1000e
+          - virtual_network.iface_coalesce.negative_testing.model_type_rtl8139
+        feature: 'e1000 & rtl8139'
+      - test:
+          - virtual_network.iface_network.net_pxe
+        feature: 'syslinux'
+      - test: conf_file.qemu_conf.auto_dump..isa_model
+        feature: 'isa'
+      - test:
+          - virsh.dompmsuspend
+          - daemon.kill_qemu.pmsuspended
+        feature: 'S3 & S4'
+      - test:
+          - gluster
+          - pool_type_gluster
+          - source_format_glusterfs
+          - gluster_pool
+          - snapshot_disk.no_delete.negative_test.no_pool.network_disk.inactive.snapshot_from_xml
+        feature: 'gluster'
+      - test:
+          - blockcommit..ceph
+          - blockpull..ceph
+          - virtual_disks.ceph
+          - storage_rbd
+          - virtual_disks.luks..ceph_test
+        feature: 'ceph'
+  case-updating:
+      - test:
+          - domain_linux_cdrom_inst
+        task:
+      - test:
+          - virsh.migrate_vm.positive_testing.live_migration.with_hugepages
+          - virsh.migrate_vm.positive_testing.p2p_migration.with_keepalive_protocol.default_conf_less_than_keepalive_time
+        task: 'LIBVIRTAT-136'
+  need-env:
+      - test:
+          - numatune..positive_testing..running_guest..comma_list
+          - numatune..positive_testing..running_guest..ranges
+        env: "node 1 without memory empty"
+  bug-not-fixed:
+      - test: virtual_disks.multidisks.hotplug.single_disk_test.disk_virtio_pci_bridge_controller
+        bug: '1518527'
+        skip-test: false
+        fail-regex:
+          - "Can not see device in VM"
+      - test:
+          - numa_memory
+          - numa_memory_migrate
+          - guest_numa
+          - numad_vcpupin
+        bug: '1490158'
+        skip-test: false
+        fail-regex:
+          - "error: Machine '.+?' already exists"
+      - test:
+          - vcpu_hotpluggable.positive_test
+        bug: '1479694'
+        skip-test: false
+        fail-regex:
+          - "cpu number in VM is not correct, it should be"
+      - test:
+          - virsh.vcpupin.online.positive_test.initial_check
+        bug: '1480062'
+        skip-test: false
+        fail-regex:
+          - "Cpu pinning details not updated properly in virsh vcpupin command output"
+
+      - test:
+          - virsh.vol_download_upload.download_upload
+          - acceptance_storage_dir
+          - acceptance_storage_logical
+        bug: '1460623'
+        skip-test: false
+        fail-regex:
+          - "file digests do not match, volume download failed"
+          - "file digests not match, download failed"
+      - test:
+          - virsh.change_media..floppy_test
+          - virsh.update_device..floppy_option
+        bug: '1180486'
+        skip-test: false
+        fail-regex:
+          - "PowerPC pseries machines do not support floppy device"
+          - "error: Failed to start domain avocado-vt-vm1"
+      - test:
+          - libvirt_mem..hugepages
+        bug: '1219445'
+        skip-test: false
+        fail-regex:
+          - 'Command.*numastat \d+.*failed'
+      - test:
+          - virtual_network.iface_options.iface_unprivileged_user
+        bug: '1293024'
+        skip-test: false
+        fail-regex:
+          - 'internal error: Process exited prior to exec: libvirt:  error : cannot limit locked memory to \d+: Operation not permitted'
+      - test:
+          - virsh.sendkey
+        bug: '1251836'
+        skip-test: false
+        fail-regex:
+          - 'Error:ls: cannot access /root/abc: No such file or directory'
+          - 'Error:ls: cannot access /root/ab: No such file or directory'
+          - 'SysRq does not take effect in guest, options is \w+'
+      - test:
+          - conf_file.qemu_conf.auto_dump
+        bug: '1240494'
+        skip-test: false
+        fail-regex:
+          - '.*pgrep -f /var/tmp/avocado_\w+/dump.*failed'
+      - test:
+          - virsh.migrate_vm.positive_testing.live_migration.with_hugepages
+        bug: '1367620'
+  bug-wont-fix:
+      - test:
+          - virsh.maxvcpus..with_option.with_qemu
+        bug: '1460637'
+        skip-test: false
+        fail-regex:
+          - "Command output [0-9]+ is not expected for qemu"
+      - test:
+          - virsh.domtime.positive.pmsuspend_vm
+        bug: ''
+        skip-test: false
+        fail-regex:
+          - "error: unsupported configuration: setting ACPI S3 not supported"
+
+- when: info.host_arch == 'ppc64le' and info.dist_codename == 'Maipo'
+  description: "RHEL for Power8"
+  not-supported:
+      - test:
+          - guest_numa..2M
+          - guest_numa..1G
+          - guest_numa..host_total
+        feature: "2M & 1G hugepage size"
+
+- when: info.host_arch == 's390x'
+  description: 'on z/VM machine'
+  not-supported:
+      - test:
+          - virsh.vncdisplay
+          - virsh.domdisplay.have_passwd.no_options.positive_readonly.vnc_t.domain_uuid
+          - virsh.screenshot.normal_test.non_acl.screen_0.name_option
+          - virsh.nodedev_dumpxml.positve_test.non_acl.normal_test
+        feature: "PCI bus"
+      - test:
+          - guest_numa.possitive_test.no_hugepage.mem_backend.topology.no_numatune_memnode.no_numatune_mem
+          - numa_memory_migrate.mem_auto
+          - numa_memory_migrate.mem_nodeset
+          - virsh.freepages.positive_test.no_hugepage.all_freepages
+          - virsh.freepages.positive_test.no_hugepage.each_cell_page
+        feature: "numa"
+  bug-not-fixed:
+      - test:
+          - cpu_compare.host_cpu
+        bug: '1430987'
+        skip-test: false
+        fail-regex:
+          - 'Error in Getter for property "model"'
+
+- when: info.host_arch == 'aarch64'
+  description: 'on aarch64 machine'
+  # Refer to https://virt-wiki.lab.eng.brq.redhat.com/RHELSA
+  not-supported:
+      - test:
+          - libvirt_vcpu_plug_unplug
+          - guest_numa
+          - virsh.screenshot
+        feature: 'cpu hotplug/unplug, numa, PCI bus not supported'
+      - test:
+            - virsh.snapshot.live.no_halt
+            - virsh.snapshot_dumpxml.positive_tests.disk_only_snap.show_secure_info.without_passwd
+        feature: 'internal snapshot with pflash based firmware'
+  bug-not-fixed:
+      - test:
+          - sysinfo
+        bug: '1426162'
+        skip-test: false
+        fail-regex:
+          - 'Processor version from sysinfo not equal to dmidecode output'
+      - test:
+          - cpu_compare.host_cpu
+        bug: '1430987'
+        skip-test: false
+        fail-regex:
+          - 'Error in Getter for property "model"'
+      - test:
+          - domfstrim
+        bug: '1436524'
+        skip-test: false
+        fail-regex:
+          - 'Fail to do fstrim'
+      - test:
+          - attach_detach_disk.attach_disk.normal_test.attach_disk_type.block_disk_type_lun
+        bug: '1430634'
+        skip-test: false
+        fail-regex:
+          - 'Unable to read from monitor: Connection reset by peer'
+      - test:
+          - virsh.save_image_edit.running
+        bug: '1229255'
+        skip-test: false
+        fail-regex:
+          - 'new xml too large to fit in file'
+      - test:
+          - virsh.domxml_from_native
+        bug: '1535895'
+        skip-test: false
+        fail-regex:
+          - 'error: unknown character device syntax chardev:charserial0'
+
+- when: any_package('qemu-kvm', 'qemu-kvm-rhev') > '2.3.0'
+  description: 'with qemu-kvm newer than 2.3.0'
+  bug-not-fixed:
+      - test:
+          - at_dt_iscsi_disk.positive_test..network_disk
+          - at_dt_iscsi_disk.positive_test..volume_disk
+          - multidisks.hotplug.multi_disks_test
+          - multidisks.hotplug.single_disk_test
+          - virsh.attach_device_matrix
+          - virsh.attach_detach_disk.detach_disk.normal_test
+          - virsh.attach_detach_disk_matrix
+          - virsh.detach_device.normal_test..disk_test
+          - acceptance_attach_detach_readonlydisk
+          - linux_domain
+          - domain_win_cdrom_inst
+        bug: '1318181'
+        skip-test: false
+        fail-regex:
+          - 'Unable to read from monitor: Connection reset by peer'
+          - 'Domain \S+ is not running'
+          - 'VMDeadError: VM is dead'
+          - 'internal error: early end of file from monitor'
+          - 'virsh detach-device failed'
+          - 'virsh detach-disk failed'
+      - test:
+          - multidisks.coldplug.single_disk_test..disk_virtio_bootorder_snapshot
+        bug: '1321304'
+        skip-test: false
+        fail-regex:
+          - "internal error: unable to execute QEMU command 'migrate'"
+      - test:
+          - virsh.change_media.floppy_test.positive_test.insert..running_guest
+          - virsh.change_media.floppy_test.positive_test.update..running_guest
+          - virsh.update_device.normal_test
+        bug: '1326660'
+        skip-test: false
+        fail-regex:
+          - "mount: /dev/fd0 is not a valid block device"
+          - "An error occurred, but the cause is unknown"
+      - test:
+          - virsh.change_media.floppy_test.positive_test.eject..running_guest
+        bug: '1328301'
+        skip-test: false
+        fail-regex:
+          - "The disk device 'fda' doesn't have media"
+      - test:
+          - virsh.change_media_matrix.pre_vm_state_running.cdrom_test.config.action_twice.live_config.eject_insert
+        bug: '1243342'
+        skip-test: false
+        fail-regex:
+          - "Expect fail, but run successfully"
+      - test:
+          - virsh.snapshot_edit..mem_snapshot.internal_snapshot
+        bug: '1321304'
+        skip-test: false
+        fail-regex:
+          - "There's a migration process in progress"
+      - test:
+          - virsh.reset.positive_test
+          - virsh.sendkey.sysrq..reboot_guest
+          - virsh.dompmsuspend.positive_test.non_acl.save_restore
+        bug: '1377920'
+        skip-test: false
+        fail-regex:
+          - "Login timeout expired .* smpboot: do_boot_cpu failed"
+
+- when: any_package('qemu-kvm', 'qemu-kvm-rhev') >= '2.4.0'
+  description: 'with qemu-kvm newer than or equal to 2.4.0'
+  not-supported:
+      - test:
+          - virtual_disks.encryption..qcow2_internal.normal_test
+        feature: 'AES-CBC encrypted qcow2 images is no longer supported in system emulators'

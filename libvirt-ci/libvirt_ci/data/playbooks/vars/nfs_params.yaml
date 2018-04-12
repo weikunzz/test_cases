@@ -1,0 +1,17 @@
+---
+nfs_params:
+
+ # Directory will be shared in nfs server
+ shared_dir: /var/data
+
+ # Mount point in the client
+ dest_dir: /mnt
+
+ # nfs server name
+ nfs_src: 127.0.0.1:/var/data
+
+ # Change cleanup to True when you want to umount and clean NFS configuration
+ cleanup: False
+
+ # Config if it is hard mount
+ hard_mnt: False

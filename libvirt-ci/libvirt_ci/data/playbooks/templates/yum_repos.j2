@@ -1,0 +1,10 @@
+{% for repofile in item.itervalues() %}
+{% for repo in repofile %}
+[{{repo.name}}]
+name={{ repo.name }}
+baseurl={{ repo.baseurl }}
+enabled=1
+gpgcheck=0
+skip_if_unavailable=1
+{% endfor %}
+{% endfor %}

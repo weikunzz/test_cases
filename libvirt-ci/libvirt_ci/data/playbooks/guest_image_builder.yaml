@@ -1,0 +1,86 @@
+- name: Build guest image
+  hosts: all
+  vars:
+    img_path: /var/lib/libvirt/images/image-builder.qcow2
+    img_path_xz: /var/lib/libvirt/images/image-builder.qcow2.xz
+    img_path_uefi: /var/lib/libvirt/images/image-builder-uefi.qcow2
+    tgt_dir: /mnt
+    boot: "--boot uefi,cdrom"
+    img_name: "{{ distro }}-{{ arch }}.qcow2"
+    tgt_path: "{{ tgt_dir }}/{{ img_name }}"
+    img_name_ovmf: "{{ distro }}-{{ arch }}-ovmf.qcow2"
+    tgt_path_ovmf: "{{ tgt_dir }}/{{ img_name_ovmf }}"
+  tasks:
+    - name: Wait tree to be ready by checking STATUS file
+      uri:
+        url: "{{ url_prefix }}/{{ distro }}/STATUS"
+        method: GET
+        return_content: yes
+        status_code: 200
+      register: result
+      until: result.content.find("FINISHED") != -1
+      retries: 288
+      delay: 600
+
+    - name: Set OS tree URL
+      set_fact:
+          url: "{{ url_prefix }}/{{ distro }}/compose/Server/{{ arch }}/os/"
+
+    - name: Install required packages
+      yum:
+          name: "virt-install,virt-viewer,qemu-kvm,qemu-img,libguestfs-tools,genisoimage,xz,libvirt"
+          state: "present"
+
+    - name: Prepare custom SELinux rules for RHEL6
+      shell: "{{ item }}"
+      with_items:
+          - "checkmodule -M -m -o /tmp/rhel6.mod ~/.libvirt-ci/selinux/rhel6.te"
+          - "semodule_package -o /tmp/rhel6.pp -m /tmp/rhel6.mod"
+          - "semodule -i /tmp/rhel6.pp"
+      when:
+          - ansible_os_family == "RedHat"
+          - ansible_distribution_major_version == "6"
+
+    - name: Restart virtlogd.socket
+      service: name=virtlogd.socket state=restarted
+      ignore_errors: yes
+
+    - name: Restart libvirtd service
+      service: name=libvirtd state=restarted
+
+    - name: Generate ISO image with kickstart file
+      command: genisoimage -o /tmp/ks.iso /tmp/ks.cfg
+
+    - name: Create image
+      command: qemu-img create {{ img_path }} -f qcow2 10G -o preallocation=off
+
+    - name: Mount NFS
+      mount:
+          name: "{{ tgt_dir }}"
+          src: "download.libvirt.redhat.com:/srv/www/html/libvirt-CI-resources"
+          fstype: "nfs"
+          state: "mounted"
+
+    - name: Install VM with default machine type
+      include: tasks/image_builder_default.yaml
+      when: ansible_machine != "aarch64"
+
+    - name: Install VM with UEFI boot
+      include: tasks/image_builder_uefi.yaml
+      when:
+          - ansible_distribution_major_version != "6"
+          - (ansible_machine == "aarch64" or ansible_machine == "x86_64")
+
+    - name: Set file owner
+      file:
+          path: "{{ tgt_dir }}"
+          owner: root
+          group: root
+          recurse: yes
+
+    - name: Unmount NFS
+      mount:
+          name: "{{ tgt_dir }}"
+          src: "download.libvirt.redhat.com:/srv/www/html/libvirt-CI-resources"
+          fstype: "nfs"
+          state: "unmounted"

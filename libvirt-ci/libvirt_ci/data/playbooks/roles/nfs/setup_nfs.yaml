@@ -1,0 +1,24 @@
+---
+# Config the nfs service and configuration
+
+      - name: create shared directory
+        file: dest='{{nfs_params.shared_dir}}' owner=root group=root mode=644 state=directory
+
+      - name: modify exports file
+        lineinfile:
+            dest: /etc/exports
+            line: '{{nfs_params.shared_dir}} *(rw,no_root_squash)'
+
+      - name: start nfs-server service for rhel7
+        service: name=nfs-server state=restarted enabled=yes
+        when: ansible_os_family == "RedHat" and ansible_distribution_major_version == '7'
+
+      - name: start nfs service for rhel6
+        service: namie=nfs state=restarted enabled=yes
+        when: ansible_os_family == "RedHat" and ansible_distribution_major_version == '6'
+
+      - name: start rpcbind service
+        service: name=rpcbind state=restarted enabled=yes
+
+      - name: run exportfs
+        shell: exportfs

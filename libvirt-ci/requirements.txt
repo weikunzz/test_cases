@@ -1,0 +1,4 @@
+ansible==2.3.3.0
+importlib==1.0.4
+paramiko==2.3.1
+six==1.11.0

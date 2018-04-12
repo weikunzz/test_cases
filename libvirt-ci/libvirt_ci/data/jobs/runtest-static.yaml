@@ -1,0 +1,18 @@
+- job-template:
+    defaults: ci-runtest-test-runner
+    name: '{component}-{product}-{version}-runtest-{arch}-{job-suffix}-static'
+    display-name: '{component}-{product}-{version}-runtest-{arch}-{job-suffix}'
+    publishers:
+        - test-runner-publisher:
+            teardown-project: ''
+            artifacts: '{artifacts}'
+            unstable-thld: '{unstable-thld}'
+            failure-thld: '{failure-thld}'
+            enable-report: '{enable-report}'
+            recipients: '{recipients}'
+
+- job-group:
+    name: 'job-workflow-static'
+    jslavename: 'jslave-{component}-{product}-{version}-{arch}-{job-suffix}-static'
+    jobs:
+        - '{component}-{product}-{version}-runtest-{arch}-{job-suffix}-static'

@@ -1,0 +1,269 @@
+diff --git a/libvirt/tests/src/svirt/svirt_attach_disk.py b/libvirt/tests/src/svirt/svirt_attach_disk.py
+index 7b6e970..aedd1c1 100644
+--- a/libvirt/tests/src/svirt/svirt_attach_disk.py
++++ b/libvirt/tests/src/svirt/svirt_attach_disk.py
+@@ -71,6 +71,11 @@ def run(test, params, env):
+     qemu_conf = utils_config.LibvirtQemuConfig()
+     libvirtd = utils_libvirtd.Libvirtd()
+     try:
++        process.run("systemctl stop systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd-kernel.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd", ignore_status=True)
+         # set qemu conf
+         if check_cap_rawio:
+             qemu_conf.user = 'root'
+@@ -216,3 +221,8 @@ def run(test, params, env):
+         if check_cap_rawio:
+             qemu_conf.restore()
+             libvirtd.restart()
++        process.run("systemctl start systemd-udevd", ignore_status=True)
++        process.run("systemctl start systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl start systemd-udevd-kernel.socket",
++                    ignore_status=True)
+diff --git a/libvirt/tests/src/virsh_cmd/pool/virsh_pool.py b/libvirt/tests/src/virsh_cmd/pool/virsh_pool.py
+index fab826b..4d36c43 100644
+--- a/libvirt/tests/src/virsh_cmd/pool/virsh_pool.py
++++ b/libvirt/tests/src/virsh_cmd/pool/virsh_pool.py
+@@ -4,6 +4,8 @@ import logging
+ 
+ from autotest.client.shared import error
+ 
++from avocado.utils import process
++
+ from virttest import utils_libvirtd
+ from virttest import libvirt_storage
+ from virttest import virsh
+@@ -171,6 +173,11 @@ def run(test, params, env):
+               'source_format': source_format, 'persistent': True,
+               'ip_protocal': ip_protocal}
+     try:
++        process.run("systemctl stop systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd-kernel.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd", ignore_status=True)
+         _pool = libvirt_storage.StoragePool()
+         # Step (1)
+         # Pool define
+@@ -350,3 +357,8 @@ def run(test, params, env):
+             multipathd.start()
+         if os.path.exists(pool_xml):
+             os.remove(pool_xml)
++        process.run("systemctl start systemd-udevd", ignore_status=True)
++        process.run("systemctl start systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl start systemd-udevd-kernel.socket",
++                    ignore_status=True)
+diff --git a/libvirt/tests/src/virsh_cmd/pool/virsh_pool_acl.py b/libvirt/tests/src/virsh_cmd/pool/virsh_pool_acl.py
+index af1ad7c..2b58e92 100644
+--- a/libvirt/tests/src/virsh_cmd/pool/virsh_pool_acl.py
++++ b/libvirt/tests/src/virsh_cmd/pool/virsh_pool_acl.py
+@@ -113,6 +113,11 @@ def run(test, params, env):
+ 
+     # Run Testcase
+     try:
++        process.run("systemctl stop systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd-kernel.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd", ignore_status=True)
+         _pool = libvirt_storage.StoragePool()
+         # Init a pool for test
+         result = utlv.define_pool(pool_name, pool_type, pool_target,
+@@ -276,3 +281,8 @@ def run(test, params, env):
+         if cleanup_env[0]:
+             utlv.setup_or_cleanup_nfs(
+                 False, restore_selinux=cleanup_env[3])
++        process.run("systemctl start systemd-udevd", ignore_status=True)
++        process.run("systemctl start systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl start systemd-udevd-kernel.socket",
++                    ignore_status=True)
+diff --git a/libvirt/tests/src/virsh_cmd/snapshot/virsh_snapshot_disk.py b/libvirt/tests/src/virsh_cmd/snapshot/virsh_snapshot_disk.py
+index e4919f1..a8f0bf4 100644
+--- a/libvirt/tests/src/virsh_cmd/snapshot/virsh_snapshot_disk.py
++++ b/libvirt/tests/src/virsh_cmd/snapshot/virsh_snapshot_disk.py
+@@ -6,6 +6,8 @@ import tempfile
+ from autotest.client.shared import error
+ from autotest.client import utils
+ 
++from avocado.utils import process
++
+ from virttest import virsh
+ from virttest import qemu_storage
+ from virttest import data_dir
+@@ -109,6 +111,11 @@ def run(test, params, env):
+     # Get a tmp dir
+     snap_cfg_path = "/var/lib/libvirt/qemu/snapshot/%s/" % vm_name
+     try:
++        process.run("systemctl stop systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd-kernel.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd", ignore_status=True)
+         if replace_vm_disk:
+             utlv.set_vm_disk(vm, params, tmp_dir)
+             if multi_gluster_disks:
+@@ -446,3 +453,8 @@ def run(test, params, env):
+             except error.TestFail, detail:
+                 libvirtd.restart()
+                 logging.error(str(detail))
++        process.run("systemctl start systemd-udevd", ignore_status=True)
++        process.run("systemctl start systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl start systemd-udevd-kernel.socket",
++                    ignore_status=True)
+diff --git a/libvirt/tests/src/virsh_cmd/volume/virsh_vol_clone_wipe.py b/libvirt/tests/src/virsh_cmd/volume/virsh_vol_clone_wipe.py
+index beae48d..80ed9eb 100644
+--- a/libvirt/tests/src/virsh_cmd/volume/virsh_vol_clone_wipe.py
++++ b/libvirt/tests/src/virsh_cmd/volume/virsh_vol_clone_wipe.py
+@@ -6,6 +6,7 @@ from autotest.client import utils
+ from autotest.client.shared import error
+ 
+ from avocado.utils import path as utils_path
++from avocado.utils import process
+ 
+ from virttest.utils_test import libvirt as utlv
+ from virttest import libvirt_storage
+@@ -83,6 +84,11 @@ def run(test, params, env):
+     if libvirt_pool.pool_exists(pool_name):
+         raise error.TestError("Pool '%s' already exist" % pool_name)
+     try:
++        process.run("systemctl stop systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd-kernel.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd", ignore_status=True)
+         # Create a new pool
+         disk_vol = []
+         if pool_type == 'disk':
+@@ -191,3 +197,8 @@ def run(test, params, env):
+                                      emulated_image)
+         except error.TestFail, detail:
+             logging.error(str(detail))
++    process.run("systemctl start systemd-udevd", ignore_status=True)
++    process.run("systemctl start systemd-udevd-control.socket",
++                ignore_status=True)
++    process.run("systemctl start systemd-udevd-kernel.socket",
++                ignore_status=True)
+diff --git a/libvirt/tests/src/virsh_cmd/volume/virsh_vol_create.py b/libvirt/tests/src/virsh_cmd/volume/virsh_vol_create.py
+index 7f24cb9..828b35f 100644
+--- a/libvirt/tests/src/virsh_cmd/volume/virsh_vol_create.py
++++ b/libvirt/tests/src/virsh_cmd/volume/virsh_vol_create.py
+@@ -190,6 +190,11 @@ def run(test, params, env):
+     skip_msg = "Volume format '%s' is not supported by qemu-img" % vol_format
+     vol_path_list = []
+     try:
++        process.run("systemctl stop systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd-kernel.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd", ignore_status=True)
+         # Create the src pool
+         src_pool_name = "virt-%s-pool" % src_pool_type
+         pvt = utlv.PoolVolumeTest(test, params)
+@@ -282,3 +287,8 @@ def run(test, params, env):
+             logging.error(str(detail))
+         if multipathd_status:
+             multipathd.start()
++        process.run("systemctl start systemd-udevd", ignore_status=True)
++        process.run("systemctl start systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl start systemd-udevd-kernel.socket",
++                    ignore_status=True)
+diff --git a/libvirt/tests/src/virsh_cmd/volume/virsh_vol_create_from.py b/libvirt/tests/src/virsh_cmd/volume/virsh_vol_create_from.py
+index a0ae3cd..626143b 100644
+--- a/libvirt/tests/src/virsh_cmd/volume/virsh_vol_create_from.py
++++ b/libvirt/tests/src/virsh_cmd/volume/virsh_vol_create_from.py
+@@ -3,6 +3,8 @@ import os
+ 
+ from autotest.client.shared import error
+ 
++from avocado.utils import process
++
+ from virttest import virsh
+ from virttest import libvirt_storage
+ from virttest.utils_test import libvirt as utlv
+@@ -41,6 +43,11 @@ def run(test, params, env):
+ 
+     vol_file = ""
+     try:
++        process.run("systemctl stop systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd-kernel.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd", ignore_status=True)
+         # Create the src/dest pool
+         src_pool_name = "virt-%s-pool" % src_pool_type
+         dest_pool_name = "virt-%s-pool" % dest_pool_type
+@@ -137,3 +144,8 @@ def run(test, params, env):
+                              dest_emulated_image)
+         if os.path.isfile(vol_file):
+             os.remove(vol_file)
++        process.run("systemctl start systemd-udevd", ignore_status=True)
++        process.run("systemctl start systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl start systemd-udevd-kernel.socket",
++                    ignore_status=True)
+diff --git a/libvirt/tests/src/virsh_cmd/volume/virsh_vol_download_upload.py b/libvirt/tests/src/virsh_cmd/volume/virsh_vol_download_upload.py
+index d7ffd39..5b21192 100644
+--- a/libvirt/tests/src/virsh_cmd/volume/virsh_vol_download_upload.py
++++ b/libvirt/tests/src/virsh_cmd/volume/virsh_vol_download_upload.py
+@@ -6,6 +6,8 @@ import hashlib
+ from autotest.client.shared import utils
+ from autotest.client.shared import error
+ 
++from avocado.utils import process
++
+ from virttest import virsh
+ from virttest.utils_test import libvirt as utlv
+ 
+@@ -96,6 +98,11 @@ def run(test, params, env):
+                                     " libvirt version.")
+ 
+     try:
++        process.run("systemctl stop systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd-kernel.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd", ignore_status=True)
+         pvt = utlv.PoolVolumeTest(test, params)
+         pvt.pre_pool(pool_name, pool_type, pool_target, "volumetest",
+                      pre_disk_vol=["50M"])
+@@ -232,3 +239,8 @@ def run(test, params, env):
+         pvt.cleanup_pool(pool_name, pool_type, pool_target, "volumetest")
+         if os.path.isfile(file_path):
+             os.remove(file_path)
++        process.run("systemctl start systemd-udevd", ignore_status=True)
++        process.run("systemctl start systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl start systemd-udevd-kernel.socket",
++                    ignore_status=True)
+diff --git a/libvirt/tests/src/virsh_cmd/volume/virsh_volume_application.py b/libvirt/tests/src/virsh_cmd/volume/virsh_volume_application.py
+index bb200af..ce87af5 100644
+--- a/libvirt/tests/src/virsh_cmd/volume/virsh_volume_application.py
++++ b/libvirt/tests/src/virsh_cmd/volume/virsh_volume_application.py
+@@ -60,6 +60,11 @@ def run(test, params, env):
+         vm_name = "vol_install_test"
+ 
+     try:
++        process.run("systemctl stop systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd-kernel.socket",
++                    ignore_status=True)
++        process.run("systemctl stop systemd-udevd", ignore_status=True)
+         pvtest = utlv.PoolVolumeTest(test, params)
+         pvtest.pre_pool(pool_name, pool_type, pool_target, emulated_img,
+                         image_size=emulated_size, pre_disk_vol=[volume_size],
+@@ -149,3 +154,8 @@ def run(test, params, env):
+             pvtest.cleanup_pool(pool_name, pool_type,
+                                 pool_target, emulated_img,
+                                 device_name=block_device)
++        process.run("systemctl start systemd-udevd", ignore_status=True)
++        process.run("systemctl start systemd-udevd-control.socket",
++                    ignore_status=True)
++        process.run("systemctl start systemd-udevd-kernel.socket",
++                    ignore_status=True)

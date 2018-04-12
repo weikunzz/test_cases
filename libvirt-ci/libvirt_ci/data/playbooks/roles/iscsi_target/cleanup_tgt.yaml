@@ -1,0 +1,12 @@
+---
+# Delete tgt iSCSI target
+
+- name: Remove all tgt config by restart service
+  service:
+    name: tgtd
+    state: restarted
+
+- name: Delete backing store file
+  file:
+    path: "{{ iscsi_params.file_name }}"
+    state: absent

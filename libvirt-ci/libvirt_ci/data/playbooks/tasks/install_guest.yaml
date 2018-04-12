@@ -1,0 +1,10 @@
+- name: Start Libvirtd
+  service: name=libvirtd state=restarted
+
+- name: Install a guest
+  shell: >
+    virt-install --connect qemu:///system -n {{guest_name}} --hvm --accelerate
+    -r 1024 --vcpus=2 --vnc --os-variant rhel7
+    --disk path={{img_dest}},bus=virtio,size=10,format=qcow2
+    --network=bridge=virbr0,model=virtio,mac=52:54:00:52:53:54 --import
+    --noreboot --noautoconsole --serial pty

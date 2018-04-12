@@ -1,0 +1,41 @@
+- name: Create image
+  command: qemu-img create {{ img_path }} -f qcow2 10G -o preallocation=off
+
+- name: Install VM with default machine type
+  command: virt-install -n image-builder -r 2048 --vcpus=2 --disk path={{ img_path }} --location={{ url }} --disk /tmp/ks.iso,device=cdrom -x "ks=cdrom:ks.cfg" --noreboot --wait -1
+
+- name: Undefine VM
+  command: virsh undefine image-builder
+  when:
+      - ansible_os_family == "RedHat"
+      - ansible_distribution_major_version == "6"
+
+- name: Undefine VM
+  command: virsh undefine image-builder --nvram
+  when:
+      - ansible_os_family == "RedHat"
+      - ansible_distribution_major_version|int >= 7
+
+- name: Cleanup image
+  command: virt-sysprep -a {{ img_path }}
+
+- name: Clean existing compressed image
+  file:
+      path: "{{ img_path_xz }}"
+      state: absent
+
+- name: Compress image
+  command: xz -z -k {{ img_path }}
+
+- name: Move image to shared directory
+  command: cp {{ img_path }} {{ tgt_path }}
+
+- name: Move compressed image to shared directory
+  command: cp {{ img_path }}.xz {{ tgt_path }}.xz
+
+- name: Link latest to new image
+  file:
+      src: "{{ img_name }}"
+      dest: "{{ tgt_dir }}/{{ product }}-{{ version }}-{{ arch }}-latest.qcow2"
+      state: link
+      force: yes

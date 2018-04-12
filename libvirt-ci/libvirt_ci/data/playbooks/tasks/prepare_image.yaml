@@ -1,0 +1,11 @@
+- name: Create a directory to store guest image
+  file:
+      path: "{{ img_dest | dirname }}"
+      state: "directory"
+
+- name: Download a guest image
+  get_url:
+      url: "{{ img_url }}"
+      dest: "{{ img_dest }}"
+      force: yes
+      timeout: 1200

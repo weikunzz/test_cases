@@ -1,0 +1,453 @@
+- parameter:
+    name: teardown-slave-toggle
+    parameters:
+        - bool:
+            name: TEARDOWN_SLAVE
+            default: true
+            description: 'Whether tear slave down after test, default to true'
+
+
+- parameter:
+    name: force-report
+    parameters:
+        - bool:
+            name: FORCE_REPORT
+            default: false
+            description: |
+                Whether forcefully report failing tests to Jira. Default to false.
+                Note that if the test is not manually triggered. Report will always
+                be sent to Jira.
+
+
+- parameter:
+    name: force-dashboard
+    parameters:
+        - bool:
+            name: FORCE_DASHBOARD
+            default: false
+            description: |
+                Whether forcefully upload test results to Libvirt-dashboard. Default to false.
+                Note that if the test is not manually triggered. Report will always
+                be uploaded to Dashboard.
+
+
+- parameter:
+    name: force-resultsdb
+    parameters:
+        - bool:
+            name: FORCE_RESULTSDB
+            default: false
+            description: |
+                Whether forcefully upload test results to ResultsDB. Default to false.
+                Note that if the test is not manually triggered. Report will always
+                be uploaded to ResultsDB.
+
+
+- parameter:
+    name: force-metrics
+    parameters:
+        - bool:
+            name: FORCE_METRICS
+            default: false
+            description: |
+                Whether forcefully publish a metricsdata message to CI bus. Default to false.
+                Note that if the test is not manually triggered, a metricsdata is always
+                publised.
+
+
+- parameter:
+    name: libvirt-ci-branch
+    parameters:
+        - string:
+            name: LIBVIRT_CI_BRANCH
+            default: master
+            description: Branch of libvirt-ci git repo to be used
+
+
+- parameter:
+    name: custom-builds
+    parameters:
+        - string:
+            name: CUSTOM_BUILDS
+            description: |
+                Customize brew builds. Ex:
+                'libvirt-1.2.17-3.el7 qemu-kvm-rhev-2.3.0-14.el7'
+
+
+- parameter:
+    name: ci-brewtask-id
+    parameters:
+        - string:
+            name: CI_BREWTASK_ID
+            description: |
+                Id of brew task of package to be installed.
+
+
+- parameter:
+    name: ci-message
+    parameters:
+        - string:
+            name: CI_MESSAGE
+            description: |
+                CI_MESSAGE json string, for specify message manually to build job
+
+
+- parameter:
+    name: provision-target
+    parameters:
+        - string:
+            name: PROVISION_TARGET
+            default: '{default}'
+            description: |
+                On which platform to run the project? 'bkr' for beaker and 'ci-osp' for CIOS
+
+
+- parameter:
+    name: provision-arch
+    parameters:
+        - string:
+            name: PROVISION_ARCH
+            default: '{default}'
+            description: |
+                What's the CPU arch required for the provisioned beaker machine? (x86_64 ppc64le or arm)
+
+
+- parameter:
+    name: provision-version
+    parameters:
+        - string:
+            name: PROVISION_VERSION
+            default: '{default}'
+            description: |
+                What's the product version required for the provisioned beaker machine? (6.7, 7.1, 7.2, 23)
+
+
+- parameter:
+    name: provision-product
+    parameters:
+        - string:
+            name: PROVISION_PRODUCT
+            default: '{default}'
+            description: |
+                What's the product required for the provisioned beaker machine? (RHEL, Fedora)
+
+
+- parameter:
+    name: provision-min-mem
+    parameters:
+        - string:
+            name: PROVISION_MIN_MEM
+            default: '{default}'
+            description: |
+                What's the minimum memory required for the provisioned beaker machine?
+
+
+- parameter:
+    name: provision-min-disk
+    parameters:
+        - string:
+            name: PROVISION_MIN_DISK
+            default: '{default}'
+            description: |
+                What's the minimum disk required for the provisioned beaker machine?
+
+
+- parameter:
+    name: provision-ndisk
+    parameters:
+        - string:
+            name: PROVISION_NDISK
+            default: '{default}'
+            description: |
+                What's the number of disks required for the provisioned beaker machine?
+
+
+- parameter:
+    name: provision-need-numa
+    parameters:
+        - bool:
+            name: PROVISION_NEED_NUMA
+            default: '{default}'
+            description: |
+                Do NUMA required for the provisioned beaker machine?
+
+
+- parameter:
+    name: provision-need-cpu-vendor
+    parameters:
+        - string:
+            name: PROVISION_NEED_CPU_VENDOR
+            default: '{default}'
+            description: |
+                Do specific cpu vendor (intel, amd, ibm, etc.) required for the provisioned beaker machine?
+
+
+- parameter:
+    name: provision-need-1g-hugepage
+    parameters:
+        - bool:
+            name: PROVISION_NEED_1G_HUGEPAGE
+            default: '{default}'
+            description: |
+                Do 1G hugepage support required for the provisioned beaker machine?
+
+
+- parameter:
+    name: provision-enable-iommu
+    parameters:
+        - bool:
+            name: PROVISION_ENABLE_IOMMU
+            default: '{default}'
+            description: |
+                Do iommu option needed in kernel cmdline for the provisioned beaker machine?
+
+
+- parameter:
+    name: provision-ignore-panic
+    parameters:
+        - bool:
+            name: PROVISION_IGNORE_PANIC
+            default: '{default}'
+            description: |
+                Ignore host kernel panic if set as true, default as false.
+
+
+- parameter:
+    name: provision-location
+    parameters:
+        - string:
+            name: PROVISION_LOCATION
+            default: '{default}'
+            description: |
+                What's the location required for the provisioned beaker machine?
+                (CN, US, ANY or a specific beaker machine name. Default to ANY)
+
+
+- parameter:
+    name: provision-count
+    parameters:
+        - string:
+            name: PROVISION_COUNT
+            default: '{default}'
+            description: |
+                How many VM's need to be provisioned on QEOS?
+
+
+- parameter:
+    name: provision-flavor
+    parameters:
+        - string:
+            name: PROVISION_FLAVOR
+            default: '{default}'
+            description: |
+                What's the flavor of VM needed to be provisioned on QEOS?
+
+
+- parameter:
+    name: provision-need-westmere
+    parameters:
+        - bool:
+            name: PROVISION_NEED_WESTMERE
+            default: '{default}'
+            description: |
+                Do Westmere required for the provisioned beaker machine?
+
+
+- parameter:
+    name: provision-need-hvm
+    parameters:
+        - bool:
+            name: PROVISION_NEED_HVM
+            default: '{default}'
+            description: |
+                Do HVM as 1 is required for the provisioned beaker machine?
+
+
+- parameter:
+    name: provision-hypervisor
+    parameters:
+        - string:
+            name: PROVISION_HYPERVISOR
+            default: '{default}'
+            description: |
+                Provision machine's hypervisor, empty string means a real machine
+
+
+- parameter:
+    name: provision-only-rhel-repos
+    parameters:
+        - bool:
+            name: PROVISION_ONLY_RHEL_REPOS
+            default: '{default}'
+            description: |
+                Whether need only set up RHEL repos
+
+
+- parameter:
+    name: provision-custom-playbook
+    parameters:
+        - string:
+            name: PROVISION_CUSTOM_PLAYBOOK
+            default: '{default}'
+            description: |
+                Run the specified playbook after provision
+
+
+- parameter:
+    name: provision-resource-host
+    parameters:
+        - bool:
+            name: PROVISION_RESOURCE_HOST
+            default: '{default}'
+            description: |
+                Do we need to provision another host as a resource? (for migration, remote access, etc.)
+
+
+- parameter:
+    name: provision-reserve-days
+    parameters:
+        - string:
+            name: PROVISION_RESERVE_DAYS
+            default: '{default}'
+            description: |
+                How many days should provisioned machine be reserved
+
+
+- parameter:
+    name: resource-img-url
+    parameters:
+        - string:
+            name: RESOURCE_IMG_URL
+            default: '{default}'
+            description: |
+                The URL of image need to be used to download to the resource host.
+
+
+- parameter:
+    name: resource-img-dest
+    parameters:
+        - string:
+            name: RESOURCE_IMG_DEST
+            default: '{default}'
+            description: |
+                The path of image need to be used to download to the resource host.
+
+
+- parameter:
+    name: resource-guest-name
+    parameters:
+        - string:
+            name: RESOURCE_GUEST_NAME
+            default: '{default}'
+            description: |
+                The name of VM need to be used to be installed to the resource host.
+
+
+- parameter:
+    name: jswarm-ver
+    parameters:
+        - string:
+            name: JSWARM_VER
+            default: '{default}'
+            description: |
+                What's the JSwarm plugin version on Jenkins server?
+
+
+- parameter:
+    name: keytab
+    parameters:
+        - string:
+            name: KEYTAB
+            default: '{default}'
+            description: |
+                Where does krb5 keytab file locate in provisioner?
+
+
+- parameter:
+    name: principal
+    parameters:
+        - string:
+            name: PRINCIPAL
+            default: '{default}'
+            description: |
+                What's the principal of krb5?
+
+
+- parameter:
+    name: node-label
+    parameters:
+        - label:
+            name: NODE_LABEL
+            default: '{default}'
+            description: |
+                Where to run this job?
+
+
+- parameter:
+    name: provision
+    parameters:
+        - teardown-slave-toggle
+        - force-report
+        - force-dashboard
+        - force-resultsdb
+        - force-metrics
+        - libvirt-ci-branch
+        - ci-message
+        - custom-builds
+        - ci-brewtask-id
+        - provision-target:
+            default: '{provision-target}'
+        - provision-arch:
+            default: '{provision-arch}'
+        - provision-version:
+            default: '{provision-version}'
+        - provision-product:
+            default: '{provision-product}'
+        - provision-min-mem:
+            default: '{provision-min-mem}'
+        - provision-min-disk:
+            default: '{provision-min-disk}'
+        - provision-ndisk:
+            default: '{provision-ndisk}'
+        - provision-need-numa:
+            default: '{provision-need-numa}'
+        - provision-need-cpu-vendor:
+            default: '{provision-need-cpu-vendor}'
+        - provision-need-1g-hugepage:
+            default: '{provision-need-1g-hugepage}'
+        - provision-enable-iommu:
+            default: '{provision-enable-iommu}'
+        - provision-ignore-panic:
+            default: '{provision-ignore-panic}'
+        - provision-location:
+            default: '{provision-location}'
+        - provision-count:
+            default: '1'
+        - provision-flavor:
+            default: 'm1.medium'
+        - provision-need-westmere:
+            default: '{provision-need-westmere}'
+        - provision-need-hvm:
+            default: '{provision-need-hvm}'
+        - provision-hypervisor:
+            default: '{provision-hypervisor}'
+        - provision-only-rhel-repos:
+            default: '{provision-only-rhel-repos}'
+        - provision-custom-playbook:
+            default: '{provision-custom-playbook}'
+        - provision-resource-host:
+            default: '{provision-resource-host}'
+        - provision-reserve-days:
+            default: '{provision-reserve-days}'
+        - resource-img-url:
+            default: '{resource-img-url}'
+        - resource-img-dest:
+            default: '{resource-img-dest}'
+        - resource-guest-name:
+            default: '{resource-guest-name}'
+        - jswarm-ver:
+            default: '3.3'
+        - keytab:
+            default: '/etc/jenkins-libvirt-ci.ci-hub.lab.eng.rdu2.redhat.com'
+        - principal:
+            default: 'jenkins/libvirt-ci.ci-hub.lab.eng.rdu2.redhat.com@REDHAT.COM'

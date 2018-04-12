@@ -1,0 +1,26 @@
+diff --git a/v2v/tests/src/convert_vm_to_libvirt.py b/v2v/tests/src/convert_vm_to_libvirt.py
+index 9a89a51..7d68314 100644
+--- a/v2v/tests/src/convert_vm_to_libvirt.py
++++ b/v2v/tests/src/convert_vm_to_libvirt.py
+@@ -68,7 +68,7 @@ def run(test, params, env):
+                    'debug': True}
+     remote_virsh = virsh.VirshPersistent(**virsh_dargs)
+     try:
+-        if not remote_virsh.domain_exists(vm_name):
++        if not remote_virsh.domain_exists(vm_name) and hypervisor != 'xen':
+             raise exceptions.TestError("VM '%s' not exist" % vm_name)
+     finally:
+         remote_virsh.close_session()
+diff --git a/v2v/tests/src/convert_vm_to_ovirt.py b/v2v/tests/src/convert_vm_to_ovirt.py
+index a055c47..4d7bb01 100644
+--- a/v2v/tests/src/convert_vm_to_ovirt.py
++++ b/v2v/tests/src/convert_vm_to_ovirt.py
+@@ -80,7 +80,7 @@ def run(test, params, env):
+         v2v_virsh = virsh.VirshPersistent(**virsh_dargs)
+         close_virsh = True
+     try:
+-        if not v2v_virsh.domain_exists(vm_name):
++        if not v2v_virsh.domain_exists(vm_name) and hypervisor != 'xen':
+             test.error("VM '%s' not exist" % vm_name)
+     finally:
+         if close_virsh:

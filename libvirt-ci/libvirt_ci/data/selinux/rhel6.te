@@ -1,0 +1,34 @@
+module libvirt_ci 1.0;
+
+require {
+type unconfined_java_t;
+type tmp_t;
+type svirt_t;
+type var_lib_t;
+type iscsid_t;
+type user_tmp_t;
+type var_run_t;
+type tgtd_t;
+class process transition;
+class lnk_file read;
+class sock_file unlink;
+class file { unlink read lock write getattr open append relabelfrom relabelto };
+class fifo_file { read write setattr };
+}
+
+
+#============= svirt_t ==============
+allow svirt_t var_lib_t:lnk_file read;
+allow svirt_t tmp_t:lnk_file read;
+
+#============= unconfined_java_t ==============
+allow unconfined_java_t svirt_t:process transition;
+
+#============= iscsid_t ==============
+allow iscsid_t user_tmp_t:fifo_file read;
+allow iscsid_t var_lib_t:file { write append };
+allow iscsid_t var_run_t:file { open write lock };
+
+#============= tgtd_t ==============
+allow tgtd_t var_run_t:sock_file unlink;
+allow tgtd_t var_lib_t:file { read write getattr open };

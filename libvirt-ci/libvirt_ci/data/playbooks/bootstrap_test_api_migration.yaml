@@ -1,0 +1,39 @@
+- name: Prepare kerberos configure
+  hosts: all
+  tasks:
+    - name: Prepare required rpm packages
+      yum:
+          name: '{{ item }}'
+          state: 'present'
+      with_items:
+          - 'krb5-libs'
+          - 'cyrus-sasl-gssapi'
+          - 'krb5-workstation'
+          - 'krb5-server'
+
+    - name: Delete old krb5.conf
+      file: path=/etc/krb5.conf state=absent
+
+    - name : Download krb5.conf
+      get_url:
+          url: http://download.libvirt.redhat.com/libvirt-CI-resources/test-api/krb5.conf
+          dest: /etc/krb5.conf
+          timeout: 60
+          force: yes
+
+    - name: restore file
+      shell: 'restorecon -R -v /etc/krb5.conf'
+
+    - name: obtain and cache a ticket
+      shell: 'echo "redhat" | kinit root/admin'
+
+    - name: Get principal list
+      shell: 'kadmin -w redhat listprincs'
+      register: listprinc
+
+    - name: Add a principal
+      shell: 'kadmin -w redhat addprinc -pw redhat libvirt/"{{ inventory_hostname }}"'
+      when: 'inventory_hostname not in listprinc.stdout'
+
+    - name: create a keytab
+      shell: 'kadmin -w redhat ktadd -k /etc/libvirt/krb5.tab libvirt/"{{ inventory_hostname }}"@REDHAT.COM'

@@ -1,0 +1,21 @@
+- builder:
+    name: set-build-name-desc
+    builders:
+        - shell: |
+            # Don't need to show these commands in log
+            # Don't need to fail if these commands failed.
+            set +xe
+
+            echo -e "BUILD_NAME=`ci generate-build-name --label-package '{label-package}' --host \"$CI_HOST\"`" > envfile
+
+            echo -e "BUILD_DESC=`ci generate-build-desc --packages '{show-packages}' --patch-url \"$CI_PATCH_URL\" --custom-repo \"$CI_CUSTOM_REPO\" --git-commit \"$CI_GIT_COMMIT\" --extra-desc '{extra-desc}' --host \"$CI_HOST\"`" >> envfile
+        - inject:
+            properties-file: envfile
+        - system-groovy:
+            command: |
+                def name = build.getEnvironment(listener).get('BUILD_NAME')
+                def desc = build.getEnvironment(listener).get('BUILD_DESC')
+                if ( name != '' ) {{
+                    build.setDisplayName(name)
+                }}
+                build.setDescription(desc)

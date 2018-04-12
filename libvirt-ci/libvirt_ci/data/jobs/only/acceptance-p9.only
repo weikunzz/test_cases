@@ -1,0 +1,5 @@
+guest_numa.possitive_test.hugepage.per_node.2M.no_topo.numatune_memnode.m_strict.no_numatune_mem
+guest_numa.possitive_test.hugepage.per_node.2M.topology.numatune_memnode.m_strict.no_numatune_mem
+guest_numa.possitive_test.hugepage.per_node.2M.topology.numatune_memnode.m_interleave.numatune_mem
+guest_numa.possitive_test.hugepage.per_node.2M.topology.numatune_memnode.m_preferred.numatune_mem
+guest_numa.possitive_test.hugepage.per_node.2M.topology.numatune_memnode.m_strict.numatune_mem

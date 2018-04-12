@@ -1,0 +1,47 @@
+---
+# create tgt iSCSI target
+
+- name: Enabel iptables port for incoming connection
+  iptables:
+    chain: INPUT
+    jump: ACCEPT
+    protocol: tcp
+    destination_port: "{{ iscsi_params.port }}"
+  become: yes
+
+- name: List the current iSCSI targets
+  command: "tgtadm --lld iscsi --mode target --op show"
+
+- name: Create a backing store file
+  command: "fallocate -l {{iscsi_params.file_size}} {{iscsi_params.file_name}}"
+
+- name: Add selinux policy for the backing store file
+  sefcontext:
+    target: "{{ iscsi_params.file_name }}"
+    setype: tgtd_var_lib_t
+    state: present
+    reload: True
+
+- name: Restorecon for newly-installed policy
+  command: "restorecon -v {{ iscsi_params.file_name }}"
+
+- name: Create an iSCSI target
+  command: "tgtadm --lld iscsi --mode target --tid 1 --op new --targetname {{ iscsi_params.target_name }}"
+  ignore_errors: True
+
+- name: Allow all initiators to connect to this target
+  command: "tgtadm --lld iscsi --mode target --tid 1 --op bind --initiator-address ALL"
+  ignore_errors: True
+
+- name: Create CHAP authentication
+  include: setup_tgt_chap.yaml
+  when:
+    - iscsi_params.chap_user is defined
+    - iscsi_params.chap_password is defined
+
+- name: Add a logcial unit(LUN)
+  command: "tgtadm --lld iscsi --mode logicalunit --tid 1 --op new --lun 1 --backing-store {{ iscsi_params.file_name }}"
+  ignore_errors: True
+
+- name: List the current iSCSI targets
+  command: "tgtadm --lld iscsi --mode target --op show"

@@ -1,0 +1,72 @@
+- name: Prepare NFS server
+  hosts: all
+  vars_files:
+    - vars/nfs_params.yaml
+
+  tasks:
+    - name: unsupported OS
+      fail: msg="OS {{ ansible_os_family }} is unsupported"
+      when: ansible_os_family != "RedHat"
+
+    - name: setting facts for Redhat 6
+      set_fact:
+          required_packages:
+            - nfs-utils
+            - portmap
+          required_services:
+            - nfs
+            - rpcbind
+          has_firewalld: False
+      when: (ansible_distribution_major_version == '6' and ansible_os_family == "RedHat")
+
+    - name: setting facts for Redhat 7
+      set_fact:
+          required_packages:
+            - nfs-utils
+            - portmap
+          required_services:
+            - nfs-server
+            - rpcbind
+          has_firewalld: True
+      when: (ansible_distribution_major_version == '7' and ansible_os_family == "RedHat")
+
+    - name: install required packages
+      package:
+        name="{{ item }}"
+        state=present
+      with_items:
+        - "{{ required_packages }}"
+      when: not nfs_params.cleanup
+
+    - name: "Setup nfs"
+      include: roles/nfs/setup_nfs.yaml
+      when: not nfs_params.cleanup
+
+
+- name: mount the nfs dir in client
+  hosts: all
+  vars_files:
+      - vars/nfs_params.yaml
+  vars:
+        dest_dir: nfs_params.dest_dir
+        nfs_src: nfs_params.nfs_src
+
+  tasks:
+      - include: roles/nfs/mount_nfs.yaml
+        when: not nfs_params.cleanup
+
+- name: umount the nfs dir in client
+  hosts: all
+  vars_files:
+      - vars/nfs_params.yaml
+  tasks:
+      - include: roles/nfs/umount_nfs.yaml
+        when: nfs_params.cleanup
+
+- name: cleanup nfs configuration
+  hosts: all
+  vars_files:
+      - vars/nfs_params.yaml
+  tasks:
+      - include: roles/nfs/cleanup_nfs.yaml
+        when: nfs_params.cleanup
