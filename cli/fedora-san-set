@@ -1,0 +1,124 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+
+import getopt
+import sys
+import os
+import re
+
+
+def error(error_number):
+    if 610 == error_number:
+        print "Error(610): Invalid input!"
+    elif 902 == error_number:
+        print "Error(902): Name of the target. Only lowercase letters, numbers and '.' ':' '-' is allowed!"
+    elif 903 == error_number:
+        print "Error(903): This target already exists!"
+    elif 904 == error_number:
+        print "Error(904): Target num limit: 1<=&&<=target_max_num!"
+    elif 905 == error_number:
+        print "Error(905): Target target_name is connecting!"
+    elif 906 == error_number:
+        print "Error(906): argument error!"
+    elif 907 == error_number:
+        print "Error(907): No target named target_name!"
+    elif 908 == error_number:
+        print "Error(908): No target operation!"
+    elif 910 == error_number:
+        print "Error(910): Target delete fail!"
+    elif 939 == error_number:
+        print "Error(939): Request node can't be accessed"
+    elif 940 == error_number:
+        print "Error(940): IP address doesn't follow role"
+    elif 941 == error_number:
+        print "Error(941): /etc/tgt/configure/info.conf doesn't exist"
+    elif 942 == error_number:
+        print "Error(942): IP has existed in configure file"
+
+
+def usage():
+    print '''Help(-h|--help) for icfs-admin-nfs:
+    Usage:
+    >> icfs-san-set----- --ip    +---------------------------------+-------------------><
+                                 + --user user name --pwd password +
+    Functions: set IP for IP SAN service node
+    Options:
+      --user:      required in need password SSH login
+      --password:  required in need password SSH login
+    Exit status:
+      0 if executed successfully
+      1 if executed unsuccessfully
+      '''
+
+
+def set_ip(input_ip_address, input_user=None, input_password=None):
+    if not os.path.exists("/etc/tgt/configure/info.conf"):
+        error(941)
+        sys.exit(1)
+    else:
+        fp = open("/etc/tgt/configure/info.conf", 'ab+')
+        for temp in fp.readlines():
+            if ip_address in temp and temp[0] is not "#":
+                fp.close()
+                error(942)
+                sys.exit(1)
+        if input_user is None and input_password is None and input_ip_address is not None:
+            fp.write("%s\n" % input_ip_address)
+        elif input_user is not None and input_password is not None and input_ip_address is not None:
+            fp.write("%s %s %s\n" % (input_ip_address, input_user, input_password))
+        else:
+            error(610)
+            sys.exit(1)
+
+        fp.close()
+   
+
+def check_ip(ip):
+    p = re.compile('^((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$')
+    if p.match(ip):
+        return True
+    else:
+        return False
+
+if __name__ == '__main__':
+    user = None
+    password = None
+    ip_address = None
+
+    try:
+        options, args = getopt.getopt(sys.argv[1:], "h", ["ip=", "help", "user=", "pwd="])
+    except getopt.GetoptError, err:
+        error(610)
+        sys.exit(1)
+    if len(sys.argv[0:]) == 1:
+        error(610)
+        sys.exit(1)
+    elif not options:
+        error(610)
+        sys.exit(1)
+    elif len(args) != 0:
+        error(610)
+        sys.exit(1)
+    # decode the  parameter
+    for o, a in options:
+        if o in ("-h", "--help"):
+            usage()
+            sys.exit(0)
+        elif "--ip" == o:
+            if check_ip(a):
+                ip_address = a
+            else:
+                error(940)
+                sys.exit(1)
+        elif "--user" == o:
+            user = a
+        elif "--pwd" == o:
+            password = a
+    if 3 == len(sys.argv) and ip_address is not None:
+        set_ip(ip_address)
+    elif 7 == len(sys.argv):
+        set_ip(ip_address, user, password)
+    else:
+        error(610)
+        sys.exit(1)

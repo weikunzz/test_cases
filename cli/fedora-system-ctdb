@@ -1,0 +1,1107 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+import getopt
+import sys
+import commands
+import re
+import os
+import json
+import threading
+from icfs_util import NewConfigParser
+from icfs_util import ip_format, run_remote_cmd
+import subprocess
+import time
+
+
+def mask_format(mask):
+    try:
+       mask_num = int(mask)
+    except ValueError, e:
+        Error(1502)
+    if mask_num < 0 or mask_num > 32:
+        Error(1501)
+
+
+def usage():
+    print """Help(-h|--help) for icfs-system-ctdb:
+Usage:
+>> icfs-system-ctdb ----+ --start +----><
+                       + --set  +
+                       ' --stop '
+Functions: Start/Set/Stop CTDB service 
+Options:
+  --set:     modify ctdb service
+  --start:    start ctdb service
+  --stop:   stop ctdb service
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-system-ctdb --start:
+Usage:
+>> icfs-system-ctdb ---- --start -----------><
+Functions: Start CTDB service
+Options: 
+ none
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+  
+icfs-system-ctdb --set:
+Usage:
+>> icfs-system-ctdb ---- --set -----------------+--- --network -- public_ip--------------+---------><
+                                                +--- --service --+--- CIFS_enable ---+----+
+                                                                 +--- CIFS_disable ---+
+                                                                 +--- NFS_enable ---+
+                                                                 `--- NFS_disable ---`
+                                               '---- --node -- local_ip ----------------------------'
+                                                      
+Functions: Set the ctdb options
+Options: 
+ --network:       set the visual ip
+ --service:       set the type of service
+ --node   :       set the nodes ip 
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+icfs-system-ctdb --stop:
+Usage:
+>> icfs-system-ctdb ---- --stop -----------><
+Functions: Stop CTDB service
+Options: 
+ none
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfull"""
+
+
+class Worker(threading.Thread):
+    def __init__(self, address):
+        super(Worker, self).__init__()
+        self._address = address
+
+    def get_address(self): return self._address
+
+    def run(self):
+        copy_config_status, copy_config_out = commands.getstatusoutput("scp -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  /etc/ctdb/ctdbd.conf root@%s:/etc/ctdb/ctdbd.conf" % self._address)
+        if copy_config_status:
+            Error(1399, copy_config_out)
+        time.sleep(0.1)  # In case that the restart process execute before the configure file copy complete
+        start_status, start_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  'root@%s' 'systemctl start ctdb'" % self._address)
+        if start_status:
+            Error(1399, start_output)
+        # disable_status, disable_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+        #                                   -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+        #                                   'root@%s' 'systemctl disable ctdb'" % self._address)
+        # if disable_status:
+        #     Error(1399, disable_output)
+
+
+class nfs_Worker(threading.Thread):
+    def __init__(self, address):
+        super(nfs_Worker, self).__init__()
+        self._address = address
+
+    def get_address(self): return self._address
+
+    def run(self):
+        check_status, check_out = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  'root@%s' 'systemctl status ganesha|grep Active'" % self._address)
+        if check_status:
+            Error(1399, check_out)
+        if "running" in check_out:
+            start_status, start_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                      -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                      'root@%s' 'systemctl stop ganesha'" % self._address)
+            if start_status:
+                Error(1399, start_output)
+        disable_status, disable_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                          -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                          'root@%s' 'chkconfig ganesha off'" % self._address)
+        if disable_status:
+            Error(1399, disable_output)
+
+
+def get_address():
+    # get the specified node ip
+    if not os.path.exists("/etc/ctdb/nodes"):
+        Error(1503)
+    ip_list = []
+    f = open("/etc/ctdb/nodes", "r")
+    readout = f.readlines()
+    for ip in readout:
+        ip = ip.strip()
+        if len(ip) == 0:
+            continue
+        ip_format(ip)
+        ip_list.append(ip)
+    return ip_list
+
+
+# get the mon node list
+def get_mon_host():
+    mon_status, mon_output = commands.getstatusoutput("icfs-admin-config --query --section global --option mon_initial_members")
+    if mon_status:
+        print mon_output
+        sys.exit(1)
+    return mon_output.split(",")
+
+
+def get_hostname(ip):
+    host_name = ""
+    pattern = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(.*?)(?:#.*)?$")
+    try:
+        with open("/etc/hosts", "r") as fp:
+            lines = fp.readlines()
+    except IOError:
+        return host_name
+
+    for line in lines:
+        m = pattern.match(line)
+        if m is None:
+            continue
+
+        hostname_list = m.group(2).split()
+        if ip == m.group(1) and len(hostname_list) != 0:
+            host_name = hostname_list[-1]
+            break
+
+    return host_name
+
+
+def get_virtual_address():
+    # only called in ctdb_start no need to check if the public_addresses file exist
+    ip_list = []
+    f = open("/etc/ctdb/public_addresses", "r")
+    readout = f.readlines()
+    for ip in readout:
+        ip = ip.split("/")[0]
+        ip = ip.strip()
+        if len(ip) == 0:
+            continue
+        ip_format(ip)
+        ip_list.append(ip)
+    return ip_list
+
+
+def check_network_card(name):
+    pattern = re.compile(r"^\w+:")
+    network_card = []
+    try:
+        output = subprocess.check_output("ifconfig", shell=True)
+    except subprocess.CalledProcessError:
+        Error(1507, name)
+
+    for line in output.split("\n"):
+        m = pattern.match(line)
+        if m is not None:
+            network_card.append(m.group(0).split(":")[0])
+    ethernet = [item for item in network_card if item == name]
+    if not ethernet:
+        Error(1506, name)
+
+
+def check_ip_amount(node_list, public_ip_list):
+    if len(node_list) > len(public_ip_list):
+        Error(1510)
+    elif 1 == len(public_ip_list):
+        Error(1511)
+
+
+def ctdb_start():
+    # check if all needed configure file are ready
+    needed_file = ["/etc/ctdb/nodes", "/etc/ctdb/ctdbd.conf", "/etc/ctdb/public_addresses"]
+    not_exist_file = [config_file for config_file in needed_file if not os.path.exists(config_file)]
+    if not_exist_file:
+        Error(1508, ",".join(not_exist_file))
+    ret_dict = run_remote_cmd("*", "systemctl stop ctdb")
+    fail_list = [node_name for node_name, node_ret in ret_dict.items() if node_ret["retcode"] not in (0, -1)]
+    if fail_list:
+        Error(1515, ",".join(fail_list))
+    list = []
+    f = open("/etc/ctdb/ctdbd.conf", "r")
+    lines = f.readlines()
+    f.close()
+    for line in lines:
+        pattern = re.compile(r"^\s*([^#]*?)\s*?=\s*([^#]*?)\s*$")
+        m = pattern.match(line)
+        if m is not None:
+            list.append([0, m.group(1), m.group(2)])
+            continue
+        pattern = re.compile(r"^\s*#\s*([^#]*?)\s*?=\s*([^#]*?)\s*$")
+        m = pattern.match(line)
+        if m is not None:
+            list.append([1, m.group(1), m.group(2)])
+            continue
+        list.append([2, "", line.strip()])
+    has_ctdb_recovery = False
+    for x in list:
+        if x[0] != 0 and x[0] != 1:
+            continue
+        if x[1] == "CTDB_RECOVERY_LOCK":
+            x[2] = "null_lock"
+            x[0] = 0
+            if list.count(x) > 1:  # delete the duplicate item
+                list.remove(x)
+            has_ctdb_recovery = True
+    if not has_ctdb_recovery:
+        list.append([0, "CTDB_RECOVERY_LOCK", "null_lock"])
+    lines = []
+    for x in list:
+        if x[0] == 0:
+            lines.append("%s=%s" % (x[1], x[2]))
+        elif x[0] == 1:
+            lines.append("# %s=%s" % (x[1], x[2]))
+        else:
+            lines.append(x[2])
+    content = "\n".join(lines)
+    f = open("/etc/ctdb/ctdbd.conf", "w")
+    f.write(content)
+    f.close()
+    mon_node_list = get_mon_host()
+    for mon_node in mon_node_list:
+        mon_node = mon_node.strip()
+        redis_status, redis_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  'root@%s' \"redis-server /etc/redis/redis.conf\"" % mon_node)
+        chk_status, chk_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                          -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                          'root@%s' \"chkconfig redis on\"" % mon_node)
+    ip_list = get_address()
+    worker_list = []
+    for ip in ip_list:
+        # # get corresponding host name to speed up the ssh
+        host = get_hostname(ip)
+        if host != "":
+            address = host
+        else:
+            address = ip
+        worker_list.append(Worker(address))
+
+    for worker in worker_list:
+        worker.start()
+
+    for worker in worker_list:
+        worker.join()
+    # write_ctdb_status, write_ctdb_out = commands.getstatusoutput("cat /etc/rc.d/rc.local|grep -w 'systemctl start ctdb'")
+    # if write_ctdb_out == '':
+    #     write_status, write_out = commands.getstatusoutput("echo systemctl start ctdb >>/etc/rc.d/rc.local")
+    #     if write_status:
+    #         print write_out
+    #         sys.exit(1)
+    #     ip_list = get_address()
+    #     for ip in ip_list:
+    #         # get corresponding host name to speed up the ssh
+    #         host = get_hostname(ip)
+    #         if host != "":
+    #             address = host
+    #         else:
+    #             address = ip
+    #         start_status, start_output = commands.getstatusoutput("scp -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+    #                                   -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+    #                                   /etc/rc.d/rc.local root@%s:/etc/rc.d/rc.local" % address)
+    #         if start_status:
+    #             print start_output
+    #             sys.exit(1)
+
+
+def ctdb_stop():
+    ip_list = get_address()
+    for ip in ip_list:
+        # get corresponding host name to speed up the ssh
+        host = get_hostname(ip)
+        if host != "":
+            address = host
+        else:
+            address = ip
+        ctdb_status, ctdb_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 \
+        -o PasswordAuthentication=no -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+        'root@%s' \"systemctl stop ctdb\"" % address)
+        if ctdb_status:
+            print ctdb_output
+            sys.exit(1)
+    print "CTDB stopped successfully"
+
+
+def ctdb_set_public_ip(public_ip):
+    ctdb_witness_file = NewConfigParser()
+    ctdb_witness_file.read("/etc/samba/smb.conf")
+    string_list = []
+    address_list = public_ip.split(",")
+    ctdb_ip_list = []
+    ctdb_mask_list = []
+    ctdb_netcard_list = []
+    port = None
+    for address in address_list:
+        sublist = address.split("/")
+        if len(sublist) != 3:
+            Error(610)
+        ip = sublist[0]
+        mask = sublist[1]
+        nic = sublist[2]
+        port = sublist[2]
+        ip_format(ip)
+        check_network_card(port)
+        mask_format(mask)
+        string_list.append("%s/%s %s" % (ip, mask, nic))
+        ctdb_ip_list.append(ip)
+        ctdb_mask_list.append(mask)
+        ctdb_netcard_list.append(port)
+    if len(set(ctdb_ip_list)) != len(ctdb_ip_list):
+        Error(1504)
+    if len(set(ctdb_mask_list)) != 1:
+        Error(1512)
+    if len(set(ctdb_netcard_list)) != 1:
+        Error(1513)
+    # we assume the node ip has been configured
+    node_list = get_address()
+    check_ip_amount(node_list, ctdb_ip_list)
+    visual_ip = open("/etc/ctdb/public_addresses", "w")
+    for n in string_list:
+        visual_ip.writelines(n)
+        visual_ip.write("\n") 
+    visual_ip.close()
+
+    ctdb_ip_list = " ".join(ctdb_ip_list)
+    ctdb_witness_file.set("global", "witness:ipv4 interfaces", ctdb_ip_list)
+    ctdb_witness_file.write(open("/etc/samba/smb.conf", "w"))
+    list = []
+    f = open("/etc/ctdb/ctdbd.conf", "r")
+    lines = f.readlines()
+    f.close()
+    for line in lines:
+        pattern = re.compile(r"^\s*([^#]*?)\s*?=\s*([^#]*?)\s*$")
+        m = pattern.match(line)
+        if m is not None:
+            list.append([0, m.group(1), m.group(2)])
+            continue
+        pattern = re.compile(r"^\s*#\s*([^#]*?)\s*?=\s*([^#]*?)\s*$")
+        m = pattern.match(line)
+        if m is not None:
+            list.append([1, m.group(1), m.group(2)])
+            continue
+        list.append([2, "", line.strip()])
+    has_public_addresses = False
+    has_public_interface = False
+    for x in list:
+        if x[0] != 0 and x[0] != 1:
+            continue
+        if x[1] == "CTDB_PUBLIC_ADDRESSES":
+            x[2] = "/etc/ctdb/public_addresses"
+            x[0] = 0
+            if list.count(x) > 1:  # delete the duplicate item
+                list.remove(x)
+            has_public_addresses = True
+            continue
+        if x[1] == "CTDB_PUBLIC_INTERFACE":
+            x[2] = port
+            x[0] = 0
+            if list.count(x) > 1:  # delete the duplicate item
+                list.remove(x)
+            has_public_interface = True
+    if not has_public_addresses:
+        list.append([0, "CTDB_PUBLIC_ADDRESSES", "/etc/ctdb/public_addresses"])
+    if not has_public_interface:
+        list.append([0, "CTDB_PUBLIC_INTERFACE", port])
+    lines = []
+    for x in list:
+        if x[0] == 0:
+            lines.append("%s=%s" % (x[1], x[2]))
+        elif x[0] == 1:
+            lines.append("# %s=%s" % (x[1], x[2]))
+        else:
+            lines.append(x[2])
+    content = "\n".join(lines)
+    f = open("/etc/ctdb/ctdbd.conf", "w")
+    f.write(content)
+    f.close()
+    ip_list = get_address()
+    for ip in ip_list:
+        # get corresponding host name to speed up the ssh
+        host = get_hostname(ip)
+        if host != "":
+            address = host
+        else:
+            address = ip
+        # push the public_addresses to nodes
+        child1 = subprocess.Popen("scp -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  /etc/ctdb/public_addresses root@%s:/etc/ctdb/public_addresses" % address,
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        # push the ctdbd.conf to nodes
+        child2 = subprocess.Popen("scp -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  /etc/ctdb/ctdbd.conf root@%s:/etc/ctdb/ctdbd.conf" % address,
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        # push the smb.conf to nodes
+        child4 = subprocess.Popen("scp -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  /etc/samba/smb.conf root@%s:/etc/samba/smb.conf" % address,
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        time.sleep(0.1)  # In case that the restart process execute before the configure file copy complete
+        # execute the ctdb restart on nodes if "ui" is not exists
+        if has_ui:
+            child3 = subprocess.Popen("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                      -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                       'root@%s' \"systemctl restart ctdb\"" % address,
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        while True:
+            child1.poll()
+            child2.poll()
+            if has_ui:
+                child3.poll()
+            child4.poll()
+            if has_ui:
+                if child1.returncode is not None and child2.returncode is not None and child3.returncode is not None \
+                        and child4.returncode is not None:
+                    break
+            else:
+                if child1.returncode is not None and child2.returncode is not None and child4.returncode is not None:
+                    break
+        if has_ui:
+            if 0 != child1.returncode or 0 != child2.returncode  or 0 != child4.returncode or 0 != child3.returncode:
+                if 0 != child3.returncode:
+                    print child3.stderr.read()
+                if 0 != child1.returncode:
+                    print child1.stderr.read()
+                if 0 != child2.returncode:
+                    print child2.stderr.read()
+                if 0 != child4.stderr.read():
+                    print child4.stderr.read()
+                sys.exit(1)
+        else:
+            if 0 != child1.returncode or 0 != child2.returncode or 0 != child4.returncode:
+                if 0 != child1.returncode:
+                    print child1.stderr.read()
+                if 0 != child2.returncode:
+                    print child1.stderr.read()
+                if 0 != child4.returncode:
+                    print child4.stderr.read()
+                sys.exit(1)
+
+
+def ctdb_set_service(service):
+    list = []
+    f = open("/etc/ctdb/ctdbd.conf", "r")
+    lines = f.readlines()
+    f.close()
+    for line in lines:
+        pattern = re.compile(r"^\s*([^#]*?)\s*?=\s*([^#]*?)\s*$")
+        m = pattern.match(line)
+        if m is not None:
+            list.append([0, m.group(1), m.group(2)])
+            continue
+        pattern = re.compile(r"^\s*#\s*([^#]*?)\s*?=\s*([^#]*?)\s*$")
+        m = pattern.match(line)
+        if m is not None:
+            list.append([1, m.group(1), m.group(2)])
+            continue
+        list.append([2, "", line.strip()])
+    has_ctdb_manages_nfs = False
+    has_ctdb_nfs_server_mode = False
+    has_ctdb_nfs_share_check = False
+    has_ctdb_nfs_nfsd_check = False
+    has_ctdb_nfs_alive_check = False
+    has_ctdb_cluster_filesystem_type = False
+    has_ctdb_manages_cifs = False
+    has_ctdb_manages_widbind = False
+    has_ctdb_skip_samba = False
+    if service == "NFS_enable":
+        # get node ip
+        ip_list = get_address()
+        nfs_worker_list = []
+        for ip in ip_list:
+            # get corresponding host name to speed up the ssh
+            host = get_hostname(ip)
+            if host != "":
+                address = host
+            else:
+                address = ip
+            nfs_worker_list.append(nfs_Worker(address))
+
+        for worker in nfs_worker_list:
+            worker.start()
+
+        for worker in nfs_worker_list:
+            worker.join()
+
+    elif service == "CIFS_enable":
+        # get node ip
+        ip_list = get_address()
+        for ip in ip_list:
+            # get corresponding host name to speed up the ssh
+            host = get_hostname(ip)
+            if host != "":
+                address = host
+            else:
+                address = ip
+            child1 = subprocess.Popen("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  'root@%s' \"systemctl stop smb\"" % address,
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+            child2 = subprocess.Popen("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  'root@%s' \"systemctl disable smb\"" % address,
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+            while True:
+                child1.poll()
+                child2.poll()
+                if child1.returncode is not None and child2.returncode is not None:
+                    break
+            if 0 != child1.returncode or 0 != child2.returncode:
+                if 0 != child1.returncode:
+                    print child1.stderr.read()
+                if 0 != child2.returncode:
+                    print child2.stderr.read()
+                sys.exit(1)
+    for x in list:
+        if x[0] != 0 and x[0] != 1:
+            continue
+        if service == "NFS_enable":
+            if x[1] == "CTDB_MANAGES_NFS":
+                x[2] = "yes"
+                x[0] = 0
+                if list.count(x) > 1:   # delete the duplicate item
+                    list.remove(x)
+                has_ctdb_manages_nfs = True
+                continue
+            if x[1] == "CTDB_NFS_SERVER_MODE":
+                x[2] = "ganesha"
+                x[0] = 0
+                if list.count(x) > 1:  # delete the duplicate item
+                    list.remove(x)
+                has_ctdb_nfs_server_mode = True
+                continue
+            if x[1] == "CTDB_NFS_SKIP_SHARE_CHECK":
+                x[2] = "yes"
+                x[0] = 0
+                if list.count(x) > 1:  # delete the duplicate item
+                    list.remove(x)
+                has_ctdb_nfs_share_check = True
+                continue
+            if x[1] == "CTDB_SKIP_GANESHA_NFSD_CHECK":
+                x[2] = "no"
+                x[0] = 0
+                if list.count(x) > 1:  # delete the duplicate item
+                    list.remove(x)
+                has_ctdb_nfs_nfsd_check = True
+                continue
+            if x[1] == "CTDB_NFS_SKIP_KNFSD_ALIVE_CHECK":
+                x[2] = "yes"
+                x[0] = 0
+                if list.count(x) > 1:  # delete the duplicate item
+                    list.remove(x)
+                has_ctdb_nfs_alive_check = True
+                continue
+            if x[1] == "CTDB_CLUSTER_FILESYSTEM_TYPE":
+                x[2] = "icfs"
+                x[0] = 0
+                if list.count(x) > 1:  # delete the duplicate item
+                    list.remove(x)
+                has_ctdb_cluster_filesystem_type = True
+        elif service == "NFS_disable":
+            
+            if x[1] == "CTDB_MANAGES_NFS":
+                x[2] = "no"
+                x[0] = 0
+                if list.count(x) > 1:  # delete the duplicate item
+                    list.remove(x)
+                has_ctdb_manages_nfs = True
+                continue
+            if x[1] == "CTDB_NFS_SERVER_MODE":
+                x[2] = "no"
+                x[0] = 0
+                if list.count(x) > 1:  # delete the duplicate item
+                    list.remove(x)
+                has_ctdb_nfs_server_mode = True
+                continue
+            if x[1] == "CTDB_NFS_SKIP_SHARE_CHECK":
+                x[2] = "yes"
+                x[0] = 0
+                if list.count(x) > 1:  # delete the duplicate item
+                    list.remove(x)
+                has_ctdb_nfs_share_check = True
+                continue
+            if x[1] == "CTDB_SKIP_GANESHA_NFSD_CHECK":
+                x[2] = "no"
+                x[0] = 0
+                if list.count(x) > 1:  # delete the duplicate item
+                    list.remove(x)
+                has_ctdb_nfs_nfsd_check = True
+                continue
+            if x[1] == "CTDB_NFS_SKIP_KNFSD_ALIVE_CHECK":
+                x[2] = "yes"
+                x[0] = 0
+                if list.count(x) > 1:  # delete the duplicate item
+                    list.remove(x)
+                has_ctdb_nfs_alive_check = True
+                continue
+            if x[1] == "CTDB_CLUSTER_FILESYSTEM_TYPE":
+                x[2] = "icfs"
+                x[0] = 0
+                if list.count(x) > 1:  # delete the duplicate item
+                    list.remove(x)
+                has_ctdb_cluster_filesystem_type = True
+        elif service == "CIFS_enable":
+            if x[1] == "CTDB_MANAGES_SAMBA":
+                x[2] = "yes"
+                if list.count(x) > 1:   # delete the duplicate item
+                    list.remove(x)
+                else:
+                    x[0] = 0
+                has_ctdb_manages_cifs = True
+                continue
+            if x[1] == "CTDB_MANAGES_WINBIND":
+                x[2] = "yes"
+                if list.count(x) > 1:   # delete the duplicate item
+                    list.remove(x)
+                else:
+                    x[0] = 0
+                has_ctdb_manages_widbind = True
+                continue
+            if x[1] == "CTDB_SAMBA_SKIP_SHARE_CHECK":
+                x[2] = "yes"
+                if list.count(x) > 1:   # delete the duplicate item
+                    list.remove(x)
+                else:
+                    x[0] = 0
+                has_ctdb_skip_samba = True
+                continue
+        elif service == "CIFS_disable":
+            if x[1] == "CTDB_MANAGES_SAMBA":
+                x[2] = "no"
+                x[0] = 0
+                if list.count(x) > 1:  # delete the duplicate item
+                    list.remove(x)
+                has_ctdb_manages_cifs = True
+            if x[1] == "CTDB_MANAGES_WINBIND":
+                x[2] = "no"
+                x[0] = 0
+                if list.count(x) > 1:  # delete the duplicate item
+                    list.remove(x)
+                has_ctdb_manages_widbind = True
+    if service == "NFS_enable":
+        if not has_ctdb_manages_nfs:
+            list.append([0, "CTDB_MANAGES_NFS", "yes"])
+        if not has_ctdb_nfs_server_mode:
+            list.append([0, "CTDB_NFS_SERVER_MODE", "ganesha"])
+        if not has_ctdb_nfs_share_check :
+            list.append([0, "CTDB_NFS_SKIP_SHARE_CHECK", "yes"])
+        if not has_ctdb_nfs_nfsd_check :
+            list.append([0, "CTDB_SKIP_GANESHA_NFSD_CHECK", "no"])
+        if not has_ctdb_nfs_alive_check :
+            list.append([0, "CTDB_NFS_SKIP_KNFSD_ALIVE_CHECK", "yes"])
+        if not has_ctdb_cluster_filesystem_type :
+            list.append([0, "CTDB_CLUSTER_FILESYSTEM_TYPE", "icfs"])
+    elif service == "NFS_disable":
+        if not has_ctdb_manages_nfs:
+            list.append([0, "CTDB_MANAGES_NFS", "no"])
+        if not has_ctdb_nfs_server_mode:
+            list.append([0, "CTDB_NFS_SERVER_MODE", "no"])
+        if not has_ctdb_nfs_share_check:
+            list.append([0, "CTDB_NFS_SKIP_SHARE_CHECK", "yes"])
+        if not has_ctdb_nfs_nfsd_check:
+            list.append([0, "CTDB_SKIP_GANESHA_NFSD_CHECK", "no"])
+        if not has_ctdb_nfs_alive_check:
+            list.append([0, "CTDB_NFS_SKIP_KNFSD_ALIVE_CHECK", "yes"])
+        if not has_ctdb_cluster_filesystem_type:
+            list.append([0, "CTDB_CLUSTER_FILESYSTEM_TYPE", "icfs"])     
+    elif service == "CIFS_enable":
+        if not has_ctdb_manages_cifs:
+            list.append([0, "CTDB_MANAGES_SAMBA", "yes"])
+        if not has_ctdb_manages_widbind:
+            list.append([0, "CTDB_MANAGES_WINBIND", "yes"])
+        if not has_ctdb_skip_samba:
+            list.append([0, "CTDB_SAMBA_SKIP_SHARE_CHECK", "yes"])
+            
+    elif service == "CIFS_disable":
+        if not has_ctdb_manages_cifs:
+            list.append([0, "CTDB_MANAGES_SAMBA", "no"])
+        if not has_ctdb_manages_widbind:
+            list.append([0, "CTDB_MANAGES_WINBIND", "no"])
+    lines = []
+    for x in list:
+        if x[0] == 0:
+            lines.append("%s=%s" % (x[1], x[2]))
+        elif x[0] == 1:
+            lines.append("# %s=%s" % (x[1], x[2]))
+        else:
+            lines.append(x[2])
+    content = "\n".join(lines)
+    f = open("/etc/ctdb/ctdbd.conf", "w")
+    f.write(content)
+    f.close()
+    # get node ip
+    ip_list = get_address()
+    if service == "rgw_enable":
+        for ip in ip_list:
+            host = get_hostname(ip)
+            if host != "":
+                address = host
+            else:
+                address = ip
+            child1 = subprocess.Popen("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  'root@%s' \"systemctl stop icfs-radosgw@radosgw.%s\"" % (address, "gateway"),
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+            child2 = subprocess.Popen("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  'root@%s' \"systemctl disable icfs-radosgw.target\"" % address,
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+            while True:
+                child1.poll()
+                child2.poll()
+                if child1.returncode is not None and child2.returncode is not None:
+                    break
+            if 0 != child1.returncode or 0 != child2.returncode:
+                if 0 != child1.returncode:
+                    print child1.stderr.read()
+                if 0 != child2.returncode:
+                    print child2.stderr.read()
+                sys.exit(1)
+        enable_rgw_status, enable_rgw_out = commands.getstatusoutput("icfs-linux-config  --set --file /etc/ctdb/ctdbd.conf --key "
+                                              "CTDB_MANAGES_RADOSGW --value yes")
+        if enable_rgw_status:
+            print enable_rgw_out
+            sys.exit(1)
+    elif service == "rgw_disable":
+        disable_rgw_status, disable_rgw_out = commands.getstatusoutput("icfs-linux-config  --set --file /etc/ctdb/ctdbd.conf --key "
+                                              "CTDB_MANAGES_RADOSGW --value no")
+        if disable_rgw_status:
+            print disable_rgw_out
+            sys.exit(1)
+    elif service not in ["NFS_enable", "NFS_disable", "CIFS_enable", "CIFS_disable", "rgw_enable", "rgw_disable"]:
+        Error(1516, service)
+    for ip in ip_list:
+        # get corresponding host name to speed up the ssh
+        host = get_hostname(ip)
+        if host != "":
+            address = host
+        else:
+            address = ip
+        child1 = subprocess.Popen("scp -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  /etc/ctdb/ctdbd.conf root@%s:/etc/ctdb/ctdbd.conf" % address,
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        if has_ui:
+            child2 = subprocess.Popen("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                      -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                      'root@%s' \"systemctl restart ctdb\"" % address,
+                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        while True:
+            child1.poll()
+            if has_ui:
+                child2.poll()
+            if has_ui:
+                if child1.returncode is not None and child2.returncode is not None:
+                    break
+            else:
+                if child1.returncode is not None:
+                    break
+        if has_ui:
+            if 0 != child1.returncode or 0 != child2.returncode:
+                if 0 != child1.returncode:
+                    print child1.stderr.read()
+                if 0 != child2.returncode:
+                    print child2.stderr.read()
+                sys.exit(1)
+        else:
+            if 0 != child1.returncode:
+                if 0 != child1.returncode:
+                    print child1.stderr.read()
+                sys.exit(1)
+
+
+def ctdb_set_local_ip(local_ip):
+    is_first_time_configure = False
+    local_ip = '%s' % (local_ip)
+    nodes_ip = local_ip.split(",")
+    for ip in nodes_ip:
+        ip_format(ip)
+    if len(set(nodes_ip)) != len(nodes_ip):
+        Error(1509)
+    # if this is not first time to configure ctdb, need to check ip amount
+    if os.path.exists("/etc/ctdb/public_addresses"):
+        nodes_file = open("/etc/ctdb/public_addresses", "r")
+        # virtual_address = get_virtual_address()
+        nodes_file_content = [line.strip() for line in nodes_file.readlines()]
+        if not nodes_file_content:
+            # check_ip_amount(nodes_ip, virtual_address)
+            is_first_time_configure = True  # we assume this is the first time to configure CTDB service
+    else:
+        Error(1514)
+    nodes_ip_file = open("/etc/ctdb/nodes", "w")
+    for i in nodes_ip:
+        nodes_ip_file.writelines(i)
+        nodes_ip_file.write("\n")    
+    nodes_ip_file.close()
+
+    list = []
+    f = open("/etc/ctdb/ctdbd.conf", "r")
+    lines = f.readlines()
+    f.close()
+
+    for line in lines:
+        pattern = re.compile(r"^\s*([^#]*?)\s*?=\s*([^#]*?)\s*$")
+        m = pattern.match(line)
+        if m is not None:
+            list.append([0, m.group(1), m.group(2)])
+            continue
+        pattern = re.compile(r"^\s*#\s*([^#]*?)\s*?=\s*([^#]*?)\s*$")
+        m = pattern.match(line)
+        if m is not None:
+            list.append([1, m.group(1), m.group(2)])
+            continue
+        list.append([2, "", line.strip()])
+    has_ctdb_manages_nodes = False
+    for x in list:
+        if x[0] != 0 and x[0] != 1:
+            continue
+        if x[1] == "CTDB_NODES":
+            x[2] = "/etc/ctdb/nodes"
+            x[0] = 0
+            if list.count(x) > 1:  # delete the duplicate item
+                list.remove(x)
+            has_ctdb_manages_nodes = True 
+    if not has_ctdb_manages_nodes:
+        list.append([0, "CTDB_NODES", "/etc/ctdb/nodes"])
+    lines = []
+    for x in list:
+        if x[0] == 0:
+            lines.append("%s=%s" % (x[1], x[2]))
+        elif x[0] == 1:
+            lines.append("#%s=%s" % (x[1], x[2]))
+        else:
+            lines.append(x[2])
+    content = "\n".join(lines)
+    f = open("/etc/ctdb/ctdbd.conf", "w")
+    f.write(content)
+    f.close()
+    ip_list = get_address()
+    for ip in ip_list:
+        host = get_hostname(ip)
+        if host != "":
+            address = host
+        else:
+            address = ip
+        child1 = subprocess.Popen("scp -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                   /etc/ctdb/nodes root@%s:/etc/ctdb/nodes" % address,
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        child2 = subprocess.Popen("scp -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  /etc/ctdb/ctdbd.conf root@%s:/etc/ctdb/ctdbd.conf" % address,
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        # first time to configure CTDB service, no need to restart CTDB
+        if not is_first_time_configure:
+            time.sleep(0.1)  # In case that the restart process execute before the configure file copy complete
+            if has_ui:
+                child3 = subprocess.Popen("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                          -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                          'root@%s' \"systemctl restart ctdb\"" % address,
+                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        while True:
+            child1.poll()
+            child2.poll()
+            if not is_first_time_configure:
+                if not has_ui:
+                    if child1.returncode is not None and child2.returncode is not None:
+                        break
+                else:
+                    child3.poll()
+                    if child1.returncode is not None and child2.returncode is not None and child3.returncode is not None:
+                        break
+            else:  # first time to configure the CTDB, no need to poll the execute result of restart command
+                if child1.returncode is not None and child2.returncode is not None:
+                    break
+        if is_first_time_configure:  # first time to configure the CTDB, no need to judge the execute result of restart\
+            # command
+            if 0 != child1.returncode or 0 != child2.returncode:
+                if 0 != child1.returncode:
+                    # For the following command using the same ip, only need judge once
+                    if "Connection timed out" in child1.stderr.read():
+                        Error(1505, ip)
+                    else:
+                        print child1.stderr.read()
+                if 0 != child2.returncode:
+                    print child2.stderr.read()
+                sys.exit(1)
+        else:
+            if not has_ui:
+                if 0 != child1.returncode or 0 != child2.returncode:
+                    if 0 != child1.returncode:
+                        # For the following command using the same ip, only need judge once
+                        if "Connection timed out" in child1.stderr.read():
+                            Error(1505, ip)
+                        else:
+                            print child1.stderr.read()
+                    if 0 != child2.returncode:
+                        print child2.stderr.read()
+                    sys.exit(1)
+            else:
+                if 0 != child1.returncode or 0 != child2.returncode or 0 != child3.returncode:
+                    if 0 != child1.returncode:
+                        # For the following command using the same ip, only need judge once
+                        if "Connection timed out" in child1.stderr.read():
+                            Error(1505, ip)
+                        else:
+                            print child1.stderr.read()
+                    if 0 != child2.returncode:
+                        print child2.stderr.read()
+                    if 0 != child3.returncode:
+                        print child3.stderr.read()
+                    sys.exit(1)
+
+
+def ctdb_query():  
+    node_content = ""
+    try:
+        with open('/etc/ctdb/nodes', 'r') as node_f:
+            node_content = node_f.read()
+            node_content = node_content.strip()
+            node_content_list = node_content.split("\n")
+            node_content_list = ",".join(node_content_list)
+            print "Nodes:"+node_content_list
+    except IOError, e:
+        print "Nodes:"+node_content
+    ip_content = ""
+    try:
+        with open('/etc/ctdb/public_addresses', 'r') as ip_f:
+            ip_content = ip_f.read() 
+            ip_content = ip_content.strip()
+            ip_content_list = ip_content.split("\n")
+            ip_content_list = ",".join(ip_content_list)
+            print "Public address:"+ip_content_list
+    except IOError, e:
+        print "Public address:"+ip_content
+    query_out = commands.getoutput("cat /etc/ctdb/ctdbd.conf|grep -E '^CTDB_MANAGES_NFS|^CTDB_MANAGES_SAMBA|^CTDB_MANAGES_RADOSGW'")
+    nfs = "disable"
+    if "CTDB_MANAGES_NFS=yes" in query_out.split("\n"):
+        nfs = "enable"
+    print "NFS:"+nfs
+    cifs = "disable"
+    if "CTDB_MANAGES_NFS=yes" in query_out.split("\n"):
+        cifs = "enable"
+    print "CIFS:"+cifs
+    rgw = "disable"
+    if "CTDB_MANAGES_RADOSGW=yes" in query_out.split("\n"):
+        rgw = "enable"
+    print "RGW:"+rgw
+
+
+def Error(num, resource=None):
+    if num == 610:
+        print "Error(610): Invalid input! ",
+    elif num == 1500:
+        print "Error(1500):ctdb is not running",
+    elif num == 1501:
+        print "Error(1501):the value of submask should between 0 and 32",
+    elif num == 1502:
+        print "Error(1502):the submask should be a number"
+    elif num == 1503:
+        print "Error(1503):the node file has not been configured"
+    elif num == 1504:
+        print "Error(1504):the public virtual ip was repeated"
+    elif num == 1505:
+        print "Error(1505):the configured node %s is unreachable" % resource
+    elif num == 1506:
+        print "Error(1506):the configured ethernet %s is unidentified on the node" % resource
+    elif num == 1507:
+        print "Error(1507):the network service is abnormal"
+    elif num == 1508:
+        print "Error(1508):the CTDB needed file is incomplete, %s is missing" % resource
+    elif num == 1509:
+        print "Error(1509):the configured node ip is repeated"
+    elif num == 1510:
+        print "Error(1510):the amount of virtual ip should bigger or at least equal to node ip"
+    elif num == 1511:
+        print "Error(1511):It's not recommend that configure only one node with one virtual ip"
+    elif num == 1512:
+        print "Error(1512):the submask of public virtual ip should be agreed with each other"
+    elif num == 1513:
+        print "Error(1513):the name of network card should be agreed with each other"
+    elif num == 1514:
+        print"Error(1514):the configure file does not exist or be destoryed"
+    elif num == 1515:
+        print "Error(1515):Failed to stop ctdb configuration for %s" % resource
+    elif num == 1516:
+        print "Error(1516):Invalid CTDB service arguments for '%s'" % resource
+    sys.exit(1)
+
+if __name__ == '__main__':
+    operation = None
+    public_ip = None
+    local_ip = None
+    service = None
+    has_ui = True
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], 'h', ['stop', 'start', 'ui', 'help', 'set', 'network=', 'service=',
+                                                       'node=', 'query', 'redis'])
+    except getopt.GetoptError, err:
+
+        Error(610)
+
+    if opts == [] or args != []:
+        Error(610)
+    if len(sys.argv) == 1:
+        Error(610)
+
+    for k, v in opts:
+        
+        if k in ('-h', '--help'):
+            if len(sys.argv) != 2:
+                Error(610)
+            else:
+                operation = "help"
+        elif '--network' == k:
+            public_ip = v       
+        elif '--service' == k:
+            service = v  
+        elif '--node' == k:
+            local_ip = v         
+        elif '--start' == k:
+            if len(sys.argv) != 2:
+                Error(610)
+            else:   
+                operation = "start"
+        elif '--stop' == k:
+            if len(sys.argv) != 2:
+                Error(610)
+            else:    
+                operation = "stop"  
+        elif '--set' == k:
+            operation = "set" 
+        elif '--query' == k:
+            operation = "query" 
+        elif '--ui' == k:
+            has_ui = False
+
+    if operation == "help":
+        usage()
+    elif operation == "start":
+        ctdb_start()
+    elif operation == "stop":
+        ctdb_stop()    
+    elif operation == "set":
+        if (len(sys.argv) == 4 and "--set" == sys.argv[1] and "--network" == sys.argv[2]) \
+                or (len(sys.argv) == 5 and "--set" == sys.argv[1] and "--network" == sys.argv[2] and "--ui" == sys.argv[4]):
+            ctdb_set_public_ip(public_ip)
+        elif (len(sys.argv) == 4 and "--set" == sys.argv[1] and "--service" == sys.argv[2]) \
+                or (len(sys.argv) == 5 and "--set" == sys.argv[1] and "--service" == sys.argv[2] and "--ui" == sys.argv[4]):
+            ctdb_set_service(service)
+        elif (len(sys.argv) == 4 and "--set" == sys.argv[1] and "--node" == sys.argv[2]) or \
+                (len(sys.argv) == 5 and "--set" == sys.argv[1] and "--node" == sys.argv[2] and "--ui" == sys.argv[4]):
+            ctdb_set_local_ip(local_ip)
+        else:
+            Error(610)
+    elif operation == "query":
+        if len(sys.argv) == 2 and "--query" == sys.argv[1]:
+            ctdb_query()
+    else:
+        Error(610)

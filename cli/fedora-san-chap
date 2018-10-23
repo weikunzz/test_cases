@@ -1,0 +1,331 @@
+#!/usr/bin/python
+# coding:utf-8
+'''
+Created on 2016-11-25
+@author: huper
+modify by huper an 2017-1-10 modify function target_bind() logic error
+'''
+import sys
+import commands
+import re
+import datetime
+import getopt
+
+SSHConnectTimeout = 2
+DEBUG = 0
+USERNAMEREG = "^(\d|[a-zA-Z])(\d|[a-zA-Z]|\.|-)*$"
+PASSWDREG = "[\w|~|=|@|:|?|,|\.]{12,16}$"
+IPV4_REG = "^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[0-9]{1,2})(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[0-9]{1,2})){3}$"
+    
+def run_command(comm, node=None):
+    result = None
+    commstart = '\033[1;32;40m'
+    valuestart = '\033[1;33;40m'
+    end = '\033[0m'
+    begintime = 0
+    endtime = 0
+    if node:
+        if DEBUG:
+            print commstart, "[DEBUG info] remote commands: ", ("ssh -o ConnectTimeout=%s -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' \"%s\"" % (SSHConnectTimeout, node, comm)), end
+            begintime = datetime.datetime.now()
+        result = commands.getstatusoutput("ssh -o ConnectTimeout=%s -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' \"%s\"" % (SSHConnectTimeout, node, comm))
+    else:
+        if DEBUG:
+            print commstart, "[DEBUG info] local commands: ", comm, end
+            begintime = datetime.datetime.now()
+        result = commands.getstatusoutput(comm)
+    if DEBUG:
+        endtime = datetime.datetime.now()
+        print valuestart, "run time: " + str((endtime - begintime).seconds) + "s", "\n", "[DEBUG info]", result, end
+    return result
+
+def get_host_name():
+    return run_command(comm="hostname")[1]
+
+def check_is_myself(node):
+    if node == None:
+        return True
+    host_name = get_host_name()
+    if host_name == node:
+        return True
+    else:
+        return False
+
+# def get_self_ip_list(node):
+#     ip_lists = run_command(comm="network-local-query  | grep IP  | sed s/IP://g", node)[1]
+#     return ip_lists.splitlines()
+
+def Error(code, info=None):
+    start = '\033[1;31;40m'
+    end = "\033[0m"
+    if not info:
+        info = ""
+    if code == 610:
+        mess = "Error(610): Invalid input! "
+    elif code == 950:
+        mess = "Error(950): "
+    elif code == -1:
+        mess = ""
+    else:
+        mess = "Unknow error "
+    print mess, info
+
+def get_error_code_info(info):
+# get error code from return info
+    code = 0
+    infos = info.splitlines()
+    for tmp in infos:
+        codeinfo = re.search("Error\(\d*\)", tmp)
+        if codeinfo:
+            code = int(codeinfo.group().replace("Error", "").replace("(", "").replace(")", ""))
+            info = tmp
+            break
+    return code, info   
+
+def user_add(user, passwd, node, all=None):
+# add user  
+# all: --push
+    # --push
+    if all:
+        error, info = run_command(comm="icfs-san-deploy chap new --user %s --password %s --push" % (user, passwd), node=node)
+    # no push
+    else:
+        error, info = run_command(comm="icfs-san-deploy chap new --user %s --password %s" % (user, passwd), node=node)
+    # decode return info , find error code if exist
+    if not error:
+        error, errinfo = get_error_code_info(info)
+    else:
+        errinfo = info
+    if error:
+        if all:
+            print info
+        else:
+            Error(-1, errinfo)
+        return 1
+    else:
+        print info
+        return 0
+
+def user_delete (user, node, all=None):
+# delete user
+# all: --push    
+    if all:
+        error, info = run_command(comm="icfs-san-deploy chap delete --user %s --push" % (user),node=node)
+    else:
+        error, info = run_command(comm="icfs-san-deploy chap delete --user %s" % (user), node=node)
+    if not error:
+        error, errinfo = get_error_code_info(info)
+    else:
+        errinfo = info
+    if error:
+        if all:
+            print info
+        else:
+            Error(-1, errinfo)
+        return 1
+    else:
+        print info
+        return 0
+
+def user_query(node, list=None):
+    # if have list , do query all
+    if list:
+        error, info = run_command(comm="icfs-san-deploy chap show --push", node=node)
+    else:
+        error, info = run_command(comm="icfs-san-deploy chap show ", node=node)
+    if not error:
+        error, info = get_error_code_info(info)
+    if error:
+        Error(-1, info)
+        return 1
+    else:
+        print info
+        return 0
+
+def target_bind(target, user, node, all):
+    if all:
+        error, info = run_command(comm="icfs-san-deploy chap bind --targetname %s --user %s --push" % (target, user), node=node)
+    else :
+        error, info = run_command(comm="icfs-san-deploy chap bind --targetname %s --user %s" % (target, user), node=node)
+    if not error:
+        error, errinfo = get_error_code_info(info)
+    else:
+        errinfo = info
+    if error:
+        if all:
+            print info
+        else:
+            Error(-1, errinfo)
+        return 1
+    else:
+        print info
+        return 0
+def unbind(target, user, node, all):
+    if all:
+        error, info = run_command("icfs-san-deploy chap unbind --targetname %s --user %s --push" % (target, user), node)
+    else:
+        error, info = run_command("icfs-san-deploy chap unbind --targetname %s --user %s " % (target, user), node)
+    if not error:
+        error, errinfo = get_error_code_info(info)
+    else:
+        errinfo = info
+    if error:
+        if all:
+            print info
+        else:
+            Error(-1, errinfo)
+        return 1
+    else:
+        print info 
+        return 0
+
+def mutex_judg(mutex, action):
+    if mutex is None:
+        return action
+    else:
+        Error(610, "--" + action + " cannot use with --" + mutex)
+        sys.exit(1)
+
+def check_format(str, type):
+# check passwd format 
+    if type == "user": 
+        if re.match(USERNAMEREG, str):
+            return str
+        else:
+            Error(610, "user name format error " + str)
+            sys.exit(1)
+    if type == "pass" :
+        if re.match(PASSWDREG, str):
+            return str
+        else:
+            Error(610, "password format error " + str)
+            sys.exit(1)
+    
+def usage():
+    print """usage:
+create new user:
+>>- icfs-san-chap-- --new--- --user username-- --password password--+-- --node node--+----><
+                                                                    '-- --all--------'
+delete user:
+>>- icfs-san-chap-- --delete-- --user username-----+-- --node node--+----><
+                                                   '-- --all--------'
+query user:
+>>- --icfs-san-chap-- --query----+-- --node node--+---><
+                                 '-- --list-------'
+bind:
+>>- icfs-san-chap --bind-- --target targetname-- --user username--+-- --node node--+---><
+                                                                  '-- --all--------'
+unbind:
+>>- icfs-san-chap --unbind-- --target targetname-- --user username--+-- --node node--+--><
+                                                                    '-- --all--------'
+options:
+    --new            create new chap user
+    --delete        delete chap user
+    --query            query chap user
+    --bind            bind target and chap user
+    --unbind        unbind target and chap user
+    --user            user name 
+    --password        password
+    --node            node name
+    --targetname    target name    
+    --all            all nodes
+    --list            query all user in cluster"""
+
+def need_option(opt):
+    Error(610, opt + " is needed")
+
+if __name__ == "__main__":
+    operation = None  # new delete query bind unbind
+    target = None  # target name
+    user = None  # user name
+    password = None  # passwd 
+    node = None  # node name
+    all = None  # all node
+    list = None  #
+    operation_mutex = None
+    try:
+        options, agrs = getopt.getopt(sys.argv[1:], "h", ["help", "new", "delete", "query", "bind", "unbind", "all", \
+                                                          "list","target=", "user=", "password=", "node=","querycon"])
+        if options == []:
+            Error(610)
+            sys.exit(1)
+        for key, value in options:
+            if key in ("-h", "--help"):
+                usage()
+                sys.exit(0)
+            # operation
+            if key == "--new":
+                operation = mutex_judg(operation_mutex, "new")
+                operation_mutex = "new"
+            if key == "--delete":
+                operation = mutex_judg(operation_mutex, "delete")
+                operation_mutex = "delete"
+            if key == "--query":
+                operation = mutex_judg(operation_mutex, "query")
+                operation_mutex = "query"
+            if key == "--bind":
+                operation = mutex_judg(operation_mutex, "bind")
+                operation_mutex = "bind"
+            if key == "--unbind":
+                operation = mutex_judg(operation_mutex, "unbind")
+                operation_mutex = "unbind"
+            #
+            if key == "--node":
+                if not check_is_myself(value):
+                    node = value
+            if key == "--target":
+                target = value 
+            if key == "--user":
+                user = check_format(value, "user")
+            if key == "--password":
+                password = check_format(value, "pass")
+            if key == "--all":
+                all = "all"
+            if key == "--list":
+                list = "list"
+    except Exception, e:
+        Error(610, e)
+        sys.exit(1)
+    if node:
+        # ssh
+        if target and target.startswith("-"):
+            target = "\\\"'%s'\\\"" % target 
+    else:
+        # local
+        if target and target.startswith("-"):
+            target = "\"'%s'\"" % target
+    # TODO 
+    if operation == "new":
+        if not user :
+            need_option("--user")
+            sys.exit(1)
+        if not password:
+            need_option("--password")
+            sys.exit(1)
+        sys.exit(user_add(user, password, node, all))
+    elif operation == "delete":
+        if not user :
+            need_option("--user")
+            sys.exit(1)
+        sys.exit(user_delete(user, node, all))
+    elif operation == "query":
+        sys.exit(user_query(node, list))
+    elif operation == "bind":
+        if not target:
+            need_option("--target")
+            sys.exit(1)
+        if not user:
+            need_option("--user")
+            sys.exit(1)
+        sys.exit(target_bind(target, user, node, all))
+    elif operation == "unbind":
+        if not target :
+            need_option("--target")
+            sys.exit(1)
+        if not user:
+            need_option("--user")
+            sys.exit(1)
+        sys.exit(unbind(target, user, node, all))
+    else:
+        need_option("--new or --delete or --query or --bind or --unbind")
+        sys.exit(1)

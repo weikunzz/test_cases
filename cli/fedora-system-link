@@ -1,0 +1,70 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+
+import sys
+import getopt
+import commands
+import re
+from icfs_util import error
+from icfs_util import salt_run
+
+
+def network_query():
+    salt_run()
+    # filter salt stderror so that output can be parsed correctly
+    net_info = commands.getstatusoutput("salt '*' cmd.run 'network-local-query' 2>/dev/null|grep :$")
+    if 'No minions matched' in net_info[1]:
+        error('3002')
+    elif net_info[0] != 0:
+        error('3003')
+    else:
+        net_line = net_info[1].splitlines()
+        for net in net_line: 
+            node_name = net.replace(':', '')
+            net_status = commands.getstatusoutput("salt %s cmd.run 'network-local-query' 2>$0 |grep -v %s" % (node_name, node_name))
+            print "Node:"+node_name
+            net_list = net_status[1].splitlines()
+            for net_sta in net_list:
+                print net_sta.strip()
+                if 'Type' in net_sta:
+                    print ''
+
+
+def help():
+
+    print '''Help(-h|--help)for icfs-system-network:
+Usage:
+>> icfs-system-link ----------- --query --------------------------------><
+Functions: Query netcards info
+Options:
+  --query:  query netcards info
+
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0)
+    
+if __name__ == '__main__':
+    ret = None
+    try:
+        opts, argv = getopt.getopt(sys.argv[1:], 'h', ['query', 'help'])
+    except getopt.GetoptError, err:
+        error('002')
+    if '-h' in sys.argv or '--help' in sys.argv:
+        if len(opts) != 1 or argv != []:
+            error('002')
+        else:
+            help()
+    if argv != []:
+        error('002')
+    for k, v in opts:
+        if '--query' == k:
+            if len(sys.argv) != 2 or '--query' != sys.argv[1]:
+                error('002')
+            else:
+                ret = "query"
+        else:
+            error('002')
+    if ret == "query":
+        network_query()

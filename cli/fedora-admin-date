@@ -1,0 +1,238 @@
+#!/usr/bin/python
+# -*- copyright -*-
+#coding:utf-8
+
+import os
+import sys
+import getopt
+import re
+import commands
+import string
+import platform
+
+#code:/usr/local/ism/Agent/src/Cli/ClusterCli/
+#export PATH=$PATH:/usr/local/ism/Agent/src/Cli/ClusterCli/  
+
+def usage():
+    print """Help(-h) for icfs-admin-date:
+Usage:
+>> icfs-admin-date ----+ --query +----><
+                       ' --ntp ntp_ip  '
+Functions: Query system time, timezone, set the ntp client.
+Options:
+  --query: query system time, timezone, service ntp.
+  --ntp:   set the ntp client.
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully """
+class osInfo():
+    def __init__(self,os_name,os_version,os_edtion):
+        self.os_name=os_name
+        self.os_version=os_version
+        self.os_edtion = os_edtion
+
+def get_os_type():
+    os_info = platform.linux_distribution()
+    return osInfo(os_info[0], os_info[1], os_info[2])
+
+  
+def Error(num):
+    if num == 610:
+        print "Error(610): Invalid input!"
+    if num == 716:
+        print "Error(716): Invalid ip address"
+    if num == 299:
+        print "Error(299): Invalid salt service" 
+    if num == 719:
+        print "Error(719): ntp server can't be connected"
+    sys.exit(1)
+def proc_space(space_str):
+#processing space in str 
+    proc_space_list = []
+    proc_str_l = space_str.split('\n')
+    for proc_lstrip_slot_str in proc_str_l:
+        proc_lstrip_slot_str = proc_lstrip_slot_str.lstrip()
+        proc_space_list.append(proc_lstrip_slot_str)    
+    proc_str = '\n'.join(proc_space_list)
+    return proc_str 
+
+def ntp_set():
+    global ntp_ip
+    os_type = get_os_type()
+    if os_type.os_version.startswith("7."):
+        salt_test = commands.getoutput("systemctl status salt-master")
+    elif os_type.os_version.startswith("6."):
+        salt_test = commands.getoutput("service salt-master status")
+    if "unrecognized service" in salt_test:
+        Error(299)
+#check ip ,ntp_ip connectivity     
+    if not re.match\
+    (r"^([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-4])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])$",ntp_ip):
+        Error(716)
+    ntp_test_ping = commands.getoutput("ping -c 1 %s;echo $?"%ntp_ip)
+    ntp_test_ping = ntp_test_ping.split("\n")[-1].strip()
+    if ntp_test_ping == "0":
+        pass
+    else:
+        Error(719)
+    hostname_ = commands.getoutput("cat /etc/hosts")
+    hostname_list = hostname_.split("\n")
+    ntp_host = None
+    for x in hostname_list:
+        if x.find("%s"%ntp_ip) >= 0:
+            x = x.split()
+            if len(x) >= 2:
+                ntp_host = x[1]
+    ntp_conf_modify(ntp_ip)
+    # filter salt stderror so that output can be parsed correctly
+    hostname_list = commands.getoutput("salt '*' cmd.run 'echo $HOSTNAME' 2>/dev/null|grep -v :")
+    hostname_list = proc_space(hostname_list)
+    hostname_list = hostname_list.split("\n")
+    step_tickers_bak = open("/etc/ntp/step_tickers_bak","w")
+    step_tickers_bak.write(ntp_ip)
+    step_tickers_bak.close()       
+    for hostname_x in hostname_list:
+        if not ntp_host == hostname_x:
+            ntp_conf_copy = commands.getoutput\
+            ("salt-cp '%s' /etc/ntp.conf.clientbak /etc/ntp.conf"%hostname_x)
+            step_tickers_copy = commands.getoutput\
+            ("salt-cp '%s' /etc/ntp/step_tickers_bak /etc/ntp/step-tickers"%hostname_x)
+            if os_type.os_version.startswith("7."):
+                # filter salt stderror so that output can be parsed correctly
+                ntpd_service_restart = commands.getoutput\
+                    ("salt '*' cmd.run 'systemctl restart ntpd' 2>/dev/null")
+            elif os_type.os_version.startswith("6."):
+                # filter salt stderror so that output can be parsed correctly
+                ntpd_service_restart = commands.getoutput\
+                    ("salt '*' cmd.run 'service ntpd restart' 2>/dev/null")
+
+def ntp_conf_modify(ip_modify):
+    if os.path.exists('/etc/ntp.conf.clientbak'):
+        clientbak_del = commands.getoutput("rm -rf /etc/ntp.conf.clientbak")
+        ntpd_conf_bak = commands.getoutput("cp /etc/ntp.conf /etc/ntp.conf.clientbak")
+    else:
+        ntpd_conf_bak = commands.getoutput("cp /etc/ntp.conf /etc/ntp.conf.clientbak")
+    f_ntp_ = open("/etc/ntp.conf.clientbak","r+")
+    f_ntp = f_ntp_.read()
+    f_ntp_.close()
+    f_ntp = f_ntp.split("\n")
+    f_ntp_list = []
+    for x in f_ntp:
+        if re.match("^server",x):
+            x = "server  %s     # local clock"%ip_modify
+            f_ntp_list.append(x)
+        else:
+            f_ntp_list.append(x)
+    f_ntp_list = "\n".join(f_ntp_list)
+    f_ntp_ = open("/etc/ntp.conf.clientbak","w")
+    f_ntp_.write(f_ntp_list)
+    f_ntp_.close()
+
+# def convertmonth(date_str):
+#     if date_str.find("Jan") >= 0:
+#         date_str=date_str.replace("Jan", "01")
+#     if date_str.find("Feb") >= 0:
+#         date_str=date_str.replace("Feb", "02")
+#     if date_str.find("Mar") >= 0:
+#         date_str=date_str.replace("Mar", "03")
+#     if date_str.find("Apr") >= 0:
+#         date_str=date_str.replace("Apr", "04")
+#     if date_str.find("May") >= 0:
+#         date_str=date_str.replace("May", "05")
+#     if date_str.find("Jun") >= 0:
+#         date_str=date_str.replace("Jun", "06")
+#     if date_str.find("Jul") >= 0:
+#         date_str=date_str.replace("Jul", "07")
+#     if date_str.find("Aug") >= 0:
+#         date_str=date_str.replace("Aug", "08")
+#     if date_str.find("Sep") >= 0:
+#         date_str=date_str.replace("Sep", "09")
+#     if date_str.find("Oct") >= 0:
+#         date_str=date_str.replace("Oct","10")
+#     if date_str.find("Nov") >= 0:
+#         date_str=date_str.replace("Nov", "11")
+#     if date_str.find("Dec") >= 0:
+#         date_str=date_str.replace("Dec", "12")
+#     date_str=date_str.replace(" ", "-")
+#     return date_str
+
+def sys_query():
+    os_type = get_os_type()
+    date = commands.getoutput("date +%Y-%m-%d\ %H:%M:%S")
+    # date = convertmonth(date)
+    # time = commands.getoutput("date|awk {'print $4'}")
+    if os_type.os_version.startswith("7."):
+        ntpd_s = commands.getoutput("systemctl status ntpd|grep Active")
+    elif os_type.os_version.startswith("6."):
+        ntpd_s=commands.getoutput("service ntpd status")
+    ntpd_server = commands.getoutput\
+    ("cat /etc/ntp/step-tickers |grep -v 'List'|grep -E '([0-9]{1,3}[\.]){3}[0-9]{1,3}'")
+    if ntpd_server == '127.127.1.0':
+        ntpd_hostname = commands.getoutput("echo $HOSTNAME")
+        hostname_ = commands.getoutput("cat /etc/hosts")
+        hostname_list = hostname_.split("\n")
+        for x in hostname_list:
+            if x.find("%s"%ntpd_hostname) >= 0:
+                x = x.split(" ")
+                ntpd_server = x[0]        
+    if ntpd_s.find("running") >= 0:
+        ntpd_status = 'YES'
+        print "%-24s"%"Time"+"%-24s"%"Timezone"+"%-24s"%"Ntp"
+        # timezone=commands.getoutput("cat /etc/sysconfig/clock|sed 's/ZONE=//g'|sed 's/\"//g'")
+        timezone = commands.getoutput("timedatectl|grep 'Time zone'|awk -F ':' '{print $2}'|awk -F ' ' '{print $1}'")
+        print "%-24s"%date+'%-24s'%timezone+ntpd_status+" %-24s"%ntpd_server
+    else:
+        ntpd_status = 'NO'
+        print "%-24s"%"Time"+"%-24s"%"Timezone"+"%-24s"%"Ntp"
+        # timezone=commands.getoutput("cat /etc/sysconfig/clock|sed 's/ZONE=//g'|sed 's/\"//g'")
+        timezone = commands.getoutput("timedatectl list-timezones|grep Asia/Sh")
+        print "%-24s"%date+'%-24s'%timezone+ntpd_status+" %-24s"%ntpd_server
+
+
+if __name__ == '__main__':
+##############################################################
+    operation = None
+    time_s = None
+    time_zone = None
+    ntp_ip = None
+   
+    try:
+        options, args = getopt.getopt(sys.argv[1:],
+          "h",["query","help","ntp="]
+          )
+    except getopt.GetoptError, err:
+        Error(610)
+    if options == []:
+        Error(610)
+    if len(sys.argv[0:]) == 1:
+        Error(610)
+    if len(args) != 0:
+        if "-" in args:
+            Error(610)
+    for o, a in options:
+        if o in ("-h"):
+            usage()
+            sys.exit(0)
+        elif o in ("--help"):
+            if not "--help" in sys.argv[0:]:
+                Error(610)
+            else:
+                usage()
+                sys.exit(0)
+        elif o == "--query" :
+            if len(sys.argv) == 2 and "--query" == sys.argv[1]:
+                operation = "query"
+            else:
+                Error(610)               
+        elif o == "--ntp":
+            if "--ntp" == sys.argv[1] and len(sys.argv)==3:
+                ntp_ip = a
+                operation = "sysset"
+            else:
+                Error(610)
+    if operation == "query":
+        sys_query()
+    elif operation == "sysset":
+        ntp_set()
+    else:
+        Error(610)

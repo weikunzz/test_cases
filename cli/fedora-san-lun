@@ -1,0 +1,516 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+
+# change log
+# 20170104 shaoning (lun_query_by_target, lun_query_by_target_lunid) Bug fix(5432): print information format not same
+
+import getopt
+import sys
+import commands
+import re
+
+from icfs_util import error
+
+
+def usage():
+    print '''Help(-h|--help)for icfs-san-lun:
+Usage:
+>> icfs-san-lun --+-- --new    --+----><
+                  +-- --delete --+
+                  '-- --query  --'
+Functions: Create lun, delete lun, query lun
+Options:
+  --new:        create new lun
+  --delete:     delete lun
+  --query:      query lun information
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-san-lun --new:
+Usage:
+>> icfs-san-lun ---- --new ---- --target target_name ---- --pool pool_name ----->
+>---- --image image_name --+-- --node node_name --+----+------------------+----><
+                           '-- --all            --'    '-- lunid lun_id --'
+Functions: Create lun
+Options:
+  --target:     target name
+  --pool:       pool name
+  --image:      image name
+  --node:       node name 
+  --all:        all nodes
+  --lunid:      lun id
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-san-lun --delete:
+>> icfs-san-lun ---- --delete ---- --target target_name ---- --lunid lun_id --+-- --node node_name --+----><
+                                                                              '-- --all            --'
+Functions: Delete lun
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully """
+
+icfs-san-lun --query:
+Usage:
+>> icfs-san-lun ---- --query --+--------------------------------------------------+--+-- --node node_name --+----><
+                               '-- --target target_name --+--------------------+--'  '-- --list           --'
+                                                          '-- --lunid lun_id --'
+Functions: Directory information
+Options:
+  --list:       list of basic information
+  --redundancy: directory details and protection policies
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully '''
+    sys.exit(0) 
+
+
+def check_target_name(name):
+    pattern = re.compile("[^0-9a-z.:-]")
+    if pattern.search(name):
+        print "Error(902): Name of the target. Only lowercase letters, numbers and '.' ':' '-' is allowed."
+        sys.exit(1)
+
+
+def check_lun_id(lunid):
+    try:
+        id_num = int(lunid)
+    except ValueError:
+        print "Error(909): LUN id limit: 0 <= && <= 64"
+        sys.exit(1)
+    
+    if id_num < 0 or id_num > 64:
+        print "Error(909): LUN id limit: 0 <= && <= 64"
+        sys.exit(1)
+
+
+def parse_nodes(nodes):
+    node_list = nodes.split(",")
+    status, output = commands.getstatusoutput("salt-key -l acc")
+    if status != 0:
+        print "Error(939): Request node can't be accessed"
+        sys.exit(1)
+    
+    valid_nodes = output.split("\n")
+    valid_nodes.pop(0)
+    invalid_nodes = [node for node in node_list if node not in valid_nodes]
+    if len(invalid_nodes) != 0:
+        print "Error(939): Request node can't be accessed"
+        sys.exit(1)
+    
+    return node_list
+
+
+def parse_output(output):
+    out_list = []
+    lines = output.split("\n")
+    key = ""
+    value = []
+    status = 0
+    for line in lines:
+        if status == 0:
+            m = re.match(r"^([^\s]+):$", line)
+            if m is None:
+                print "no match"
+                print line
+                continue
+            else:
+                key = m.group(1)
+                status = 1
+        elif status == 1:
+            m = re.match(r"^([^\s]+):$", line)
+            if m is None:
+                value.append(line)
+            else:
+                out_list.append([key, "\n".join(value)])
+                key = m.group(1)
+                value = []
+                status = 1
+    
+    if status == 1:
+        out_list.append([key, "\n".join(value)])
+    
+    return out_list
+
+
+def lun_create():
+    global target_name
+    # has wrong keys ?
+    invalid_keys = ["-h", "--help", "--delete", "--query", "--list"]
+    redundant_keys = [key for key in key_list if key in invalid_keys]
+    if len(redundant_keys) != 0:
+        error("002")
+    
+    # lack of necessary keys ?
+    if target_name is None or pool_name is None or image_name is None:
+        error("002")
+    
+    # has conflict keys ?
+    if "--node" in key_list and "--all" in key_list:
+        error("002")
+    
+    check_target_name(target_name)
+    if target_name.startswith("-"):
+        target_name = "\\\"'%s'\\\"" % target_name
+
+    if lun_id is None:
+        cmd = "icfs-san-deploy lun new --targetname %s --pool %s --imagename %s" % (target_name, pool_name, image_name)
+    else:
+        check_lun_id(lun_id)
+        cmd = "icfs-san-deploy lun new --targetname %s --lun %s --pool %s --imagename %s"\
+              % (target_name, lun_id, pool_name, image_name)
+    
+    if all_node:
+        # filter salt stderror so that output can be parsed correctly
+        status, output = commands.getstatusoutput("salt \"*\" cmd.run \"%s\" 2>/dev/null" % cmd)
+        if status != 0 and status >> 8 != 11:
+            print output
+            sys.exit(1)
+        
+        output = re.sub(r"\[.*OK.*\]", r"[ OK ]", output)
+        error_pattern = re.compile(r"Error\(\d+\)")
+        has_error = False
+        output_list = parse_output(output)
+        for n_name, n_output in output_list:
+            print "Node:", n_name
+            print n_output
+            if error_pattern.search(n_output) and "No target named" not in n_output:
+                has_error = True
+        
+        if has_error:
+            sys.exit(1)
+    elif node_name is not None:
+        node_list = parse_nodes(node_name)
+        # filter salt stderror so that output can be parsed correctly
+        status, output = commands.getstatusoutput("salt -L \"%s\" cmd.run \"%s\" 2>/dev/null"
+                                                  % (",".join(node_list), cmd))
+        if status != 0 and status >> 8 != 11:
+            print output
+            sys.exit(1)
+        
+        output = re.sub(r"\[.*OK.*\]", r"[ OK ]", output)
+        error_pattern = re.compile(r"Error\(\d+\)")
+        has_error = False
+        out_list = parse_output(output)
+        for n_name, n_output in out_list:
+            print "Node:", n_name
+            print n_output
+            if error_pattern.search(n_output):
+                has_error = True
+        
+        if has_error:
+            sys.exit(1)
+    else:
+        error("002")
+
+
+def lun_delete():
+    global target_name
+    # has wrong keys ?
+    invalid_keys = ["-h", "--help", "--new", "--query", "--pool", "--image", "--list"]
+    redundant_keys = [key for key in key_list if key in invalid_keys]
+    if len(redundant_keys) != 0:
+        error("002")
+    
+    # lack of necessary keys ?
+    if target_name is None or lun_id is None:
+        error("002")
+    
+    # has conflict keys ?
+    if "--node" in key_list and "--all" in key_list:
+        error("002")
+    
+    check_target_name(target_name)
+    check_lun_id(lun_id)
+    if target_name.startswith("-"):
+        target_name = "\\\"'%s'\\\"" % target_name
+    
+    cmd = "icfs-san-deploy lun delete --targetname %s --lun %s" % (target_name, lun_id)
+    
+    if all_node:
+        # filter salt stderror so that output can be parsed correctly
+        status, output = commands.getstatusoutput("salt \"*\" cmd.run \"%s\" 2>/dev/null" % cmd)
+        if status != 0 and status >> 8 != 11:
+            print output
+            sys.exit(1)
+        
+        output = re.sub(r"\[.*OK.*\]", r"[ OK ]", output)
+        error_pattern = re.compile(r"Error\(\d+\)")
+        has_error = False
+        output_list = parse_output(output)
+        for n_name, n_output in output_list:
+            print "Node:", n_name
+            print n_output
+            if error_pattern.search(n_output) and "No target named" not in n_output:
+                has_error = True
+        
+        if has_error:
+            sys.exit(1)
+    elif node_name is not None:
+        node_list = parse_nodes(node_name)
+        # filter salt stderror so that output can be parsed correctly
+        status, output = commands.getstatusoutput("salt -L \"%s\" cmd.run \"%s\" 2>/dev/null"
+                                                  % (",".join(node_list), cmd))
+        if status != 0 and status >> 8 != 11:
+            print output
+            sys.exit(1)
+        
+        output = re.sub(r"\[.*OK.*\]", r"[ OK ]", output)
+        error_pattern = re.compile(r"Error\(\d+\)")
+        has_error = False
+        out_list = parse_output(output)
+        for n_name, n_output in out_list:
+            print "Node:", n_name
+            print n_output
+            if error_pattern.search(n_output):
+                has_error = True
+        
+        if has_error:
+            sys.exit(1)
+    else:
+        error("002")
+
+
+def lun_query_all():
+    cmd = ""
+    if all_node:
+        # filter salt stderror so that output can be parsed correctly
+        cmd = "salt \"*\" cmd.run \"icfs-san-deploy lun show\" 2>/dev/null"
+    elif node_name is not None:
+        node_list = parse_nodes(node_name)
+        node_str = ",".join(node_list)
+        # filter salt stderror so that output can be parsed correctly
+        cmd = "salt -L \"%s\" cmd.run \"icfs-san-deploy lun show\" 2>/dev/null" % node_str
+    else:
+        error("002")
+    
+    status, output = commands.getstatusoutput(cmd)
+    if status != 0 and status >> 8 != 11:
+        print output
+        sys.exit(1)
+    
+    output = re.sub(r"\[.*OK.*\]", r"[ OK ]", output)
+    
+    # inspur01:                     ->      Node: inspur01
+    #     Target 1: target01        ->          Target: target01
+    #         LUN: 0                ->              LUN: 0
+    pattern_node = re.compile(r"^([^\s]+):$")
+    pattern_target = re.compile(r"^\s+Target.*?:\s*(.*)\s*$")
+    pattern_lun = re.compile(r"^\s+LUN:\s*(\d+)\s*$")
+    lines = output.split("\n")
+    for line in lines:
+        m = pattern_node.match(line)
+        if m is not None:
+            print "Node:", m.group(1)
+            continue
+        
+        m = pattern_target.match(line)
+        if m is not None:
+            print "    Target:", m.group(1)
+            continue
+        
+        m = pattern_lun.match(line)
+        if m is not None:
+            print "        LUN:", m.group(1)
+            continue
+
+
+def lun_query_by_target():
+    global target_name
+    check_target_name(target_name)
+    if target_name.startswith("-"):
+        target_name = "\\\"'%s'\\\"" % target_name
+    
+    cmd = ""
+    if all_node:
+        # filter salt stderror so that output can be parsed correctly
+        cmd = "salt \"*\" cmd.run \"icfs-san-deploy lun show --targetname %s\" 2>/dev/null" % target_name
+    elif node_name is not None:
+        node_list = parse_nodes(node_name)
+        node_str = ",".join(node_list)
+        # filter salt stderror so that output can be parsed correctly
+        cmd = "salt -L \"%s\" cmd.run \"icfs-san-deploy lun show --targetname %s\" 2>/dev/null"\
+              % (node_str, target_name)
+    else:
+        error("002")
+    
+    status, output = commands.getstatusoutput(cmd)
+    if status != 0 and status >> 8 != 11:
+        print output
+        sys.exit(1)
+
+    # inspur01:             ->      Node: inspur01
+    #     LUN: 0            ->          LUN: 0
+    output = re.sub(r"\[.*OK.*\]", r"[ OK ]", output)
+    error_pattern = re.compile(r"Error\(\d+\)")
+    pattern_lun = re.compile(r"^\s+LUN:\s*(\d+)\s*$")
+    out_list = parse_output(output)
+    has_lun = False
+    for n_name, n_output in out_list:
+        print "Node:", n_name
+        if error_pattern.search(n_output):
+            print n_output
+            continue
+
+        lines = n_output.split("\n")
+        for line in lines:
+            m = pattern_lun.match(line)
+            if m is not None:
+                print "    LUN:", m.group(1)
+                has_lun = True
+
+    if not has_lun:
+        sys.exit(1)
+
+
+def lun_query_by_target_lunid():
+    global target_name
+    check_target_name(target_name)
+    check_lun_id(lun_id)
+    if target_name.startswith("-"):
+        target_name = "\\\"'%s'\\\"" % target_name
+    
+    cmd = "icfs-san-deploy lun show --targetname %s --lun %s" % (target_name, lun_id)
+    
+    if all_node:
+        # filter salt stderror so that output can be parsed correctly
+        cmd = "salt \"*\" cmd.run \"%s\" 2>/dev/null" % cmd
+    elif node_name is not None:
+        node_list = parse_nodes(node_name)
+        node_str = ",".join(node_list)
+        # filter salt stderror so that output can be parsed correctly
+        cmd = "salt -L \"%s\" cmd.run \"%s\" 2>/dev/null" % (node_str, cmd)
+    else:
+        error("002")
+
+    status, output = commands.getstatusoutput(cmd)
+    if status != 0 and status >> 8 != 11:
+        print output
+        sys.exit(1)
+
+    output = re.sub(r"\[.*OK.*\]", r"[ OK ]", output)
+    error_pattern = re.compile(r"Error\(\d+\)")
+    pattern_target_lun = re.compile(r"^\s+[^\s]+\s+LUN:\s*\d+\s*$")
+    pattern_mapping_path = re.compile(r"^\s+Backing store path:\s*(.*)\s*")
+    has_lun = False
+    out_list = parse_output(output)
+    for n_name, n_output in out_list:
+        print "Node:", n_name
+        if error_pattern.search(n_output):
+            print n_output
+            continue
+
+        has_lun = True
+        mapping_status = None
+        lines = n_output.split("\n")
+        for line in lines:
+            m = pattern_target_lun.match(line)
+            if m is not None:
+                continue
+
+            m = pattern_mapping_path.match(line)
+            if m is not None:
+                mapping_path = m.group(1)
+                if mapping_path != "None":
+                    mapping_status = True
+                else:
+                    mapping_status = False
+
+            print "    %s" % line.strip()
+
+        if mapping_status is not None:
+            print "    Mapping status: %s" % ("Yes" if mapping_status else "No")
+
+    if not has_lun:
+        sys.exit(1)
+
+
+def lun_query():
+    # has wrong keys ?
+    invalid_keys = ["-h", "--help", "--new", "--delete", "--pool", "--image", "--all"]
+    redundant_keys = [key for key in key_list if key in invalid_keys]
+    if len(redundant_keys) != 0:
+        error("002")
+    
+    # has conflict keys ?
+    if "--node" in key_list and "--list" in key_list:
+        error("002")
+    
+    if "--lunid" in key_list and "--target" not in key_list:
+        error("002")
+    
+    if target_name is None:
+        # query all lun of all targets
+        lun_query_all()
+    else:
+        if lun_id is None:
+            # query all lun of specific target
+            lun_query_by_target()
+        else:
+            # query specific lun of specific target
+            lun_query_by_target_lunid()
+
+
+if __name__ == '__main__':
+    operation = None
+    target_name = None
+    pool_name = None
+    image_name = None
+    node_name = None
+    all_node = False
+    lun_id = None
+
+    opts = []
+    args = []
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "h", ["help", "new", "delete", "query", "target=", "pool=",
+                                                       "image=", "node=", "all", "lunid=", "list"])
+    except getopt.GetoptError, err:
+        error('002')
+    
+    if opts == [] or args != []:
+        error('002')
+    
+    for k, v in opts:
+        if k in ('-h', '--help'):
+            operation = "help"
+        elif "--new" == k:
+            operation = "create"
+        elif "--delete" == k:
+            operation = "delete"
+        elif "--query" == k:
+            operation = "query"
+        elif "--target" == k:
+            target_name = v
+        elif "--pool" == k:
+            pool_name = v
+        elif "--image" == k:
+            image_name = v
+        elif "--node" == k:
+            node_name = v
+        elif "--all" == k:
+            all_node = True
+        elif "--list" == k:
+            all_node = True
+        elif "--lunid" == k:
+            lun_id = v
+    
+    # has duplicate keys ?
+    key_list = [k for k, v in opts]
+    if len(key_list) != len(set(key_list)):
+        error("002")
+    
+    if operation == "help":
+        usage()
+    elif operation == "create":
+        lun_create()
+    elif operation == "delete":
+        lun_delete()
+    elif operation == "query":
+        lun_query()
+    else:
+        error("002")

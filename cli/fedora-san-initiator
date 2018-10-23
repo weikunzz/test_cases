@@ -1,0 +1,268 @@
+#!/usr/bin/python
+# coding:utf-8
+'''
+Created on 2016-11-25
+@author: huper
+modify by huper on 2017-1-10 modify function Error()  print info delete color info 
+'''
+import sys
+import commands
+import re
+import datetime
+import getopt
+
+SSHConnectTimeout = 2
+DEBUG = 0
+USERNAMEREG = "^(\d|[a-zA-Z])(\d|[a-zA-Z]|\.|-)*$"
+PASSWDREG = "[\w|~|=|@|:|?|,|\.]{12,16}$"
+IPV4_REG = "^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[0-9]{1,2})(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[0-9]{1,2})){3}$"
+    
+def run_command(comm, node=None):
+    result = None
+    commstart = '\033[1;32;40m'
+    valuestart = '\033[1;33;40m'
+    end = '\033[0m'
+    begintime = 0
+    endtime = 0
+    if node:
+        if DEBUG:
+            print commstart, "[DEBUG info] remote commands: ", ("ssh -o ConnectTimeout=%s -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' \"%s\"" % (SSHConnectTimeout, node, comm)), end
+            begintime = datetime.datetime.now()
+        result = commands.getstatusoutput("ssh -o ConnectTimeout=%s -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' \"%s\"" % (SSHConnectTimeout, node, comm))
+    else:
+        if DEBUG:
+            print commstart, "[DEBUG info] local commands: ", comm, end
+            begintime = datetime.datetime.now()
+        result = commands.getstatusoutput(comm)
+    if DEBUG:
+        endtime = datetime.datetime.now()
+        print valuestart, "run time: " + str((endtime - begintime).seconds) + "s", "\n", "[DEBUG info]", result, end
+    return result
+
+def Error(code, info=None):
+    start = '\033[1;31;40m'
+    end = "\033[0m"
+    if not info:
+        info = ""
+    if code == 610:
+        mess = "Error(610): Invalid input! "
+    elif code == 950:
+        mess = "Error(950): "
+    elif code == -1:
+        mess = ""
+    else:
+        mess = "Unknow error "
+    print mess, info
+
+def get_error_code_info(info):
+# get error code from return info
+    code = 0
+    infos = info.splitlines()
+    for tmp in infos:
+        codeinfo = re.search("Error\(\d*\)", tmp)
+        if codeinfo:
+            code = int(codeinfo.group().replace("Error", "").replace("(", "").replace(")", ""))
+            info = tmp
+            break
+    return code, info   
+
+def get_host_name():
+    return run_command(comm="hostname")[1]
+
+def check_is_myself(node):
+    if node == None:
+        return True
+    host_name = get_host_name()
+    if host_name == node:
+        return True
+    else:
+        return False
+
+def bind(target,ip,node,all):
+    if all:
+        error,info = run_command(comm="icfs-san-deploy init bind --targetname %s --ip %s --push"%(target,ip),node=node)
+    else:
+        error,info = run_command(comm="icfs-san-deploy init bind --targetname %s --ip %s"%(target,ip),node=node)
+    if not error:
+        error,errinfo = get_error_code_info(info)
+    else:
+        errinfo = info
+    if error:
+        if all:
+            print info
+        else:
+            Error(-1,errinfo)
+        return 1
+    else:
+        print info 
+        return 0
+def unbind(target,ip,node,all):
+    if all :
+        error,info = run_command(comm="icfs-san-deploy init unbind --targetname %s --ip %s --push"%(target,ip), node=node)
+    else:
+        error,info = run_command(comm="icfs-san-deploy init unbind --targetname %s --ip %s"%(target,ip), node=node)
+    if not error:
+        error,errinfo = get_error_code_info(info)
+    else:
+        errinfo = info
+    if error:
+        if all:
+            print info
+        else:
+            Error(-1,errinfo)
+        return 1
+    else:
+        print info
+        return 0
+
+def query(target,node,all):
+    if all:
+        error,info = run_command(comm="icfs-san-deploy init show --push", node=node)
+    elif target:
+        error,info = run_command(comm="icfs-san-deploy init show --targetname %s"%(target), node=node)
+    else:
+        error,info = run_command(comm="icfs-san-deploy init show ",node=node)
+    if not error:
+        error,info = get_error_code_info(info)
+    if error:
+        Error(-1, info)
+        return 1
+    else:
+        print info
+        return 0
+
+def query_connection(target,node,all):
+    if all:
+        error,info = run_command(comm="icfs-san-deploy target show --push | awk ' /.*\(.*\):$/{print}; /^Target/{print}; /IP Address/{print}'", node=node)
+    elif target:
+        error,info = run_command(comm="icfs-san-deploy target show --target %s | awk '/^Target/{print}; /IP Address/{print}' "%(target), node=node)
+    else:
+        error,info = run_command(comm="icfs-san-deploy target show | awk '/^Target/{print}; /IP Address/{print}'", node=node)
+    if not error:
+        error,info = get_error_code_info(info)
+    if error:
+        Error(-1,info)
+        return 1
+    else:
+        print info
+        return 0
+
+def usage():
+    print '''usage:
+target bind:    
+>>- icfs-san-initiator-- --bind-- --target targetname-- --ip userip--+-- --node node--+--><
+                                                                     '-- --all--------'
+target unbind:
+>>- icfs-san-initiator-- --unbind-- --target targetname-- --ip userip--+-- --node node--+--><
+                                                                       '-- --all--------'
+target query:
+>>- icfs-san-initiator-- --query--+---------------------+--+-- --node node--+--><
+                                  '--target targetname--'  '-- --list-------'
+
+options:
+    --bind        bind initiator
+    --unbind    unbind initiator
+    --query     query initiator
+    --target    targetname
+    --node      node name
+    --ip        initiator ip 
+    --list      query all initiator in cluster
+    --all       all node in cluster'''
+
+def need_option(opt):
+    Error(610, opt + " is needed")
+
+def mutex_judg(mutex, action):
+    if mutex is None:
+        return action
+    else:
+        Error(610, "--" + action + " cannot use with --" + mutex)
+        sys.exit(1)
+
+def check_ip_format(ip):
+    if not re.match(IPV4_REG, ip):
+        Error(-1, "Error(938) : IP error!")
+        sys.exit(1)
+    else:
+        return ip
+
+if __name__ == "__main__":
+    operation = None  # query bind unbind
+    target = None  # target name
+    ip = None  # user name 
+    node = None  # node name
+    all = None  # all node
+    list = None  # 
+    operation_mutex = None
+    usre_mutex = None
+    try:
+        options, agrs = getopt.getopt(sys.argv[1:], "h", ["help", "query", "bind", "unbind", "all", "list","connection","target=", "ip=", "node="])
+        if options == []:
+            Error(610)
+            sys.exit(1)
+        for key, value in options:
+            if key in ("-h", "--help"):
+                usage()
+                sys.exit(0)
+            # operation"
+            if key == "--query":
+                operation = mutex_judg(operation_mutex, "query")
+                operation_mutex = "query"
+            if key == "--bind":
+                operation = mutex_judg(operation_mutex, "bind")
+                operation_mutex = "bind"
+            if key == "--unbind":
+                operation = mutex_judg(operation_mutex, "unbind")
+                operation_mutex = "unbind"
+            if key == "--connection":
+                operation = mutex_judg(operation_mutex, "connection")
+                operation_mutex = "connection"
+            #
+            if key == "--node":
+                if not check_is_myself(value):
+                    node = value
+            if key == "--target":
+                target = value 
+            if key == "--ip":
+                if value == "ALL":
+                    ip = "ALL"
+                else:
+                    ip = check_ip_format(value)
+            if key == "--all":
+                all = "all"
+            if key == "--list":
+                list = "list"
+    except Exception, e:
+        Error(610, e)
+        sys.exit(1)
+    if node:
+        # ssh
+        if target and target.startswith("-"):
+            target = "\\\"'%s'\\\"" % target 
+    else:
+        # local
+        if target and target.startswith("-"):
+            target = "\"'%s'\"" % target
+    if operation == "bind":
+        if not target:
+            need_option("--target")
+            sys.exit(1) 
+        if not ip :
+            need_option("--ip")
+            sys.exit(1)
+        sys.exit(bind(target,ip,node,all))
+    elif operation == "unbind":
+        if not target:
+            need_option("--target")
+            sys.exit(1)
+        if not ip:
+            need_option("--ip")
+            sys.exit(1)
+        sys.exit(unbind(target, ip, node, all))
+    elif operation == "query":
+        sys.exit(query(target, node, list))
+    elif operation == "connection":
+        sys.exit(query_connection(target=target,node=node,all=all))
+    else:
+        need_option("--bind or --unbind or --query")
+        sys.exit(1)

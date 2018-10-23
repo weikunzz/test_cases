@@ -1,0 +1,494 @@
+#!/usr/bin/python
+# coding:utf-8
+import OptParser
+import sys
+import cluster_performance_handler
+import salt.client
+import salt.key
+from icfs_util import run_local_cmd
+from FunctionTimeout import FunctionTimeout
+import commands
+import readline
+
+
+def run_remote_cmd(tgt, cmd):
+    try:
+        ret_dict = {}
+        run_ret = run_local_cmd("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  'root@%s' \"%s\"" % (tgt, cmd), True)
+        ret_dict[tgt] = {"retcode": run_ret["retcode"], "stdout": run_ret["stdout"], "stderr": run_ret["stderr"]}
+        return ret_dict
+    except Exception, err_info:
+        print "Error(054): Failed to run command on remote hosts"
+        print err_info
+        sys.exit(1)
+
+
+def list_hosts():
+    opt = {
+        'transport': 'zeromq',
+        '__role': 'master',
+        'sock_dir': '/var/run/salt/master',
+        'pki_dir': '/etc/salt/pki/master'
+    }
+    key = salt.key.Key(opt)
+    keys = key.list_keys()
+    return keys['minions'] if 'minions' in keys else []
+
+
+def error(num, *args):
+    if num == 610:
+        print "Error(610): Invalid input! : %s" % args[0]
+    elif num == 3500:
+        print "Error(3500): the object type %s not in query level %s" % (args[0], args[1])
+    elif num == 3501:
+        print "Error(3501): the input object code %s is invalid!" % args[0]
+    elif num == 3502:
+        print "Error(3502): the input node %s is not in cluster!" % args[0]
+    elif num == 3503:
+        print "Error(3503): cluster level no need level_value!"
+    elif num == 3504:
+        print "Error(3504): execute remote command fail, failinfo: %s!" % args[0]
+    elif num == 3505:
+        print "Error(3505): need node name to query"
+    sys.exit(1)
+
+
+def usage():
+    print '''Help(-h|--help)for icfs-performance-query:
+Usage:
+for query node and client performance info:
+>>icfs-performance-query --level level_name --value node_value --object object_value --type type_value 
++--------------------+----+---------+------><
+--period query_period      --json
+for query cluster info:
+>>icfs-performance-query --level level_name --object object_value --type type_value +--------------------+---
+                                                                                     --period query_period
+-+------+------><
+  --json
+Functions: query the performance of node/cluster/client
+Options:
+--level query level(node/cluster/client)
+--value: the host name which will be queried on 
+--object  query object(disk/iops/cpu/memory/bandwidth/nfs/cifs/client_connect_status/ethernet/latency/timeout_count/ops)
+--type  node->disk:
+                   Disk_Data_Throughput, Disk_Data_ReadThroughput, Disk_Data_WriteThroughput,
+                   Disk_Busy_Ratio, Disk_QueueSize, Disk_AverageIOResponseTime,
+                   Disk_Read_AverageIOResponseTime, Disk_Write_AverageIOResponseTime,
+                   Disk_Average_IO_Size, Disk_AverageReadIO, Disk_AverageWriteIO, Disk_Usage
+         node->iops:              
+                   Disk_Throughput, Disk_ReadThroughput, Disk_WriteThroughput
+         node->cpu:
+                   CPUUsage
+         node->memory:
+                   MemoryUsage
+         node->bandwidth:
+                   BandWidth_KB, Read_Bandwidth_KB, Write_Bandwidth_KB
+         node->nfs:
+                   NFS_Bandwidth, NFS_Out_Bandwidth, NFS_In_Bandwidth, Connected_NFS_Client_Count,
+                   NFS_write_latency_avg, NFS_write_latency_max, NFS_read_latency_avg, NFS_read_latency_max,
+         node->cifs:
+                   CIFS_Bandwidth, CIFS_Out_Bandwidth, CIFS_In_Bandwidth,
+                   Connected_CIFS_Client_Count, CIFS_write_latency_avg, CIFS_write_latency_max,
+                   CIFS_read_latency_avg, CIFS_read_latency_max
+         node->client_connect_status:
+                   Connected_Client_Count
+         node->ethernet:
+                   Network_Packet_Rate, Network_Inbound_Packet_Rate,
+                   Network_Outbound_Packet_Rate, ReadBandWidthUsage, BandWidth,
+                   Read_Bandwidth, Write_Bandwidth
+         cluster->nfs:
+                   NFS_Bandwidth, NFS_Out_Bandwidth, NFS_In_Bandwidth, Connected_NFS_Client_Count, 
+                   NFSV3_RPC_CALL, NFSV4_RPC_CALL
+         cluster->cifs:
+                   CIFS_Bandwidth, CIFS_Out_Bandwidth, CIFS_In_Bandwidth, Connected_CIFS_Client_Count
+         client->bandwidth:
+                   BandWidth_KB, Read_Bandwidth_KB, Write_Bandwidth_KB
+         client->nfs:
+                   client_NFS_Bandwidth, client_NFS_Out_Bandwidth, client_NFS_In_Bandwidth,
+                   client_NFS_Read_latency_avg, client_NFS_Read_latency_max,
+                   client_NFS_Write_latency_avg, client_NFS_Write_latency_max
+         client->cifs:
+                   client_CIFS_Bandwidth, client_CIFS_Out_Bandwidth, client_CIFS_In_Bandwidth,
+                   client_CIFS_Write_latency_avg, client_CIFS_Write_latency_max,
+                    client_CIFS_Read_latency_avg, client_CIFS_Read_latency_max
+         client->ops:
+                   Client_OPS, Client_Read_OPS, Client_Write_OPS
+         client->latency:
+                   Client_Average_Latency, Client_Maximum_Latency,
+                   Client_Average_Write_Latency, Client_Maximum_Write_Latency,
+                   Client_Average_Read_Latency, Client_Maximum_Read_Latency
+         client->timeout_count:
+                   Client_Timeout_Count
+--period optional parameter, specified query how long history performance data, unit is second and support the longest 
+         value is 3600s, if not specified this option will query the latest data
+--json   optional parameter, specified the output format, default not output in json format
+ Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+           
+you can also use interactive mode to query the performance data as following example:
+icfs-performance-query --level node
+please enter the node name:
+ceph-test(0)
+0
+please choose the object which you want to query:
+disk(0)
+iops(1)
+cpu(2)
+memory(3)
+bandwidth(4)
+nfs(5)
+cifs(6)
+client_connect_status(7)
+ethernet(8)
+0
+please choose the object type:
+Disk_Data_Throughput(1)
+Disk_Data_ReadThroughput(2)
+Disk_Data_WriteThroughput(3)
+Disk_Busy_Ratio(4)
+Disk_QueueSize(5)
+Disk_AverageIOResponseTime(6)
+Disk_Read_AverageIOResponseTime(7)
+Disk_Write_AverageIOResponseTime(8)
+Disk_Average_IO_Size(9)
+Disk_AverageReadIO(10)
+Disk_AverageWriteIO(11)
+1
+please input the query period, unit is second(enter 0 mean query the latest data):
+0
+Data_name: Disk_Data_Throughput
+time_stamp                    Data_value                    
+2017-06-22 15:50:02           vda: 428.0 kB
+2017-06-22 15:50:02           vdb: 0.0 kB
+2017-06-22 15:50:02           vdc: 0.0 kB
+2017-06-22 15:50:02           vdd: 0.0 kB
+2017-06-22 15:50:02           vde: 0.0 kB
+2017-06-22 15:50:02           vdf: 0.0 kB'''
+
+
+@FunctionTimeout(timeout=10)
+def main():
+    node_monitor_item = {}
+    cluster_monitor_item = {}
+    client_monitor_item = {}
+    handler_dic = {}
+    object_type_v = None
+    object_v = None
+    m_opts = None
+    m_name = None
+    json_format = False
+    level_value = None
+    objects = {}
+    query_info = {}
+    period_v = 0
+
+    query_level = ["node", "cluster", "client"]
+    object_values = ["disk", "iops", "cpu", "memory", "bandwidth", "nfs", "cifs", "client_connect_status", "ethernet",
+                     "latency", "timeout_count", "ops"]
+    # node level monitor items
+    node_monitor_item["disk"] = ["Disk_Data_Throughput", "Disk_Data_ReadThroughput", "Disk_Data_WriteThroughput",
+                                 "Disk_Busy_Ratio", "Disk_QueueSize", "Disk_AverageIOResponseTime",
+                                 "Disk_Read_AverageIOResponseTime", "Disk_Write_AverageIOResponseTime",
+                                 "Disk_Average_IO_Size", "Disk_AverageReadIO", "Disk_AverageWriteIO"]
+    node_monitor_item["iops"] = ["Disk_Throughput", "Disk_ReadThroughput", "Disk_WriteThroughput"]
+    node_monitor_item["cpu"] = ["CPUUsage"]
+    node_monitor_item["memory"] = ["MemoryUsage"]
+    node_monitor_item["bandwidth"] = ["BandWidth_KB", "Read_Bandwidth_KB", "Write_Bandwidth_KB"]
+    node_monitor_item["nfs"] = ["NFS_Bandwidth", "NFS_Out_Bandwidth", "NFS_In_Bandwidth", "Connected_NFS_Client_Count",
+                                "NFS_read_latency_avg", "NFS_read_latency_max", "NFS_write_latency_avg",
+                                "NFS_write_latency_max", "NFS_node_Read_OPS", "NFS_node_Write_OPS", "NFS_node_OPS"]
+    node_monitor_item["cifs"] = ["CIFS_Bandwidth", "CIFS_Out_Bandwidth", "CIFS_In_Bandwidth",
+                                 "Connected_CIFS_Client_Count", "CIFS_write_latency_avg", "CIFS_write_latency_max",
+                                 "CIFS_read_latency_avg", "CIFS_read_latency_max"]
+    node_monitor_item["ethernet"] = ["Network_Packet_Rate", "Network_Inbound_Packet_Rate",
+                                     "Network_Outbound_Packet_Rate", "ReadBandWidthUsage", "BandWidth",
+                                     "Read_Bandwidth", "Write_Bandwidth"]
+    # cluster level monitor performance item, currently no need to support cluster level cpu,meomory,bandwidth,iops
+    # performance
+
+    # cluster_cpu_values = ["Max_CPU_Usage", "CPUUsage"]
+    # cluster_memory_values = ["Max_Memory_Usage", "MemoryUsage"]
+    # cluster_bandwidth_values = ["BandWidth_KB", "Read_Bandwidth_KB", "Write_Bandwidth_KB", "BandWidth_MB",
+    # "Read_Bandwidth_MB", "Write_Bandwidth_MB"]
+    cluster_monitor_item["nfs"] = ["NFS_Bandwidth", "NFS_Out_Bandwidth", "NFS_In_Bandwidth",
+                                   "Connected_NFS_Client_Count", "NFS_node_OPS",
+                                   "NFS_node_Read_OPS", "NFS_node_Write_OPS"]
+    cluster_monitor_item["cifs"] = ["CIFS_Bandwidth", "CIFS_Out_Bandwidth", "CIFS_In_Bandwidth",
+                                    "Connected_CIFS_Client_Count"]
+    # cluster_monitor_item["client_connect_status"] = ["Connected_Client_Count"]
+    # cluster_iops_type_values = ["Disk_Throughput", "Disk_ReadThroughput", "Disk_WirteThroughput"]
+
+    # client level monitor performance item
+    # client_monitor_item["nfs"] = ["client_NFS_Bandwidth", "client_NFS_Out_Bandwidth", "client_NFS_In_Bandwidth",
+    #                               "client_NFS_read_latency_avg", "client_NFS_read_latency_max",
+    #                               "client_NFS_write_latency_avg", "client_NFS_write_latency_max"]
+
+    client_monitor_item["nfs"] = ["client_NFS_Bandwidth", "client_NFS_Out_Bandwidth", "client_NFS_In_Bandwidth",
+                                  "client_NFS_Read_latency_avg", "client_NFS_Read_latency_max",
+                                  "client_NFS_Write_latency_avg", "client_NFS_Write_latency_max"]
+
+    client_monitor_item["cifs"] = ["client_CIFS_Bandwidth", "client_CIFS_Out_Bandwidth", "client_CIFS_In_Bandwidth",
+                                   "client_CIFS_Write_latency_avg", "client_CIFS_Write_latency_max",
+                                   "client_CIFS_Read_latency_avg", "client_CIFS_Read_latency_max"]
+
+    # for interactive model
+    objects["node"] = ["disk(0)", "iops(1)", "cpu(2)", "memory(3)", "bandwidth(4)", "nfs(5)", "cifs(6)",
+                       "ethernet(8)"]
+    objects["cluster"] = ["nfs(5)", "cifs(6)"]
+    objects["client"] = ["nfs(5)", "cifs(6)"]
+
+    query_info["node"] = node_monitor_item
+    query_info["cluster"] = cluster_monitor_item
+    query_info["client"] = client_monitor_item
+
+    # handle map
+    handler_dic["cluster"] = cluster_performance_handler
+
+    try:
+        parser = OptParser.OptParser()
+        parser.append("help", "{-h|--help}")
+        parser.append("level_query", "--level=[--value=]--object=,--type=[--period=][--json]")
+        parser.append("only_level", "--level=")
+        # parser.append("node_level", "--object=,--type=,--period=")
+        # parser.append("cluster_level", "--object=,--type=,--period=")
+        # parser.append("client_level", "--object=,--type=,--period=")
+        m_name, m_opts = parser.parse(sys.argv[1:])
+    except Exception, err:
+        error(610, err)
+
+    for k, v in m_opts:
+        if k == "--object":
+            if not v.isdigit():
+                if v not in object_values:
+                    error(610, v)
+                object_v = v
+            else:
+                if int(v) < 0 or int(v) > len(object_values) - 1:
+                    error(3501, v)
+                object_v = object_values[int(v)]
+        elif k == "--type":
+            object_type_v = v
+        elif k == "--period":
+            # currently only support query 1 hour history performance data
+            if int(v) < 1 or int(v) > 3600:
+                error(610, v)
+            period_v = int(v)
+        elif k == "--level":
+            if v not in query_level:
+                error(610, v)
+            query_level = v
+        elif k == "--json":
+            json_format = True
+        elif k == "--value":
+            if v not in list_hosts():
+                error(3502, v)
+            level_value = v
+
+    if m_name == "help":
+        usage()
+    elif m_name == "level_query":
+        if query_level == "node":
+            if not level_value:
+                error(3505)
+            if not object_type_v.isdigit():
+                if object_type_v not in node_monitor_item[object_v]:
+                    error(3500, object_type_v, query_level)
+
+                ret = run_remote_cmd(level_value, "python /usr/bin/node_performance_handler %s %s %s" % (object_type_v,
+                                                                                                         period_v,
+                                                                                                         json_format))
+                if not ret[level_value]["retcode"]:
+                    print ret[level_value]["stdout"]
+                else:
+                    error(3504, ret[level_value]["stderr"] if
+                          ret[level_value]["stderr"] is not None else ret[level_value]["stdout"])
+                # use getattr to call the corresponding function
+                # getattr(node_performance_handler, object_type_v)(period_v, json_format, level_value)
+            else:
+                if int(object_type_v) < 1 or int(object_type_v) > len(node_monitor_item[object_v]):
+                    error(3500, object_type_v, query_level)
+                ret = run_remote_cmd(level_value, "python /usr/bin/node_performance_handler %s %s %s"
+                                     % (node_monitor_item[object_v][int(object_type_v) - 1], period_v, json_format))
+                if not ret[level_value]["retcode"]:
+                    print ret[level_value]["stdout"]
+                else:
+                    error(3504, ret[level_value]["stderr"]
+                          if ret[level_value]["stderr"] is not None else ret[level_value]["stdout"])
+                #  use getattr to call the corresponding function
+                # getattr(node_performance_handler,
+                #         node_monitor_item[object_v][int(object_type_v) - 1])(period_v, json_format, level_value)
+        elif query_level == "cluster":
+            if level_value is not None:
+                error(3503)
+            if not object_type_v.isdigit():
+                if object_type_v not in cluster_monitor_item[object_v]:
+                    error(3500, object_type_v, query_level)
+                # use getattr to call the corresponding function
+                getattr(cluster_performance_handler, object_type_v)(period_v, json_format)
+            else:
+                if int(object_type_v) < 1 or int(object_type_v) > len(cluster_monitor_item[object_v]):
+                    error(3500, object_type_v, query_level)
+                # use getattr to call the corresponding function
+                getattr(cluster_performance_handler,
+                        cluster_monitor_item[object_v][int(object_type_v) - 1])(period_v, json_format)
+        elif query_level == "client":
+            if not level_value:
+                error(3505)
+            if not object_type_v.isdigit():
+                if object_type_v not in client_monitor_item[object_v]:
+                    error(3500, object_type_v, query_level)
+
+                ret = run_remote_cmd(level_value, "python /usr/bin/node_performance_handler %s %s %s" % (
+                                     object_type_v, period_v, json_format))
+                if not ret[level_value]["retcode"]:
+                    print ret[level_value]["stdout"]
+                else:
+                    error(3504, ret[level_value]["stderr"] if
+                          ret[level_value]["stderr"] is not None else ret[level_value]["stdout"])
+                # use getattr to call the corresponding function
+                # getattr(client_performance_handler, object_type_v)(period_v, json_format)
+            else:
+                if int(object_type_v) < 1 or int(object_type_v) > len(client_monitor_item[object_v]):
+                    error(3500, object_type_v, query_level)
+
+                ret = run_remote_cmd(level_value, "python /usr/bin/node_performance_handler %s %s %s"
+                                     % (client_monitor_item[object_v][int(object_type_v) - 1], period_v, json_format))
+                if not ret[level_value]["retcode"]:
+                    print ret[level_value]["stdout"]
+                else:
+                    error(3504, ret[level_value]["stderr"]
+                          if ret[level_value]["stderr"] is not None else ret[level_value]["stdout"])
+                # use getattr to call the corresponding function
+                # getattr(client_performance_handler,
+                #         client_monitor_item[object_v][int(object_type_v) - 1])(period_v, json_format)
+        else:
+            error(610, query_level)
+    elif m_name == "only_level":
+        object_value = None
+        object_type = None
+        query_period = 0
+        if query_level == "node" or query_level == "client":
+            print "please enter the node name:"
+            while True:
+                hosts = []
+                count = 0
+                for item in list_hosts():
+                    print "%s(%d)" % (item, count)
+                    hosts.append("%s(%d)" % (item, count))
+                    count += 1
+                try:
+                    level_value = raw_input(">")
+                except KeyboardInterrupt:
+                    print "\nuser canceled this program"
+                    sys.exit(0)
+                if level_value.isdigit():
+                    codes = [item.split("(")[1].split(")")[0] for item in hosts]
+                    if level_value not in codes:
+                        print "please choose the correct the node value or press q to quit"
+                        continue
+                    else:
+                        level_value = hosts[int(level_value)].split('(')[0]
+                        break
+                elif object_value == "q":
+                        sys.exit(0)
+                else:
+                    if level_value not in list_hosts():
+                        print "this node not in cluster, please enter correct node name or enter q to quit"
+                        continue
+                    elif object_type == "q":
+                        sys.exit(0)
+                    else:
+                        break
+        print "please choose the object which you want to query:"
+        while True:
+            for item in objects[query_level]:
+                print item
+            try:
+                object_value = raw_input(">")
+            except KeyboardInterrupt:
+                print "\nuser canceled this program"
+                sys.exit(0)
+            if object_value.isdigit():
+                codes = [item.split("(")[1].split(")")[0] for item in objects[query_level]]
+                if object_value not in codes:
+                    print "please choose the correct the object value or press q to quit"
+                    continue
+                else:
+                    object_value = object_values[int(object_value)]
+                    break
+            elif object_value == "q":
+                sys.exit(0)
+            else:
+                items = [item.split("(")[0] for item in objects[query_level]]
+                if object_value not in items:
+                    print "please choose the correct the object value or press q to quit"
+                    continue
+                else:
+                    break
+        print "please choose the object type:"
+        while True:
+            count = 1
+            for item in query_info[query_level][object_value]:
+                print "%s(%d)" % (item, count)
+                if count < len(node_monitor_item[object_value]):
+                    count += 1
+                else:
+                    count = 1
+            try:
+                object_type = raw_input(">")
+            except KeyboardInterrupt:
+                print "\nuser canceled this program"
+                sys.exit(0)
+            if object_type.isdigit():
+                if int(object_type) < 1 or int(object_type) > len(query_info[query_level][object_value]):
+                    print "please choose the correct the object type or press q to quit"
+                    continue
+                else:
+                    object_type = query_info[query_level][object_value][int(object_type) - 1]
+                    break
+            elif object_type == "q":
+                sys.exit(0)
+            else:
+                if object_type not in query_info[query_level][object_value]:
+                    print "please choose the correct the object type or press q to quit"
+                    continue
+                else:
+                    break
+        print "please input the query period, unit is second(enter 0 mean query the real time data):"
+        while True:
+            try:
+                try:
+                    query_period = raw_input(">")
+                except KeyboardInterrupt:
+                    print "\nuser canceled this program"
+                    sys.exit(0)
+                if int(query_period) < 0 or int(query_period) > 3600:
+                    print "please enter the correct query period, currently only support query history data in 1 hour"
+                    continue
+                else:
+                    break
+            except ValueError, e:
+                print "please enter the correct query period, only support positive integer"
+                continue
+
+        if query_level == "node" or query_level == "client":
+            ret = run_remote_cmd(level_value, "python /usr/bin/node_performance_handler %s %s %s" % (
+                object_type, query_period, False))
+            print "python /usr/bin/node_performance_handler %s %s %s" % (object_type, query_period, False)
+            if not ret[level_value]["retcode"]:
+                print ret[level_value]["stdout"]
+            else:
+                error(3504, ret[level_value]["stderr"] if
+                      ret[level_value]["stderr"] is not None else ret[level_value]["stdout"])
+        else:
+            # use getattr to call the corresponding function
+            getattr(handler_dic[query_level], object_type)(query_period, False)
+
+    else:
+        error(610, m_name)
+
+if __name__ == "__main__":
+    main()

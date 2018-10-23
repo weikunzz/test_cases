@@ -1,0 +1,54 @@
+#!/usr/bin/python
+#coding:utf-8
+# -*- copyright -*-
+
+import commands,getopt,sys
+from icfs_util import error, is_rack
+
+
+'''
+racks = 0,rack
+rack  = 1,not rack
+'''
+def verify_racks():
+    return 0 if is_rack() else 1
+
+def help():
+
+    print '''Help(-h|--help)for icfs-verify-rack:
+Usage:
+>> icfs-verify-rack ----------------------------------------------------><
+Functions: Verify the device is smartrack or not
+Options:
+ None
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0)
+
+if __name__=='__main__':
+
+    try:
+        opts,argv = getopt.getopt(sys.argv[1:],('h'),['help'])
+    except getopt.GetoptError,err:
+        error('002')
+    if '-h' in sys.argv or '--help' in sys.argv:
+        if len(opts) != 1 or argv != []:
+            error('002')
+        else:help()
+    if argv != [] :
+        error('002')
+    if opts == []:
+        racks = verify_racks()
+        print racks
+    else:
+        for k,v in opts:
+            if '--help' in k:
+                if '--help' not in sys.argv :
+                    error('002')
+                help()
+            elif '-h' in k:
+                if '-h' not in sys.argv :
+                    error('002')
+                help()
+    

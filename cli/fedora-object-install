@@ -1,0 +1,206 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+
+import getopt
+import sys
+import socket
+import pdb
+import os
+import re
+from optparse import OptionParser
+
+def error(error_number, message = ""):
+    if 3600 == error_number:
+        print "Error(3600): Input type error, " + message
+    elif 3601 == error_number:
+        print "Error(3601): Input Error, get help use '-h|--help'"
+    elif 3602 == error_number:
+        print "Error(3602): Input should contain client name and host name"
+    elif 3603 == error_number:
+        print "Error(3603): the client name is exist"
+    elif 3604 == error_number:
+        print "Error(3604): the hostname is invalid"
+    elif 3605 == error_number:
+        print "Error(3605): the client name is not exist"
+    elif 3689 == error_number:
+        print "Error(3689): Input should contain client name"
+    elif 3699 == error_number:
+        print "Error(3699): IOError" + message
+
+def usage():
+    print '''Help(-h|--help) for icfs-object-install:
+    Usage:
+    >> icfs-object-install----- --install --client    +---------------------------------+-------------------><
+                                 + --client client name --port port number +
+    Functions: install the service of rgw
+    
+    >> icfs-object-install----- --uninstall --client    +---------------------------------+-------------------><
+    Functions: uninstall the service of rgw
+    Options:
+      --client:      rgw client name
+      --host:  rgw client host name
+    Exit status:
+      0 if executed successfully
+      1 if executed unsuccessfully
+      '''
+
+rgw_conf = ["help", "install", "uninstall", "client=", "host=", "port=", "rgw_max_chunk_size=", "rgw_max_put_size=", "rgw_override_bucket_index_max_shards="]
+
+rgw_check_conf = {"port": int, "rgw_max_chunk_size": int, "rgw_max_put_size": long, "client": str, "host": str, "rgw_override_bucket_index_max_shards": int}
+
+def check_client(client_name):
+    client = '[client.' + client_name + ']\n'
+    try: 
+        fp = open("/etc/icfs/icfs.conf", "r")
+        lines = fp.readlines()
+        for line in lines:
+            if line == client:
+                return 1
+    except IOError:
+        error(3699, "/etc/icfs/icfs.conf is not exist")
+        sys.exit(1)
+    return 0 
+def check_host(host_name):
+    try:
+        ip = socket.gethostbyname(host_name)
+    except Exception as err:
+        error(3604, err)
+        sys.exit(1)
+
+def check_conf(key, value):
+    if key in rgw_check_conf:
+        if rgw_check_conf[key] == int or rgw_check_conf[key] == long:
+            try:
+                value1 = int(value)
+                if key == "port":
+                    if value1 > 8015 or value1 < 8008:
+                        error(3600, "port num %s not in 8008~8015" % (value))
+                        sys.exit(1) 
+                return 1
+            except ValueError:
+                error(3600, "%s type is %s" % (key, rgw_check_conf[key]))
+                sys.exit(1)
+        # TODO
+        if rgw_check_conf[key] == str:
+            if key == "client":
+                if check_client(value) == 1:
+                    error(3603)
+                    sys.exit(1)
+            if key == "host":
+                check_host(value)
+        if type(value) == rgw_check_conf[key]:
+            return 0
+        else:
+            error(3600, "%s type is %s" % (key, rgw_check_conf[key]))
+            sys.exit(1)  
+
+def uninstall(options):
+    obj_conf = {}
+    for o1, a1 in options: 
+        if o1[2:] + "=" in rgw_conf and o1[2:] != "install" and o1[2:] != "help":
+            obj_conf[o1] = a1 
+    if obj_conf.get("--client"):
+        if check_client(obj_conf["--client"]) == 0:
+            error(3605, "the client doesn't exist" )
+            sys.exit(1) 
+        else:
+            client = '[client.' + obj_conf["--client"] + ']\n'
+            client_tag = '[client'
+            lines = []
+            fp = open("/etc/icfs/icfs.conf", 'r')  
+            contents = fp.readlines()
+            flags = False
+            for line in contents:
+                if line == client:
+                    flags = True
+                    continue
+                elif flags == True:
+                    if line[:7] != client_tag:
+                        continue
+                    else:
+                        flags = False
+                        lines.append(line)
+                else:
+                    lines.append(line)
+            fp.close()
+            fp = open("/etc/icfs/icfs.conf", 'w')  
+            fp.writelines(lines)
+            fp.close()
+    else:
+        usage()
+        error(3689)
+        sys.exit(1) 
+
+def install(options):
+    obj_conf = {}
+    for o1, a1 in options: 
+        if o1[2:] + "=" in rgw_conf and o1[2:] != "install" and o1[2:] != "help":
+            obj_conf[o1] = a1 
+    if obj_conf.get("--client"):
+        check_conf("client", obj_conf["--client"])
+        input_str = '\n[client.%s]\nlog_file = /var/log/icfs/radosgw.log\nrgw_socket_path = /var/run/icfs/icfs.radosgw.gateway.civetweb.sock\n' % (obj_conf["--client"])
+        for o2 in obj_conf:
+            if o2[2:] + "=" in rgw_conf and o2[2:] != "host" and o2[2:] != "client" and o2[2:] != "port":
+                check_conf(o2[2:], obj_conf[o2])
+                input_str = input_str + "%s = %s\n" % (o2[2:], obj_conf[o2])
+     
+        if "--port" not in obj_conf:
+            port_str =  "rgw_frontends = civetweb port=7480\n"
+        else: 
+            check_conf("port", obj_conf["--port"])
+            port_str =  "rgw_frontends = civetweb port=%s\n" % obj_conf["--port"]
+        input_str = input_str + port_str + "\n"
+        try:
+            fp = open("/etc/icfs/icfs.conf", 'ab+')
+            fp.write(input_str + "\n")
+            fp.close()       
+        except IOError:
+            error(3699, "/etc/icfs/icfs.conf is not exist")
+            sys.exit(1) 
+    else:
+        usage()
+        error(3602)
+        sys.exit(1) 
+
+
+def deal(options):
+    for o, a in options:
+        if o in ("-h", "--help"):
+            usage()
+            sys.exit(0)
+        elif "--install" == o:
+            install(options)
+            print "success"
+            sys.exit(0)
+        elif "--uninstall" == o:
+            uninstall(options) 
+            print "success"
+            sys.exit(0)
+        else:
+            error(3601)
+            sys.exit(1)
+            
+
+def main():
+    try:
+        options, args = getopt.getopt(sys.argv[1:], "h", rgw_conf)
+    except getopt.GetoptError, err:
+        error(3601)
+        sys.exit(1)
+    if len(sys.argv[0:]) == 1:
+        usage()
+        sys.exit(1)
+    elif not options:
+        usage()
+        error(3601)
+        sys.exit(1)
+    elif len(args) != 0:
+        usage()
+        error(3601)
+        sys.exit(1)
+    # decode the  parameter
+    deal(options)
+
+if __name__ == "__main__":
+    main()

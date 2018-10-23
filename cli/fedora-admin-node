@@ -1,0 +1,460 @@
+#!/usr/bin/python
+# coding:utf-8
+import os
+import sys
+import getopt
+import commands
+import re
+import threading
+import json
+from icfs_util import get_remote_host_list, run_remote_ping
+from icfs_util import run_remote_cmd, error, is_rack
+
+
+def usage():
+    print """Help(-h|--help)for icfs-admin-node:
+Usage:
+>> icfs-admin-node ----+        --list         +--------------------><
+                       +    --start ipmi_ip    +
+                       +   --query node_name   +
+                       +   --reboot node_name  +
+                       ' --shutdown node_name  '
+Functions: node information display,start node,shutdown node,reboot node 
+Options:
+  --query:     query one node information
+  --list:      query all node information
+  --start:     start node
+  --shutdown:  shutdown node
+  --reboot:    reboot node
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+Usage: 
+>> icfs-admin-node ---- --query node_name ----+----------+----><
+                                              ' --general '
+
+Functions: Query the node information
+Options:
+  --general:   query the node information
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully"""
+
+
+class Worker(threading.Thread):
+    def __init__(self, node):
+        super(Worker, self).__init__()
+        self._node = node
+        self._ip = ""
+        self._stat = ""
+        self._e = ""
+        self._manageip = ""
+
+    def get_node(self): return self._node
+
+    def get_ip(self): return self._ip
+
+    def get_stat(self): return self._stat
+
+    def get_e(self): return self._e
+
+    def get_manage(self): return self._manageip
+
+    def run(self):
+        self._ip = get_ip_by_hostname(self._node)
+        if self._ip == "":
+            return
+        c, d = commands.getstatusoutput("ping -c 1 -W 5 '%s' " % self._ip)
+        if not c:
+            self._stat = "ok"
+            self._e = "up"
+        else:
+            self._stat = "no"
+            self._e = "down"
+
+        if has_info:
+            ip_status, ip_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o "
+                                                            "PasswordAuthentication=no -o StrictHostKeyChecking=no "
+                                                            "'root@%s' 'ipmitool lan print'|grep -v 'IP Address Source'"
+                                                            "|grep 'IP Address'|awk -F ':' '{print $2}'" % self._node)
+            if "Could not open device" in ip_output:
+                self._manageip = "None"
+            else:
+                self._manageip = ip_output
+
+
+def remote_host_stat_check():
+    host_list = get_remote_host_list()
+    if not host_list:
+        print "Error(056): Remote hosts list is empty"
+        sys.exit(1)
+
+    ret_dict = run_remote_ping("*")
+    fail_list = [name for name, ret in ret_dict.items() if ret["status"] is False]
+    if fail_list:
+        print "Error(057): Remote hosts %s is not accessable" % ",".join(fail_list)
+        sys.exit(1)
+
+
+def get_ip_by_hostname(hostname):
+    ip = ""
+    pattern = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(.*?)(?:#.*)?$")
+    try:
+        with open("/etc/hosts", "r") as fp:
+            lines = fp.readlines()
+    except IOError:
+        return ip
+
+    for line in lines:
+        m = pattern.match(line)
+        if m is None:
+            continue
+
+        hostname_list = m.group(2).split()
+        if hostname in hostname_list:
+            ip = m.group(1)
+            break
+
+    return ip
+
+
+def node_query_id(node_name):
+    node_ip = get_ip_by_hostname(node_name)
+    if node_ip == "":
+        Error(404)
+    b = commands.getstatusoutput("cat /etc/hosts |sed '1,2d'|grep -w %s" % node_ip)[1]
+    if not b:
+        Error(400)
+    c, k = commands.getstatusoutput("ping -c 1 -W 5 %s" % node_ip)
+    if not c:
+        stat = "ok"
+        e = "up"
+    else:
+        stat = "no"
+        e = "down"
+    if has_type:
+        id_num = "None"
+        sn_status, sn_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o"
+                                                        " PasswordAuthentication=no -o StrictHostKeyChecking=no "
+                                                        "'root@%s' 'dmidecode -t system'| grep Serial| awk -F ':' "
+                                                        "'{print $2}'" % node_name)
+        if "Connection timed out" in sn_output:
+            print "Error(553): Unknown error: the node %s can not reachable" % node_name
+            sys.exit(1)
+        if "Not Specified" in sn_output:
+            sn_output = "None"
+        ip_status, ip_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o "
+                                                        "PasswordAuthentication=no -o StrictHostKeyChecking=no "
+                                                        "'root@%s' 'ipmitool lan print 1'|grep -v 'IP Address Source'"
+                                                        "|grep 'IP Address'|awk -F ':' '{print $2}'" % node_name)
+        if "Connection timed out" in ip_output:
+            print "Error(553): Unknown error: the node %s can not reachable" % node_name
+            sys.exit(1)
+        elif "0.0.0.0" == ip_output.strip():
+            ip_status, ip_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o "
+                                                            "PasswordAuthentication=no -o StrictHostKeyChecking=no "
+                                                            "'root@%s' 'ipmitool lan print 8'|grep -v 'IP Address Source'"
+                                                            "|grep 'IP Address'|awk -F ':' '{print $2}'" % node_name)
+
+        firm_status, firm_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o "
+                                                            "PasswordAuthentication=no -o StrictHostKeyChecking=no "
+                                                            "'root@%s' 'ipmitool bmc info'|grep 'Firmware Revision'"
+                                                            "|awk -F ':' '{print $2}'" % node_name)
+        if "Could not open device" in ip_output or "Could not open device" in firm_output:
+            ip_output = "None"
+            firm_output = "None"
+        ip = get_ip_by_hostname(node_name)
+        if is_rack():
+            try:
+                with open("/usr/local/ism/Agent/src/Cache/rack_info.txt", "r") as f:
+                    content = f.read()
+                    node_info = re.split('\n\s*\n', content)
+                    for line in node_info:
+                        if 'NodeID' in line and 'ProductName' in line and "SN" in line and "CPU" in line:
+                            node_line = line.splitlines()
+                            for lines in node_line[2:]:
+                                info = lines.split()
+                                if ip == info[5]:
+                                    id_num = info[0]
+            except IOError, e:
+                error('3005')
+        type_status, type_output = commands.getstatusoutput("icfs node ls -f json 2>/dev/null")
+        if type_status != 0:
+            Error(1399, type_output)
+        type_list = []
+        type_output = json.loads(type_output)
+        mds_list = type_output["mds"].keys()
+        mon_list = type_output["mon"].keys()
+        osd_list = type_output["osd"].keys()
+        if node_name in mds_list:
+            type_list.append("Mds")
+        if node_name in mon_list:
+            type_list.append("Mon")
+        if node_name in osd_list:
+            type_list.append("Osd")
+        else:
+            type_list.append("None")
+        print "Nodeip".ljust(15, " "), "Nodename".ljust(15, " "), "Nodeid".ljust(15, " "), "Manageip".ljust(15, " ")\
+            , "Health".ljust(15, " "), "Nodestate".ljust(15, " "), "Nodetype".ljust(15, " "), "Manufacture".ljust(15, " "), "Serial Number".ljust(15, " "), "Firmware Version"
+        print node_ip.ljust(15, " "), node_name.ljust(15, " "), id_num.ljust(15, " "), ip_output.strip().ljust(15, " "), \
+            stat.ljust(15, " "), e.ljust(15, " "), ",".join(type_list) .ljust(15, " "), "Inspur".ljust(15, " "), sn_output.ljust(15, " "), firm_output
+    elif has_bios:
+        bios_output = "None"
+        bios_status, bios_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o "
+                                                           "PasswordAuthentication=no -o StrictHostKeyChecking=no "
+                                                           "'root@%s' 'dmidecode -t bios'| grep Version| awk -F ':' "
+                                                           "'{print $2}'" % node_name)
+        if bios_status != 0:
+            Error(1399, bios_output)
+        print "Nodeip".ljust(15, " "), "Bios Version"
+        print node_ip.ljust(15, " "), bios_output
+    elif has_sas:
+        version_status, version_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 "
+                                                                  "-o PasswordAuthentication=no -o "
+                                                                  "StrictHostKeyChecking=no 'root@%s' 'lsiutil -s' "
+                                                                  "| grep Firmware| awk '{print $9}'" % node_name)
+        if version_status != 0:
+            Error(1399, version_output)
+        if version_output == '':
+            version_output = "None"
+        version = version_output.splitlines()
+        print "Nodeip".ljust(15, " "), "Sas Version"
+        print node_ip.ljust(15, " "), ",".join(version)
+    elif has_ib:
+        ib_status, ib_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o "
+                                                        "PasswordAuthentication=no -o StrictHostKeyChecking=no "
+                                                        "'root@%s' 'ibstat'|grep Firmware| awk -F ':' '{print $2}'"
+                                                        % node_name)
+        if ib_output == '':
+            ib_output = "None"
+        print "Nodeip".ljust(15, " "), "IB Version"
+        print node_ip.ljust(15, " "), ib_output
+    else:
+        print "Nodeip".ljust(15, " "), "Nodename".ljust(15, " "), "Health".ljust(15, " "), "Nodestate".ljust(15, " ")
+        print node_ip.ljust(15, " "), node_name.ljust(15, " "), stat.ljust(15, " "), e.ljust(15, " ")
+
+
+def load_query(node_id):
+    try:
+        load_status, load_out = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o "
+                                                         "PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' "
+                                                         "\"dstat -n 1 1|awk 'NR>3{print \$1,\$2}'\"" % node_id)
+
+        if load_status:
+            Error(1399, load_out)
+        print "Receive".ljust(15, " "), "Send".ljust(15, " ")
+        out = load_out.split()
+        rec = out[0]
+        send = out[1]
+        print rec.ljust(15, " "), send.ljust(15, " ")
+    except Exception, e:
+        print e
+        sys.exit(1)
+
+
+def load_query_all():
+    try:
+        host_list = get_remote_host_list()
+        print "Nodename".ljust(15, " "), "Read".ljust(15, " "), "Write".ljust(15, " "), "Receive".ljust(15, " "), \
+            "Send".ljust(15, " ")
+        for host in host_list:
+            result = run_remote_cmd(host, "dstat -d -n 1 1|awk -F '|' 'NR>3{print $1,$2,$3,$4}'")
+            value = result[host]["stdout"].split()
+            read = value[0]
+            write = value[1]
+            rec = value[2]
+            send = value[3]
+            print host.ljust(15, " "), read.ljust(15, " "), write.ljust(15, " "), rec.ljust(15, " "), send.ljust(15, " ")
+    except Exception, e:
+        print e
+        sys.exit(1)
+
+
+def node_query_list():
+    worker_list = []
+    node_list = get_remote_host_list()
+    node_list.sort()
+    count = 0
+    up_count = 0
+    for node in node_list:
+        worker_list.append(Worker(node))
+
+    for worker in worker_list:
+        worker.start()
+
+    for worker in worker_list:
+        worker.join()
+        if worker.get_ip() != "":
+            count += 1
+        if worker.get_stat() == "ok":
+            up_count += 1
+    if has_info:
+        print "Nodeip".ljust(15, " "), "Manageip".ljust(15, " "),  "Nodename".ljust(15, " "), "Health".ljust(15, " "), "Nodestate".ljust(15, " ")
+    else:
+        print "Nodeip".ljust(15, " "), "Nodename".ljust(15, " "), "Health".ljust(15, " "), "Nodestate".ljust(15, " ")
+    for worker in worker_list:
+        if worker.get_ip() == "":
+            continue
+        if has_info:
+            print worker.get_ip().ljust(15, " "), worker.get_manage().strip().ljust(15, " "), worker.get_node().ljust(15, " "), worker.get_stat().ljust(15, " "), worker.get_e().ljust(15, " ")
+        else:
+            print worker.get_ip().ljust(15, " "), worker.get_node().ljust(15, " "), worker.get_stat().ljust(15, " "), worker.get_e().ljust(15, " ")
+    print "node: %s/%s" % (count, up_count)
+
+
+def node_reboot(node_name):
+    node_ip = get_ip_by_hostname(node_name)
+    if commands.getstatusoutput("ping -c 1 '%s' " % node_ip)[0]:
+        Error(403)
+    result = run_remote_cmd(node_name, "reboot")
+
+
+def node_shutdown(node_name):
+    node_ip = get_ip_by_hostname(node_name)
+    if commands.getstatusoutput("ping -c 1 '%s' " % node_ip)[0]:
+        Error(403)
+    result = run_remote_cmd(node_name, "shutdown")
+
+
+def node_start(ipmi_ip):
+    b = re.findall('\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', ipmi_ip)
+    if b == [] or len(b[0]) != len(ipmi_ip):
+        Error(610)
+    elif commands.getstatusoutput("ipmitool -I lanplus -H %s -U admin -P admin power status" % ipmi_ip)[1] != 'Chassis Power is off':
+        Error(402)
+    a = commands.getstatusoutput("ipmitool -I lanplus -H %s -U admin -P admin power on" % ipmi_ip)[1]
+    if a == "Chassis Power Control: Up/On":
+        print "successful"
+    else:
+        Error(400)
+
+
+def Error(num, *description):
+    if num == 299:
+        print "Error(299):Invalid salt service %s" % description
+    if num == 400:
+        print "Error(400): Invalid operation"
+    if num == 401:
+        print "Error(401): No exists"
+    if num == 402:
+        print "Error(402): Already running"
+    if num == 403:
+        print "Error(403): Already down"
+    if num == 404:
+        print "Error(404):The host %s is not exists" % node_name
+    if num == 610:
+        print "Error(610): Invalid input!"
+    if num == 1399:
+        print "Error(1399):Unkown error %s" % description
+    sys.exit(1)
+
+
+def name_format(name):
+    format = '\"\:\'\\/[]<>+;?*|=@'
+    if len(name) > 32:
+        sys.exit(1)
+    for char in format:
+        if char in name:
+            Error(610)
+        if name[0] == '-':
+            Error(610)
+        if name[-1] == '.':
+            Error(610)
+
+if __name__ == "__main__":
+    operation = None
+    node_id = None
+    node_list = None
+    shd = None
+    reb = None
+    sta = None
+    time = None
+    has_type = False
+    has_info = False
+    has_bios = False
+    has_sas = False
+    has_ib = False
+    options = []
+    args = []
+    try:
+        options, args = getopt.getopt(sys.argv[1:], "h", ["query=", "list", "reboot=", "shutdown=", "start=", "load=",
+                                                          "help", "all", "general", "info", "bios",
+                                                          "sas", "ib"])
+    except getopt.GetoptError, err:
+        Error(610)
+    if options == [] or args != []:
+        Error(610)
+    for x, y in options:
+        if x in ("-h", "--help"):
+            if len(sys.argv) != 2:
+                Error(610)
+            else:
+                usage()
+                sys.exit(0)
+        elif x == "--query":
+            node_id = y
+            operation = "query"
+        elif x == "--load":
+            node_id = y
+            operation = "load"
+        elif x == "--list":
+            operation = "list"
+        elif x == "--all":
+            operation = "all"
+        elif x == "--general":
+            has_type = True
+        elif x == "--info":
+            has_info = True
+        elif x == "--bios":
+            has_bios = True
+        elif x == "--sas":
+            has_sas = True
+        elif x == "--ib":
+            has_ib = True
+        elif x == "--reboot":
+            reb = "reboot"
+            node_id = y
+        elif x == "--shutdown":
+            shd = "shutdown"
+            node_id = y
+        elif x == "--start":
+            sta = "start"
+            node_id = y
+    if operation == "query":
+        if (len(sys.argv) == 3 and sys.argv[1] == "--query") or (len(sys.argv) == 4 and sys.argv[1] == "--query" and
+                                                                         sys.argv[3] in ("--general", "--bios", "--sas",
+                                                                                         "--ib")):
+            node_name = node_id
+            node_query_id(node_name)
+        else:
+            Error(610)
+    elif operation == "list":
+        if (len(sys.argv) == 2 and sys.argv[1] == "--list") or (len(sys.argv) == 3 and sys.argv[1] == "--list" and
+                                                                        sys.argv[2] == "--info"):
+            node_query_list()
+        else:
+            Error(610)
+    elif operation == "load":
+        if len(sys.argv) == 3 and sys.argv[1] == "--load":
+            load_query(node_id)
+        else:
+            Error(610)
+    elif operation == "all":
+        if len(sys.argv) == 2 and sys.argv[1] == "--all":
+            remote_host_stat_check()
+            load_query_all()
+        else:
+            Error(610)
+    elif reb == "reboot":
+        node_name = node_id
+        node_reboot(node_name)
+    elif shd == "shutdown":
+        node_name = node_id
+        node_shutdown(node_name)
+    elif sta == "start":
+        ipmi_ip = node_id
+        if not re.match(r"^([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-4])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])$",ipmi_ip):
+            Error(610)
+        m = ipmi_ip
+        name_format(m)
+        node_start(m)

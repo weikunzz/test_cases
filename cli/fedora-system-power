@@ -1,0 +1,452 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+import sys
+# import getopt
+import commands
+import re
+import binascii
+import time
+import OptParser
+from FunctionTimeout import FunctionTimeout
+from icfs_util import error, run_local_cmd, run_remote_cmd, get_board_mfg_date, is_rack
+
+
+# def run_remote_cmd(tgt, cmd):
+#     try:
+#         ret_dict = {}
+#         status, output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+#                                   -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+#                                   'root@%s' \"%s\"" % (tgt, cmd))
+#         # print "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no 'root@%s' \"%s\"" % (tgt, cmd)
+#         ret_dict[tgt] = {"retcode": status, "stdout": output, "stderr": ""}
+#         return ret_dict
+#     except Exception, err:
+#         print "Error(054): Failed to run command on remote hosts"
+#         print err
+#         sys.exit(1)
+
+
+def get_hostname_list():
+    hostname = []
+    pattern = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(.*?)(?:#.*)?$")
+    try:
+        with open("/etc/hosts", "r") as fp:
+            lines = fp.readlines()
+    except IOError:
+        return hostname
+
+    for line in lines:
+        m = pattern.match(line)
+        if m is None:
+            continue
+        if m.group(2) == 'localhost localhost.localdomain localhost4 localhost4.localdomain4':
+            continue
+        hostname.append(m.group(2))
+
+    return hostname
+
+
+# class PowerQuery(multiprocessing.Process):
+#
+#     def __init__(self, query_node):
+#         super(PowerQuery, self).__init__()
+#         self.query_node = query_node
+#
+#     def run(self):
+#         node = self.query_node
+#         global name_list
+#         power_name = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+#                                               "-o StrictHostKeyChecking=no 'root@%s' \"ipmitool sdr|grep -E 'PSU[0-9]+_Supply'\" 2>/dev/null|awk '{print $1}'|grep -v %s" % (node, node))
+#         if power_name[0] != 0 or power_name[1] == '':
+#             error('3001')
+#         elif 'No' in power_name[1]:
+#             error('3002')
+#
+#         power_list = power_name[1].split('\n')
+#         for power in power_list:
+#             power_type = 'DC'
+#             # get power type(AC/DC)
+#             ret, output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o "
+#                                                    "PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@{0}' \" ipmitool sensor get {1}\""
+#                                                    .format(node, power.strip()))
+#             # the power type is AC
+#             if not ret:
+#                 if "AC" in output:
+#                     power_type = "AC"
+#             else:
+#                 error('3001')
+#             # get produce data
+#             ret, output = commands.getstatusoutput(
+#                 "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s'"
+#                 " \" ipmitool fru | grep \\\" Board Mfg Date \\\" | awk -F \\\" :\\\" {'print$2'}\"" % node)
+#             if not ret:
+#                 data = output.split("\n")[1].split(":", 1)[1].strip()
+#                 # transfer time format Wed Jun 14 11:31:39 2017 to 2017-06-14 11:31:39
+#                 time_structure = time.strptime(data, "%a %b %d %H:%M:%S %Y")
+#                 data = time.strftime("%Y-%m-%d %H:%M:%S", time_structure)
+#             else:
+#                 error('3001')
+#             re_name = re.findall('\d+', power)
+#             name = 'power'+re_name[0]
+#             version, types, serial = get_power_info(name[5:], node)
+#             status = 'normal'
+#             power_ipmi_sensor = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no "
+#                                                          "'root@%s' \"ipmitool sensor |grep %s\" 2>/dev/null|grep -v %s" % (node, power.strip(), node))
+#             if power_ipmi_sensor[0] != 0 or power_ipmi_sensor[1] == '':
+#                 error('3001')
+#             else:
+#                 if '0x0180' not in power_ipmi_sensor[1]:
+#                     status = 'abnormal'
+#             print 'Name:'+name
+#             print 'Slot:'+name[5:]
+#             print 'health:'+status
+#             print 'State: on' if status == 'normal' else 'State: off'
+#             print 'Mode:'+types
+#             print 'Type:'+power_type
+#             print 'Vendor: Inspur'
+#             print 'ProduceData: ' + data
+#             print 'Serial:'+serial
+#             print 'Version:'+version
+#             if power != power_list[-1]:
+#                 print ''
+
+
+def get_power_info(name):
+    if int(name) < 9:
+        power_info = run_local_cmd("ipmitool raw 0x3a 0x71 0x0%s" % name, timeout=10)
+    else:
+        power_info = run_local_cmd("ipmitool raw 0x3a 0x71 0x%s" % name, timeout=10)
+    retcode = power_info["retcode"]
+    stdout = power_info["stdout"]
+    if retcode != 0:
+        return "--", "--", "--"
+    elif 'No' in stdout:
+        return "--", "--", "--"
+    else:
+        power_info_list = stdout.split()
+        power_version = ''
+        power_type = ''
+        power_serial = 'None'
+        for a in power_info_list[21:29]:
+            if a == '00':
+                continue
+            power_version += binascii.a2b_hex(a)
+        for a in power_info_list[29:45]:
+            if a == '00':
+                continue
+            power_type += binascii.a2b_hex(a)
+        for a in power_info_list[61:77]:
+            if a == '00':
+                continue
+            power_serial += binascii.a2b_hex(a)
+        if power_serial != 'None':
+            power_serial = power_serial[4:]
+        return power_version, power_type, power_serial
+
+
+def do_local_query():
+    global name_list
+    sensor_stdout = run_local_cmd("ipmitool sensor", timeout=20)
+    if sensor_stdout["stdout"] == "":
+        error('3001')
+
+    m_data = get_board_mfg_date()
+    if m_data is None:
+        data = "--"
+    else:
+        try:
+            data = m_data
+            time_structure = time.strptime(data, "%a %b %d %H:%M:%S %Y")
+            data = time.strftime("%Y-%m-%d %H:%M:%S", time_structure)
+        except Exception:
+            data = "--"
+
+    from collections import defaultdict
+    power_info = defaultdict(dict)
+
+    patt_1 = re.compile("^PSU([0-9]+)_(\S+)\s+.*?")
+    sensor_lines = sensor_stdout["stdout"].splitlines()
+    for line in sensor_lines:
+        m_1 = patt_1.match(line)
+        if m_1:
+            id = int(m_1.groups()[0])
+            power_info[id]["slot"] = str(id)
+            type = m_1.groups()[1]
+
+            if type.upper() in ("SUPPLY",):
+                try:
+                    power_info[id]["status"] = "normal" if "0x0180" in line else "abnormal"
+                except Exception:
+                    power_info[id]["status"] = "--"
+
+                try:
+                    power_info[id]["runstatus"] = "on" if "0x0180" in line else "off"
+                except Exception:
+                    power_info[id]["runstatus"] = "--"
+
+                power_info[id]["name"] = "power" + str(id)
+
+                power_type_out = run_local_cmd("ipmitool sensor get %s" % "PSU" + str(id) + "_" + str(type), timeout=10)
+                try:
+                    power_type = "DC"
+                    ret = power_type_out["retcode"]
+                    output = power_type_out["stdout"]
+                    # the power type is AC
+                    if ret != 0:
+                        power_type = "--"
+                    elif "AC" in output:
+                        power_type = "AC"
+                    else:
+                        power_type = "DC"
+                    power_info[id]["powertype"] = power_type
+                except Exception:
+                    power_info[id]["powertype"] = "--"
+
+            elif type.upper() in ("STATUS",):
+                try:
+                    power_info[id]["status"] = "normal" if "0x0180" in line else "abnormal"
+                except Exception:
+                    power_info[id]["status"] = "--"
+
+                try:
+                    power_info[id]["runstatus"] = "on" if "0x0180" in line else "off"
+                except Exception:
+                    power_info[id]["runstatus"] = "--"
+
+                power_info[id]["name"] = "power" + str(id)
+
+                power_type_out = run_local_cmd("ipmitool sensor get %s" % "PSU" + str(id) + "_" + str(type), timeout=10)
+                try:
+                    ret = power_type_out["retcode"]
+                    output = power_type_out["stdout"]
+                    # the power type is AC
+                    if "AC" in output:
+                        power_type = "AC"
+                    else:
+                        power_type = "--"
+                    power_info[id]["powertype"] = power_type
+                except Exception:
+                    power_info[id]["powertype"] = "--"
+
+            version, types, serial = get_power_info(str(id))
+            try:
+                power_info[id]["version"] = version
+            except Exception:
+                power_info[id]["version"] = "--"
+
+            try:
+                power_info[id]["types"] = types
+            except Exception:
+                power_info[id]["types"] = "--"
+
+            try:
+                power_info[id]["serial"] = serial
+            except Exception:
+                power_info[id]["serial"] = "--"
+
+    for key, value in power_info.iteritems():
+        power_info[key]["vendor"] = "Inspur"
+        power_info[key]["data"] = data
+
+    result_list = []
+    for key, value in power_info.iteritems():
+        result_list.append({key: value})
+
+    result_list.sort(key=lambda x: x.keys()[0])
+
+    result_list_str = []
+    for item in result_list:
+        for key, value in item.iteritems():
+
+            a = ""
+            try:
+                a += "Name:%s" % str(value["name"])
+            except Exception:
+                a += "Name:--"
+            a += "\n"
+
+            try:
+                a += "Slot:%s" % str(value["slot"])
+            except Exception:
+                a += "Slot:--"
+            a += "\n"
+
+            try:
+                a += "health:%s" % str(value["status"])
+            except Exception:
+                a += "health:--"
+            a += "\n"
+
+            try:
+                a += "State: %s" % str(value["runstatus"])
+            except Exception:
+                a += "State: --"
+            a += "\n"
+
+            try:
+                a += "Mode:%s" % str(value["types"])
+            except Exception:
+                a += "Mode:--"
+            a += "\n"
+
+            try:
+                a += "Type:%s" % str(value["powertype"])
+            except Exception:
+                a += "Type:--"
+            a += "\n"
+
+            try:
+                a += "Vendor: %s" % str(value["vendor"])
+            except Exception:
+                a += "Vendor: --"
+            a += "\n"
+
+            try:
+                a += "ProduceData: %s" % str(value["data"])
+            except Exception:
+                a += "ProduceData: --"
+            a += "\n"
+
+            try:
+                a += "Serial:%s" % str(value["serial"])
+            except Exception:
+                a += "Serial:--"
+            a += "\n"
+
+            try:
+                a += "Version:%s" % str(value["version"])
+            except Exception:
+                a += "Version:--"
+            a += "\n"
+
+            result_list_str.append(a)
+
+    print "\n".join(result_list_str)
+    sys.exit(0)
+
+
+# 2018-1-12
+@FunctionTimeout(timeout=40)
+def do_power_query(query_node):
+    self_host_name = commands.getoutput("hostname")
+    if query_node == self_host_name:
+        do_local_query()
+    else:
+        result = run_remote_cmd(cmd="icfs-system-power --local-query", tgt=query_node)
+        retcode = result[query_node]["retcode"]
+        stdout = result[query_node]["stdout"]
+        stderr = result[query_node]["stderr"]
+        if not retcode:
+            print stdout
+            sys.exit(0)
+        elif retcode == -1:
+            error("057", query_node)
+        else:
+            print stdout
+            sys.exit(1)
+
+
+def rack_power_query():
+    rack_power_sn = {}
+    rack_info_cache = 'cat /usr/local/ism/Agent/src/Cache/rack_info.txt'
+    rack_info = commands.getoutput(rack_info_cache)
+    if rack_info == '' or 'No such file' in rack_info:
+        error('3005')
+    else:
+        rack_info_split = re.split('\n\s*\n', rack_info)
+        for r in rack_info_split:
+            if 'PSUID' in r and 'SN' in r:
+                psu_sn = r.splitlines()
+                if len(psu_sn) < 3:
+                    error('3005')
+                else:
+                    for sn in psu_sn[2:]:
+                        sn_dict = {}
+                        rack_sn = sn.split()
+                        if len(rack_sn) < 2:
+                            error('3005')
+                        sn_dict = {rack_sn[0]:rack_sn[1]}
+                        rack_power_sn.update(sn_dict)
+
+            elif 'PSUID' in r and 'Status' in r and 'Health' in r:
+                psu_split = r.splitlines()
+                if len(psu_split) < 3:
+                    error('3005')
+                else:
+                    for psu_line in psu_split[2:]:
+                        psu = psu_line.split()
+                        if len(psu) < 3:
+                            error('3005')
+                        power_name = psu[0].replace('PSU-', 'power')
+                        power_slot = psu[0][-2:]
+                        status = 'normal'
+                        if psu[1] != 'On':
+                            status = 'abnormal'
+                        serial = '0'      
+                        if psu[0] in rack_power_sn:
+                            serial = rack_power_sn[psu[0]]
+                        print 'Name:'+power_name
+                        print 'Slot:'+power_slot
+                        print 'State:'+status
+                        print 'Serial:'+serial
+                        if psu_line != psu_split[2:][-1]:
+                            print ''
+
+
+def usage():
+    print '''Help(-h|--help)for icfs-system-power:
+Usage:
+>> icfs-system-power -- --node node ---- --query --------------------------------><
+Functions: Query powers info
+Options:
+  --query:  query powers info
+  --node:   node name
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0)
+
+if __name__ == '__main__':
+    name_list = []
+    node = None
+    operation = None
+    try:
+        opt_parser = OptParser.OptParser()
+        # help information
+        opt_parser.append("help", "{-h|--help}")
+        # query commands
+        opt_parser.append("local-query", "--local-query")
+        opt_parser.append("query", "--node=,--query")
+        # parse arguments
+        m_name, m_opts = opt_parser.parse(sys.argv[1:])
+    except Exception, err:
+        print "Error(610): Invalid input!", err
+        sys.exit(1)
+    # try:
+    #     opts, argv = getopt.getopt(sys.argv[1:], 'h', ['node=', 'query', 'help', 'local_query'])
+    # except getopt.GetoptError, err:
+    #     error('002')
+    # if '-h' in sys.argv or '--help' in sys.argv:
+    #     if len(opts) != 1 or argv != []:
+    #         error('002')
+    #     else:
+    #         usage()
+    # if argv:
+    #     error('002')
+    for k, v in m_opts:
+        if '--node' == k:
+            node = v
+    if m_name == "help":
+        usage()
+    if m_name == "local-query":
+        do_local_query()
+    if m_name == "query":
+        if node != 'smartrack':
+            if node not in get_hostname_list():
+                error('3002')
+            do_power_query(node)
+        else:
+            if not is_rack():
+                error('3007')
+            rack_power_query()

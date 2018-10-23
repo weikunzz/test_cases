@@ -1,0 +1,822 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+
+# change log
+# 20161228 shaoning (ftp_create_user) batch create ftp user in task-manage
+# 20170103 shaoning (limit_check) limit can be 0(indicate no limit)
+# 20170112 shaoning Restart vsftpd service after : ftp_global_set, ftp_user_set, ftp_path_delete, ftp_user_delete
+# 20170214 shaoning (username_check) add user name format check
+
+import os
+import sys
+import getopt
+import commands
+import platform
+import re
+
+from LinuxConfigParser import LinuxConfigParser
+
+
+def usage():
+    print '''Help(-h|--help) for icfs-admin-ftp:
+Usage:
+>> icfs-admin-ftp ----+ --create +----><
+                      + --set    +
+                      + --delete +
+                      ' --query  '
+Functions: Create/Set/Delete/Query FTP service
+Options: 
+  --create:  create vsftpd service
+  --set:     modify vsftpd service
+  --delete:  delete vsftpd service
+  --query:   query vsftpd service
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-ftp --create:
+Usage: 
+>> ics-admin-ftp ---- --create ---- -p path --+--------------------------------------------+----><
+                                              '-- --user user_name ---- -a allowed_cmds --'
+Functions: Create FTP service, set share path or add user with allowed commands at the same time
+Options:
+  -p:      path of ftp service
+  --user:  user to create
+  -a:      allowed commands(values: list, stor, retr, dele, rn, mkd)
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-ftp --set:
+Usage:
+>> icfs-admin-ftp ---- --set ---- -p path --+--------------------------------------------+----><
+                                            '-- --user user_name ---- -a allowed_cmds --'
+Functions: Set FTP service, set user's allowed commands
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-ftp --delete:
+Usage:
+>> icfs-admin-ftp ---- --delete ---- -p path --+----------------------+----><
+                                               '-- --user user_name --'
+Functions: Delete FTP service, delete user
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-ftp --query:
+Usage:
+icfs-admin-ftp ---- --query ----+---------------+----><
+                                '-- -p path   --'
+                                '-- --service --'
+Functions: Query the ftp path in cluster, or query user information in ftp path, or query ftp service parameters
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-ftp --stop\start\status:
+Usage:
+icfs-admin-ftp --+-- --start  --+--><
+                 +-- --stop   --+
+                 '-- --status --'
+Functions: Start/stop ftp service, or check ftp service status
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+
+
+class osInfo():
+    def __init__(self, os_name, os_version, os_edtion):
+        self.os_name = os_name
+        self.os_version = os_version
+        self.os_edtion = os_edtion
+
+
+def get_os_type():
+    os_info = platform.linux_distribution()
+    return osInfo(os_info[0], os_info[1], os_info[2])
+
+
+def Error(num, *description):
+    if num == 610:
+        print "Error(610): Invalid input!"
+    elif num == 1900:
+        print "Error(1900): Invalid FTP user",
+    elif num == 1901:
+        print "Error(1901): Invalid FTP limit number"
+    elif num == 1902:
+        print "Error(1902): Invalid FTP path"
+    elif num == 1903:
+        print "Error(1903): Invalid FTP command"
+    elif num == 1904:
+        print "Error(1904): FTP user already exists in path %s" % description
+    elif num == 1905:
+        print "Error(1905): FTP path already exists"
+    elif num == 1906:
+        print "Error(1906): Read FTP config file failed: %s" % description
+    elif num == 1907:
+        print "Error(1907): Write FTP config file failed: %s" % description
+    elif num == 1908:
+        print "Error(1908): Failed to copy FTP config file to other host"
+    elif num == 1909:
+        print "Error(1909): Too many FTP users to create, must be less than or equal to 10"
+    elif num == 1910:
+        print "Error(1910): FTP path not exist"
+    elif num == 1911:
+        print "Error(1911): FTP user not exist in path %s" % description
+    elif num == 1912:
+        print "Error(1912): FTP limit number must be greater than or equal to 0"
+    elif num == 299:
+        print "Error(299): Invalid salt service"
+    elif num == 3006:
+        print "Error(3006): This type of Tasks is maximizing"
+    else:
+        print "Error(1399): Unknown error"
+
+    sys.exit(1)
+
+
+# split users and commands
+def split_user_cmd(user_names, user_commands):
+    name_cmd_list = []
+    name_list = user_names.split("/")
+    cmd_list = user_commands.split("/")
+    if len(name_list) == len(cmd_list):
+        name_cmd_list = zip(name_list, cmd_list)
+    else:
+        Error(610)
+
+    return name_cmd_list
+
+
+def username_check(username):
+    # check user name format
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9_]{0,31}$", username) is None:
+        Error(1900)
+
+    # check whether user exists
+    if commands.getstatusoutput("id -u %s" % username)[0] != 0:
+        Error(1900)
+
+
+def limit_check(limit):
+    try:
+        if int(limit) < 0:
+            Error(1912)
+    except ValueError, e:
+        Error(1901)
+
+
+def parse_commands(cmds):
+    # split commands
+    cmd_list = [] if cmds == "none" else cmds.split(",")
+    # remove dumplicate command
+    cmd_list = list(set(cmd_list))
+    real_cmd_list = ["CWD", "CDUP", "MODE", "PASS", "PORT", "ABOR", "PWD", "QUIT", "TYPE", "USER", "REST",
+                     "PASV", "HELP", "ACCT", "APPE", "NOOP", "REIN", "STAT", "STOU", "STRU", "SYST", "SITE"]
+    for cmd in cmd_list:
+        if cmd == "list":
+            real_cmd_list += ["LIST", "SIZE", "MDTM", "NLST"]
+        elif cmd == "stor":
+            real_cmd_list += ["STOR"]
+        elif cmd == "retr":
+            real_cmd_list += ["RETR"]
+        elif cmd == "dele":
+            real_cmd_list += ["DELE", "RMD"]
+        elif cmd == "rn":
+            real_cmd_list += ["RNFR", "RNTO"]
+        elif cmd == "mkd":
+            real_cmd_list += ["MKD"]
+        else:
+            print "Invalid command:", cmd
+            Error(1903)
+    
+    return real_cmd_list
+
+
+def ftp_path_create():
+    # whether or not icfs-fuse exist
+    if not commands.getstatusoutput('mount|grep -w /mnt/icfs')[1]:
+        commands.getstatusoutput('icfs-fuse /mnt/icfs')
+    
+    if not os.path.isdir('/mnt/icfs%s' % path):
+        Error(1902)
+    
+    # check whether dir is already exist
+    dir_list = []
+    if os.path.exists("/etc/vsftpd/dir_list"):
+        try:
+            with open("/etc/vsftpd/dir_list", "r") as f:
+                content = f.read()
+                dir_list = content.split("\n")
+                dir_list = [i for i in dir_list if i != ""]
+        except IOError, e:
+            Error(1906, "/etc/vsftpd/dir_list")
+    
+    if path in dir_list:
+        Error(1905)
+    
+    dir_list.append(path)
+    try:
+        with open("/etc/vsftpd/dir_list", "w") as f:
+            f.write("\n".join(dir_list))
+    except IOError, e:
+        Error(1907, "/etc/vsftpd/dir_list")
+    
+    status, output = commands.getstatusoutput("salt-cp '*' /etc/vsftpd/dir_list /etc/vsftpd/dir_list")
+    output = output.split('\n')
+    for check_salt in output:
+        if not check_salt.find("True") >= 0:
+            Error(1908)
+
+
+def ftp_user_create():
+    # whether or not icfs-fuse exist
+    if not commands.getstatusoutput('mount|grep -w icfs-fuse')[1]:
+        commands.getstatusoutput('icfs-fuse /mnt/icfs')
+    
+    abs_path = "/mnt/icfs" + path
+    if not os.path.isdir(abs_path):
+        Error(1902)
+    
+    # check whether dir is already exist
+    if not os.path.exists("/etc/vsftpd/dir_list"):
+        Error(1910)
+    
+    dir_list = []
+    try:
+        with open("/etc/vsftpd/dir_list", "r") as f:
+            content = f.read()
+            dir_list = content.split("\n")
+            dir_list = [i for i in dir_list if i != ""]
+    except IOError, e:
+        Error(1906, "/etc/vsftpd/dir_list")
+    
+    if path not in dir_list:
+        Error(1910)
+
+    # split users and commands
+    user_cmd_list = split_user_cmd(user_name, cmds_allowed)
+    if len(user_cmd_list) > 10:
+        Error(1909)
+
+    # check users and commands
+    for name, cmd in user_cmd_list:
+        username_check(name)
+        parse_commands(cmd)
+    
+    # make sure directory "/etc/vsftpd/userconfig/" exists
+    commands.getstatusoutput("salt '*' cmd.run 'mkdir -p /etc/vsftpd/userconfig/' ")
+
+    # check if the same type task is running
+    task = commands.getoutput("icfs-admin-task --query")
+    if "CreateFtpUser" in task:
+        Error(3006)
+
+    os.system("python /usr/bin/task-manage Ftp_create_user %s %s %s > /dev/null &" % (path, user_name, cmds_allowed))
+
+
+def ftp_path_query():
+    dir_list = []
+    if os.path.exists("/etc/vsftpd/dir_list"):
+        try:
+            with open("/etc/vsftpd/dir_list", "r") as f:
+                content = f.read()
+                dir_list = content.split("\n")
+                dir_list = [i for i in dir_list if i != ""]
+        except IOError, e:
+            Error(1906, "/etc/vsftpd/dir_list")
+    
+    print "FTP_path"
+    for dir_path in dir_list:
+        print dir_path
+
+
+def ftp_user_query():
+    # check whether dir is already exist
+    dir_list = []
+    if os.path.exists("/etc/vsftpd/dir_list"):
+        try:
+            with open("/etc/vsftpd/dir_list", "r") as f:
+                content = f.read()
+                dir_list = content.split("\n")
+                dir_list = [i for i in dir_list if i != ""]
+        except IOError, e:
+            Error(1906, "/etc/vsftpd/dir_list")
+    
+    if path not in dir_list:
+        Error(1910)
+    
+    print "%-15s %s" % ("Clients", "allowed_cmds")
+    abs_path = "/mnt/icfs" + path
+    if os.path.isdir("/etc/vsftpd/userconfig"):
+        user_file_list = os.listdir("/etc/vsftpd/userconfig")
+        for user_file in user_file_list:
+            user_file_name = os.path.join("/etc/vsftpd/userconfig", user_file)
+            if not os.path.isfile(user_file_name):
+                continue
+            
+            parser = LinuxConfigParser()
+            if not parser.read(user_file_name):
+                continue
+            
+            user_local_root = parser.get("local_root")
+            if user_local_root != abs_path:
+                continue
+
+            user_cmds_allowed_list = []
+            user_cmds_allowed = parser.get("cmds_allowed")
+            if user_cmds_allowed is not None:
+                user_cmds_allowed_list = user_cmds_allowed.split(",")
+            cmd_list = []
+            if "LIST" in user_cmds_allowed_list:
+                cmd_list.append("list")
+            if "STOR" in user_cmds_allowed_list:
+                cmd_list.append("stor")
+            if "RETR" in user_cmds_allowed_list:
+                cmd_list.append("retr")
+            if "DELE" in user_cmds_allowed_list:
+                cmd_list.append("dele")
+            if "RNFR" in user_cmds_allowed_list:
+                cmd_list.append("rn")
+            if "MKD" in user_cmds_allowed_list:
+                cmd_list.append("mkd")
+            if cmd_list == []:
+                cmd_list.append("none")
+            print "%-15s %s" % (user_file, ",".join(cmd_list))
+
+
+def ftp_global_query():
+    parser = LinuxConfigParser()
+    if not parser.read("/etc/vsftpd/vsftpd.conf"):
+        Error(1906, "/etc/vsftpd/vsftpd.conf")
+    
+    current_limit = parser.get("max_clients")
+    print "Client number limit:", current_limit
+
+
+def ftp_path_delete():
+    # check whether dir is already exist
+    dir_list = []
+    if os.path.exists("/etc/vsftpd/dir_list"):
+        try:
+            with open("/etc/vsftpd/dir_list", "r") as f:
+                content = f.read()
+                dir_list = content.split("\n")
+                dir_list = [i for i in dir_list if i != ""]
+        except IOError, e:
+            Error(1906, "/etc/vsftpd/dir_list")
+    
+    if path not in dir_list:
+        Error(1910)
+    
+    dir_list.remove(path)
+    try:
+        with open("/etc/vsftpd/dir_list", "w") as f:
+            f.write("\n".join(dir_list))
+    except IOError, e:
+        Error(1907, "/etc/vsftpd/dir_list")
+
+    # copy dir_list to other nodes
+    status, output = commands.getstatusoutput("salt-cp '*' /etc/vsftpd/dir_list /etc/vsftpd/dir_list")
+    output = output.split('\n')
+    for check_salt in output:
+        if not check_salt.find("True") >= 0:
+            Error(1908)
+    
+    delete_user_list = []
+    parser = LinuxConfigParser()
+    abs_path = "/mnt/icfs" + path
+    if os.path.isdir("/etc/vsftpd/userconfig"):
+        user_file_list = os.listdir("/etc/vsftpd/userconfig")
+        for user_file in user_file_list:
+            user_file_name = os.path.join("/etc/vsftpd/userconfig", user_file)
+            if not os.path.isfile(user_file_name):
+                continue
+            
+            if not parser.read(user_file_name):
+                continue
+            
+            user_local_root = parser.get("local_root")
+            if user_local_root != abs_path:
+                continue
+            
+            delete_user_list.append(user_file)
+            # filter salt stderror so that output can be parsed correctly
+            commands.getstatusoutput("salt '*' cmd.run 'rm -f %s' 2>/dev/null" % user_file_name)
+    
+    # delete user from user_list_file
+    if len(delete_user_list) > 0:
+        user_list = []
+        try:
+            with open("/etc/vsftpd/user_list", "r") as f:
+                content = f.read()
+                user_list = content.split("\n")
+                user_list = [i for i in user_list if i != ""]
+        except IOError, e:
+            Error(1906, "/etc/vsftpd/user_list")
+        
+        user_list_changed = False
+        for user_to_delete in delete_user_list:
+            if user_to_delete in user_list:
+                user_list.remove(user_to_delete)
+                user_list_changed = True
+        
+        if user_list_changed:
+            try:
+                with open("/etc/vsftpd/user_list", "w") as f:
+                    f.write("\n".join(user_list))
+            except IOError, e:
+                Error(1907, "/etc/vsftpd/user_list")
+            
+            status, output = commands.getstatusoutput("salt-cp '*' /etc/vsftpd/user_list /etc/vsftpd/user_list")
+            output = output.split('\n')
+            for check_salt in output:
+                if not check_salt.find("True") >= 0:
+                    Error(1908)
+
+        # filter salt stderror so that output can be parsed correctly
+        commands.getstatusoutput("salt '*' cmd.run 'service vsftpd restart' 2>/dev/null")
+
+
+def ftp_user_delete():
+    # check whether dir is already exist
+    dir_list = []
+    if os.path.exists("/etc/vsftpd/dir_list"):
+        try:
+            with open("/etc/vsftpd/dir_list", "r") as f:
+                content = f.read()
+                dir_list = content.split("\n")
+                dir_list = [i for i in dir_list if i != ""]
+        except IOError, e:
+            Error(1906, "/etc/vsftpd/dir_list")
+    
+    if path not in dir_list:
+        Error(1910)
+    
+    parser = LinuxConfigParser()
+    abs_path = "/mnt/icfs" + path
+    user_file_name = os.path.join("/etc/vsftpd/userconfig", user_name)
+    if not os.path.isfile(user_file_name):
+        Error(1911, path)
+    
+    if not parser.read(user_file_name):
+        Error(1906, user_file_name)
+    
+    user_local_root = parser.get("local_root")
+    if user_local_root != abs_path:
+        Error(1911, path)
+
+    # filter salt stderror so that output can be parsed correctly
+    commands.getstatusoutput("salt '*' cmd.run 'rm -f %s' 2>/dev/null" % user_file_name)
+    
+    # delete user from user_list_file
+    user_list = []
+    try:
+        with open("/etc/vsftpd/user_list", "r") as f:
+            content = f.read()
+            user_list = content.split("\n")
+            user_list = [i for i in user_list if i != ""]
+    except IOError, e:
+        Error(1906, "/etc/vsftpd/user_list")
+    
+    if user_name in user_list:
+        user_list.remove(user_name)
+        try:
+            with open("/etc/vsftpd/user_list", "w") as f:
+                f.write("\n".join(user_list))
+        except IOError, e:
+            Error(1907, "/etc/vsftpd/user_list")
+        
+        status, output = commands.getstatusoutput("salt-cp '*' /etc/vsftpd/user_list /etc/vsftpd/user_list")
+        output = output.split('\n')
+        for check_salt in output:
+            if not check_salt.find("True") >= 0:
+                Error(1908)
+
+    # filter salt stderror so that output can be parsed correctly
+    commands.getstatusoutput("salt '*' cmd.run 'service vsftpd restart' 2>/dev/null")
+
+
+def ftp_global_set():
+    # check limit
+    limit_check(limit)
+    parser = LinuxConfigParser()
+    if not parser.read("/etc/vsftpd/vsftpd.conf"):
+        Error(1906, "/etc/vsftpd/vsftpd.conf")
+    
+    current_limit = parser.get("max_clients")
+    if current_limit != limit:
+        parser.set("max_clients", limit)
+        if not parser.write("/etc/vsftpd/vsftpd.conf"):
+            Error(1907, "/etc/vsftpd/vsftpd.conf")
+        
+        status, output = commands.getstatusoutput("salt-cp '*' /etc/vsftpd/vsftpd.conf /etc/vsftpd/vsftpd.conf")
+        output = output.split('\n')
+        for check_salt in output:
+            if not check_salt.find("True") >= 0:
+                Error(1908)
+
+        # filter salt stderror so that output can be parsed correctly
+        commands.getstatusoutput("salt '*' cmd.run 'service vsftpd restart' 2>/dev/null")
+
+
+def ftp_user_set():
+    # check user name
+    username_check(user_name)
+    
+    # check and parse commands
+    commands_list = parse_commands(cmds_allowed)
+    
+    # whether or not icfs-fuse exist
+    if not commands.getstatusoutput('mount|grep -w icfs-fuse')[1]:
+        commands.getstatusoutput('icfs-fuse /mnt/icfs')
+    
+    abs_path = "/mnt/icfs" + path
+    if not os.path.isdir(abs_path):
+        Error(1902)
+    
+    # check whether dir is already exist
+    dir_list = []
+    if os.path.exists("/etc/vsftpd/dir_list"):
+        try:
+            with open("/etc/vsftpd/dir_list", "r") as f:
+                content = f.read()
+                dir_list = content.split("\n")
+                dir_list = [i for i in dir_list if i != ""]
+        except IOError, e:
+            Error(1906, "/etc/vsftpd/dir_list")
+    
+    if path not in dir_list:
+        Error(1910)
+    
+    if not os.path.exists("/etc/vsftpd/userconfig"):
+        os.mkdir("/etc/vsftpd/userconfig")
+    
+    parser = LinuxConfigParser()
+    user_file_name = "/etc/vsftpd/userconfig/%s" % user_name
+    if not os.path.exists(user_file_name):
+        Error(1911, path)
+    
+    if not parser.read(user_file_name):
+        Error(1906, user_file_name)
+    
+    local_root = parser.get("local_root")
+    if local_root != abs_path:
+        Error(1911, path)
+    
+    parser.set("cmds_allowed", ",".join(commands_list))
+    if not parser.write(user_file_name):
+        Error(1907, user_file_name)
+    
+    status, output = commands.getstatusoutput("salt-cp '*' %s %s" % (user_file_name, user_file_name))
+    output = output.split('\n')
+    for check_salt in output:
+        if not check_salt.find("True") >= 0:
+            Error(1908)
+
+    # filter salt stderror so that output can be parsed correctly
+    commands.getstatusoutput("salt '*' cmd.run 'service vsftpd restart' 2>/dev/null")
+
+
+def salt_stat_check():
+    salt_ck = commands.getoutput("service salt-master status")
+    if "unrecognized service" in salt_ck:
+        Error(299)
+    elif "stopped" in salt_ck:
+        salt_rst = commands.getoutput("service salt-master start")
+        if not salt_rst or "FAILED" in salt_rst:
+            Error(299)
+    salt_down = commands.getoutput("salt-run manage.down")
+    if "YPBINDPROC_DOMAIN: Domain not bound" in salt_down:
+        salt_yp = salt_down.lstrip("YPBINDPROC_DOMAIN: Domain not bound")
+    else:
+        salt_yp = salt_down
+    if salt_yp:
+        salt_dd = salt_yp.replace("\n", ",")
+        salt_dl = salt_dd.lstrip(',')
+        #    print "Invalid: ",salt_dl
+        print "Error(307): Salt service down in %s" % salt_dl
+        sys.exit(1)
+    salt_key = commands.getoutput("salt-key -l acc")
+    salt_key_l = salt_key.split('\n')
+    if "Accepted Keys:" in salt_key_l:
+        salt_key_l.remove("Accepted Keys:")
+    if "YPBINDPROC_DOMAIN: Domain not bound" in salt_key_l:
+        salt_key_l.remove("YPBINDPROC_DOMAIN: Domain not bound")
+    if not salt_key_l:
+        Error(299)
+
+
+def ftp_start():
+    # start ftp on all nodes
+    # start success return 1
+    # start error return 0
+    host_list_info = commands.getoutput("salt-key -l acc | sed '1d'")
+    host_list = host_list_info.splitlines()
+    status = 0
+    os_type = get_os_type()
+    if os_type.os_version.startswith("7."):
+        for host in host_list:
+            commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                               "-o StrictHostKeyChecking=no %s 'systemctl start vsftpd' " % host)
+            out = commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                                     "-o StrictHostKeyChecking=no %s 'systemctl status vsftpd' | grep Active" % host)
+            if "running" in out:
+                status = 1
+    else:
+        for host in host_list:
+            commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                               "-o StrictHostKeyChecking=no %s 'service vsftpd start'" % host)
+            out = commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                                     "-o StrictHostKeyChecking=no %s 'service vsftpd status'" % host)
+            if "running" in out:
+                status = 1
+
+    return status
+
+
+def ftp_status():
+    # check ftp status
+    os_type = get_os_type()
+    out = commands.getoutput("salt-key -l acc | sed '1d'")
+    host_list = out.split("\n")
+    success = False
+    for host in host_list:
+        if os_type.os_version.startswith("7."):
+            cmd = "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no " \
+                  "-o StrictHostKeyChecking=no %s 'systemctl status vsftpd | grep Active' " % host
+        else:
+            cmd = "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no " \
+                  "-o StrictHostKeyChecking=no %s 'service vsftpd status' " % host
+
+        stat, output = commands.getstatusoutput(cmd)
+        if stat == 65280:
+            print (host + ":").ljust(15), "unknown"
+        elif "running" in output:
+            print (host + ":").ljust(15), "running"
+            success = True
+        else:
+            print (host + ":").ljust(15), "dead"
+            success = True
+
+    sys.exit(0 if success else 1)
+
+
+def ftp_stop():
+    # stop all ftp
+    # stop success return 1
+    # stop error return 0
+    host_list_info = commands.getoutput("salt-key -l acc | sed '1d'")
+    host_list = host_list_info.splitlines()
+    status = 1
+    os_type = get_os_type()
+    if os_type.os_version.startswith("7."):
+        for host in host_list:
+            commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                               "-o StrictHostKeyChecking=no %s 'systemctl stop vsftpd'" % host)
+            out = commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                                     "-o StrictHostKeyChecking=no %s 'systemctl status vsftpd | grep Active'" % host)
+            if "running" in out:
+                status = 0
+    else:
+        for host in host_list:
+            commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                               "-o StrictHostKeyChecking=no %s 'service vsftpd stop'" % host)
+            out = commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                                     "-o StrictHostKeyChecking=no %s 'service vsftpd status'" % host)
+            if "running" in out:
+                status = 0
+
+    return status
+
+
+if __name__ == '__main__':
+    operation = None
+    path = None
+    cmds_allowed = None
+    user_name = None
+    limit = None
+    
+    try:
+        options, args = getopt.getopt(sys.argv[1:], "p:a:h", ["help", "create", "set", "query", "delete", "user=",
+                                                              "limit=", "service", "start", "stop", "status"])
+    except getopt.GetoptError, err:
+        Error(610)
+        sys.exit(1)
+    
+    if options == [] or args != []:
+            Error(610)
+            sys.exit(1)
+    
+    for k, v in options:
+        if k in ("-h", "--help"):
+            usage()
+            sys.exit(0)
+        elif k == "-p":
+            path = v
+        elif k == "--user":
+            user_name = v
+        elif k == "-a":
+            cmds_allowed = v
+        elif k == "--limit":
+            limit = v
+        elif k == "--create":
+            operation = "create"
+        elif k == "--set":
+            operation = "set"
+        elif k == "--delete":
+            operation = "delete"
+        elif k == "--query":
+            operation = "query"
+        elif k == "--start":
+            operation = "start"
+        elif k == "--stop":
+            operation = "stop"
+        elif k == "--status":
+            operation = "status"
+    
+    if operation == "create":
+        if len(sys.argv) == 4 and sys.argv[1] == "--create" and sys.argv[2] == "-p":
+            salt_stat_check()
+            ftp_path_create()
+        elif len(sys.argv) == 8 and sys.argv[1] == "--create" and sys.argv[2] == "-p" and \
+                sys.argv[4] == "--user" and sys.argv[6] == "-a":
+            salt_stat_check()
+            ftp_user_create()
+        else:
+            Error(610)
+            sys.exit(1)
+    elif operation == "set":
+        if len(sys.argv) == 4 and sys.argv[1] == "--set" and sys.argv[2] == "--limit":
+            salt_stat_check()
+            ftp_global_set()
+        elif len(sys.argv) == 8 and sys.argv[1] == "--set" and sys.argv[2] == "-p" and \
+                sys.argv[4] == "--user" and sys.argv[6] == "-a":
+            salt_stat_check()
+            ftp_user_set()
+        else:
+            Error(610)
+            sys.exit(1)
+    elif operation == "delete":
+        if len(sys.argv) == 4 and sys.argv[1] == "--delete" and sys.argv[2] == "-p":
+            salt_stat_check()
+            ftp_path_delete()
+        elif len(sys.argv) == 6 and sys.argv[1] == "--delete" and sys.argv[2] == "-p" and sys.argv[4] == "--user":
+            salt_stat_check()
+            ftp_user_delete()
+        else:
+            Error(610)
+            sys.exit(1)
+    elif operation == "query":
+        if len(sys.argv) == 2 and sys.argv[1] == "--query":
+            ftp_path_query()
+        elif len(sys.argv) == 4 and sys.argv[1] == "--query" and sys.argv[2] == "-p":
+            ftp_user_query()
+        elif len(sys.argv) == 3 and sys.argv[1] == "--query" and sys.argv[2] == "--service":
+            ftp_global_query()
+        else:
+            Error(610)
+            sys.exit(1)
+    elif operation == "start":
+        if len(sys.argv) == 2 and sys.argv[1] == "--start":
+            salt_stat_check()
+            flag = ftp_start()
+            if flag == 1:
+                print "start ftp success"
+                sys.exit(0)
+            else:
+                print "start ftp error"
+                sys.exit(1)
+        else:
+            Error(610)
+            sys.exit(1)
+    elif operation == "stop":
+        if len(sys.argv) == 2 and sys.argv[1] == "--stop":
+            salt_stat_check()
+            flag = ftp_stop()
+            if flag == 1:
+                print "stop ftp success"
+                sys.exit(0)
+            else:
+                print "stop ftp error"
+                sys.exit(1)
+        else:
+            Error(610)
+            sys.exit(1)
+    elif operation == "status":
+        if len(sys.argv) == 2 and sys.argv[1] == "--status":
+            # salt_stat_check()
+            ftp_status()
+        else:
+            Error(610)
+            sys.exit(1)
+    else:
+        Error(610)
+        sys.exit(1)

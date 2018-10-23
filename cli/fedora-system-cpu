@@ -1,0 +1,249 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+
+
+#import getopt
+import sys
+import commands
+import re
+from icfs_util import get_remote_host_list, run_remote_ping
+from icfs_util import error
+#import multiprocessing
+#import signal
+from icfs_util import run_local_cmd, run_remote_cmd
+from FunctionTimeout import FunctionTimeout
+import OptParser
+
+
+def get_hostname_list():
+    hostname = []
+    pattern = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(.*?)(?:#.*)?$")
+    try:
+        with open("/etc/hosts", "r") as fp:
+            lines = fp.readlines()
+    except IOError:
+        return hostname
+
+    for line in lines:
+        m = pattern.match(line)
+        if m is None:
+            continue
+        if m.group(2) == 'localhost localhost.localdomain localhost4 localhost4.localdomain4':
+            continue
+        hostname.append(m.group(2))
+
+    return hostname
+
+
+# def run_remote_cmd(tgt, cmd):
+#     try:
+#         ret_dict = {}
+#         status, output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+#                                   -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+#                                   'root@%s' \"%s\"" % (tgt, cmd))
+#         # print "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no 'root@%s' \"%s\"" % (tgt, cmd)
+#         ret_dict[tgt] = {"retcode": status, "stdout": output, "stderr": ""}
+#         return ret_dict
+#     except Exception, err:
+#         print "Error(054): Failed to run command on remote hosts"
+#         print err
+#         sys.exit(1)
+
+
+def remote_host_stat_check():
+    host_list = get_remote_host_list()
+    if not host_list:
+        print "Error(056): Remote hosts list is empty"
+        sys.exit(1)
+
+    ret_dict = run_remote_ping("*")
+    fail_list = [name for name, ret in ret_dict.items() if ret["status"] is False]
+    if fail_list:
+        print "Error(057): Remote hosts %s is not accessable" % ",".join(fail_list)
+        sys.exit(1)
+
+
+# 2018-1-12
+@FunctionTimeout(timeout=40)
+def cpu_query_all():
+    cmd = "icfs-system-cpu --query --local"
+    out_put = run_remote_cmd('*', cmd)
+    for host_name, return_info in out_put.iteritems():
+        print "Node: " + str(host_name)
+        print return_info["stdout"]
+
+
+def cpu_query_all_local():
+    cmd = "ipmitool sensor|grep -E 'CPU[0-9A-Za-z]+_Status\'| awk \'{print $1,$7}'"
+    result = run_local_cmd(cmd, timeout=20)
+    cpu_info = result["stdout"]
+    cpu_info_list = cpu_info.split("\n")
+    print "Name\tSlot\tState"
+    for info in cpu_info_list:
+        cpu_status = 'abnormal'
+        if info.split()[1].strip("|") == "0x8080" or info.split()[1].strip("|") == "0x0080":
+            cpu_status = 'normal'
+        cpu_name = info.split()[0].replace('_Status', '')
+        re_slot = re.findall('\d+', cpu_name)
+        cpu_slot = re_slot[0]
+        print cpu_name + '\t' + cpu_slot + '\t' + cpu_status
+
+
+# class CpuQuery(multiprocessing.Process):
+#
+#     def __init__(self, query_node):
+#         super(CpuQuery, self).__init__()
+#         self.query_node = query_node
+#
+#     def run(self):
+#         query_node = self.query_node
+#         count = 0
+#         # get cpu version and number
+#         output = run_remote_cmd(query_node, "dmidecode -s processor-version")
+#         output = output[query_node]["stdout"]
+#         cpu_version = [item for item in output.split("\n") if not re.match("^#\s.*$", item)]
+#         output = run_remote_cmd(query_node, "ipmitool sensor|awk -F '|' '/^CPU[0-9]+_Temp/ || /^CPU[0-9]+_VCORE/ "
+#                                             "|| /CPU[0-9]+_Status/{print \$1, \$2, \$3, \$4}'")
+#         output = output[query_node]["stdout"]
+#         query_cpu_info = output.split("\n")
+#         cpu_temp = query_cpu_info[0:len(cpu_version)]
+#         cpu_vcore = query_cpu_info[len(cpu_version):len(cpu_version)*2]
+#         cpu_stat = query_cpu_info[len(cpu_version)*2:len(cpu_version)*3]
+#         try:
+#             for i in range(0, len(cpu_version)):
+#                 print "CPU ID: {0}".format(count)
+#                 print "Health: normal" if cpu_stat[i].split()[-1] == "0x8080" or cpu_stat[i].split()[-1] == "0x0080" else \
+#                     "Health: abnormal"
+#                 print "Model: {0}".format(cpu_version[i])
+#                 temp_item = cpu_temp[i].split()
+#                 print "Core Temp: {0}".format(temp_item[1]+' '+temp_item[2])
+#                 temp_item = cpu_vcore[i].split()
+#                 print "Core Volts: {0}".format(temp_item[1] + ' ' + temp_item[2])
+#                 # currently have no method to look for ECC, so hard code to NULL
+#                 print "ECC_ErrECC: NULL"
+#                 if count != len(cpu_version) - 1:
+#                     print "\n"
+#                 count += 1
+#         except IndexError, index_error:
+#             error('3001')
+
+
+def do_local_query():
+    count = 0
+    # get cpu version and number
+    output = run_local_cmd("dmidecode -s processor-version", timeout=10)
+    if output["retcode"]:
+        print "Error(1399):Unknown error. %s" % output["stderr"]
+        sys.exit(1)
+    output = output["stdout"]
+    cpu_version = [item for item in output.split("\n") if not re.match("^#\s.*$", item)]
+    # get cpu temp, vcore, stat info by ipmitool
+    output = run_local_cmd("ipmitool sensor|awk -F '|' '/^CPU[0-9]+_Temp/ || /^CPU[0-9]+_VCORE/ || /CPU[0-9]+_Status/{print $1, $2, $3, $4}'", timeout=20)
+    if output["retcode"]:
+        print "Error(1399):Unknown error %s" % output["stderr"]
+        sys.exit(1)
+    output = output["stdout"]
+    query_cpu_info = output.split("\n")
+    cpu_temp = query_cpu_info[0:len(cpu_version)]
+    cpu_vcore = query_cpu_info[len(cpu_version):len(cpu_version) * 2]
+    cpu_stat = query_cpu_info[len(cpu_version) * 2:len(cpu_version) * 3]
+    try:
+        result = ""
+        for i in range(0, len(cpu_version)):
+            result += "CPU ID: {0}".format(count) + "\n"
+            result += "Health: normal\n" if cpu_stat[i].split()[-1] == "0x8080" or cpu_stat[i].split()[-1] == "0x0080" else "Health: abnormal\n"
+            result += "Model: {0}".format(cpu_version[i]) + "\n"
+            temp_item = cpu_temp[i].split()
+            result += "Core Temp: {0}".format(temp_item[1] + ' ' + temp_item[2]) + "\n"
+            temp_item = cpu_vcore[i].split()
+            result += "Core Volts: {0}".format(temp_item[1] + ' ' + temp_item[2]) + "\n"
+            # currently have no method to look for ECC, so hard code to NULL
+            result += "ECC_ErrECC: NULL" + "\n"
+            if count != len(cpu_version) - 1:
+                result += "\n"
+            count += 1
+        print result
+        sys.exit(0)
+    except IndexError, index_error:
+        error('3001')
+        sys.exit(1)
+
+
+# 2018-1-12
+@FunctionTimeout(timeout=40)
+def do_cpu_query(query_node):
+    self_host_name = commands.getoutput("hostname")
+    if query_node == self_host_name:
+        do_local_query()
+    else:
+        result = run_remote_cmd(cmd="icfs-system-cpu --local-query", tgt=query_node)
+        retcode = result[query_node]["retcode"]
+        stdout = result[query_node]["stdout"]
+        if not retcode:
+            print stdout
+            sys.exit(0)
+        elif retcode == -1:
+            error("057", query_node)
+        else:
+            print stdout
+            sys.exit(1)
+
+
+def usage():
+
+    print '''Help(-h|--help)for icfs-system-cpu:
+Usage:
+>> icfs-system-cpu ----- --node node---- --query --------------------------------><
+Functions: Query cpus info
+Options:
+  --query:  query cpus status
+  --node:   node name
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0) 
+
+if __name__ == '__main__':
+    operation = None
+    node = None
+    opts = []
+    argv = []
+    try:
+        opt_parser = OptParser.OptParser()
+        # help information
+        opt_parser.append("help", "{-h|--help}")
+        opt_parser.append("query", "--query,--node=")
+        opt_parser.append("local_query", "--local-query")
+        opt_parser.append("query_all", "--query")
+        opt_parser.append("query_local", "--query,--local")
+        # parse arguments
+        m_name, m_opts = opt_parser.parse(sys.argv[1:])
+    except Exception, err:
+        print err
+        error('002')
+
+    for o, a in m_opts:
+        if o == "--node":
+            node = a
+            if node not in get_hostname_list():
+                error('002')
+
+    if m_name == "help":
+        usage()
+    elif m_name == "query":
+        do_cpu_query(node)
+    elif m_name == "local_query":
+        do_local_query()
+    elif m_name == "query_all":
+        result = run_local_cmd("ipmitool sdr", timeout=20)
+        status = result["retcode"]
+        ipmi_out = result["stdout"]
+        if not status:
+            remote_host_stat_check()
+            cpu_query_all()
+        else:
+            error('3001')
+    elif m_name == "query_local":
+        cpu_query_all_local()
+	

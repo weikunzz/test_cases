@@ -1,0 +1,229 @@
+#! /bin/bash
+
+function usage() 
+{
+        echo "usage:"
+        printf "\t>>icfs-object-rgw start all\t  ----     start all node's rgw service----><\n"
+        printf "\t>>icfs-object-rgw stop all\t  ----     stop all node's rgw service----><\n"
+        printf "\t>>icfs-object-rgw status all\t  ----     check all node's rgw service status----><\n"
+        printf "\t>>icfs-object-rgw start hostname  ----     start rgw service in specified node----><\n"
+        printf "\t>>icfs-object-rgw stop hostname\t  ----     stop rgw service in specified node----><\n"
+        printf "\t>>icfs-object-rgw status hostname ----     check rgw service status in specified node----><\n"
+}
+
+function check_start()
+{
+  if [ ! -f "/etc/icfs/icfs.conf" ]; then
+    echo "Error(3613) configuration file should contain rgw module"
+    exit 1
+  fi
+  rgw_client=`cat /etc/icfs/icfs.conf | grep client.radosgw.gateway`
+  if [ -z "$rgw_client" ]; then
+    echo "Error(3613) configuration file should contain rgw module"
+    exit 1
+  fi
+}
+
+function start_all()
+{
+  check_start
+  array=()
+  i=0
+  for node in $@
+  do
+    ssh $node "systemctl start icfs-radosgw@radosgw.gateway"
+    run="`ssh $node "systemctl status icfs-radosgw@radosgw.gateway | grep running"`"
+    if [ -z $run ] 2>/dev/zero
+    then
+      array[$i]="failure"
+    else
+      array[$i]="success"
+    fi
+    let i=i+1
+  done
+  ret="success"
+  for ((i=0;i<${#array[*]};i++))
+  do
+    if [ ${array[$i]} == "failure" ]
+    then
+      ret="failure"
+    fi
+  done
+  if [ $ret == "failure" ]
+  then
+    echo "Error(3611): start rgw service failed"
+    exit 1
+  else
+    echo "success"
+    exit 0
+  fi
+}
+
+function stop_all()
+{
+  array=()
+  i=0
+  for node in $@
+  do
+    ssh $node "systemctl stop icfs-radosgw@radosgw.gateway"
+    run="`ssh $node "systemctl status icfs-radosgw@radosgw.gateway | grep running"`"
+    if [ -z $run ] 2>/dev/zero
+    then
+      array[$i]="success"
+    else
+      array[$i]="failure"
+    fi
+    let i=i+1
+  done
+  ret="success"
+  for ((i=0;i<${#array[*]};i++))
+  do
+    if [ ${array[$i]} == "failure" ]
+    then
+      ret="failure"
+    fi
+  done
+  if [ $ret == "failure" ]
+  then
+    echo "Error(3612): stop rgw service failed"
+    exit 1
+  else
+    echo "success"
+    exit 0
+  fi
+}
+
+function status_all()
+{
+  for node in $@
+  do
+    run="`ssh $node "systemctl status icfs-radosgw@radosgw.gateway | grep running"`"
+    if [ -z $run ] 2>/dev/zero
+    then
+      status="dead"
+    else
+      status="running"
+    fi
+    echo "$node          $status"
+  done
+}
+
+function start_node()
+{
+  check_start
+  ssh $1 "systemctl start icfs-radosgw@radosgw.gateway"
+  run=`ssh $1 "systemctl status icfs-radosgw@radosgw.gateway | grep running"`
+  if [ -z $run ] 2>/dev/zero
+  then
+    status="dead"
+  else
+    status="running"
+  fi
+  if [ $status == "running" ]
+  then
+    echo "success"
+    exit 0
+  else
+    echo "Error(3611): start rgw service failed"
+    exit 1
+  fi  
+}
+
+function stop_node()
+{
+  ssh $1 "systemctl stop icfs-radosgw@radosgw.gateway" 
+  run=`ssh $1 "systemctl status icfs-radosgw@radosgw.gateway | grep running"`
+  if [ -z $run ] 2>/dev/zero
+  then
+    status="dead"
+  else
+    status="running"
+  fi
+  if [ $status == "dead" ]
+  then
+    echo "success"
+    exit 0
+  else
+    echo "Error(3612): stop rgw service failed"
+    exit 1
+  fi  
+}
+
+function status_node()
+{
+  run=`ssh $1 "systemctl status icfs-radosgw@radosgw.gateway | grep running"`
+  if [ -z $run ] 2>/dev/zero
+  then
+    status="dead"
+  else
+    status="running"
+  fi
+  echo "$1          $status"
+}
+
+function main()
+{
+    hostname=`hostname`
+    sed -r '/^\#/d' /etc/hosts > /etc/temp_hosts
+    prefix=`cat /etc/temp_hosts | grep $hostname | cut -d ' ' -f 1 | cut -d '.' -f 1-3`
+    hostlist=`cat /etc/temp_hosts | grep $prefix | awk '{print $2}'`
+    rm -rf /etc/temp_hosts
+    operations=("start" "stop" "status")
+    if [ $# -eq 1 ]
+    then
+      if [ $1 == "-h" -o $1 == "--help" ]
+      then
+        usage
+        exit 0
+      fi
+    fi
+    if [ $# -ne 2 ]
+    then
+      echo "Error(3640): Input Error,must be two parameter"
+      usage
+      exit 1
+    fi
+    user_op=$1
+    host=$2
+    if ! [[ ${operations[@]} =~ $user_op ]]
+    then
+      echo "Error(3600):Input Error, get help use ‘-h|--help’"
+      usage
+      exit 1
+    fi
+    all_list=`echo "$hostlist all"`
+    if ! [[ ${all_list[@]} =~ $host ]]
+    then
+      echo "Error(3600):Input Error, get help use ‘-h|--help’"
+      usage
+      exit 1
+    fi
+
+    case $user_op in
+    "start")
+      if [ $host == "all" ] 2>/dev/zero
+      then
+        start_all $hostlist
+      else
+        start_node $host
+      fi
+    ;;
+    "stop")
+      if [ "$host" == "all" ]
+      then
+        stop_all $hostlist
+      else
+        stop_node $host
+      fi
+    ;;
+    "status")
+      if [ "$host" == "all" ]
+      then
+        status_all $hostlist
+      else
+        status_node $host
+      fi
+    ;;
+    esac
+}
+main $@

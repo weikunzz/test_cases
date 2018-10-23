@@ -1,0 +1,477 @@
+#!/usr/bin/python 
+# coding:utf-8
+# -*- copyright -*-
+import sys
+import getopt
+import commands
+import json
+import re
+
+# modify at 2017-1-23 by huper: fix check_sas() return error
+# add raid locate
+
+# sas3008 
+def usage():
+    print """Help(-h|--help) for icfs-disk-locate:
+Usage:
+>> icfs-disk-locate ----+-- --on ----+-- --node nodename --+-- --slot slot_number --+----------------><
+                        '-- --off  --'
+Functions:locate the disk light through the nodename and the slot_number 
+  --on  :   turn on the disk light 
+  --off :   turn off the disk light 
+Exit status:
+  0 if excuted succefully 
+  1 if excuted unsuccessfuly """
+
+
+class Raid:
+    # raid card info
+    # raid card id
+    # "Ctl" : 0,
+    # "Model" : "AVAGOMegaRAIDSAS9361-8i",
+    # "Ports" : 8,
+    # "PDs" : 12,
+    # "DGs" : 3,
+    # "DNOpt" : 0,
+    # "VDs" : 3,
+    # "VNOpt" : 0,
+    # "BBU" : "Msng",
+    # "sPR" : "On",
+    # "DS" : "1",
+    # "EHS" : "Y",
+    # "ASOs" : 3,
+    # "Hlth" : "Opt"
+    vd_list = None
+    enclosure_list = None
+    Ctl = None
+    Model = None
+    Ports = None
+    PDs = None
+    DGs = None
+    DNOpt = None
+    VDs = None
+    VNOpt = None
+    BBU = None
+    sPR = None
+    DS = None
+    EHS = None
+    ASOs = None
+    Hlth = None
+
+    def __init__(self, raid_info):
+        self.__dict__.update(raid_info)
+
+
+class Vd:
+    # virtual device
+    # "DG/VD" : "12/12",
+    # "TYPE" : "RAID0",
+    # "State" : "Optl",
+    # "Access" : "RW",
+    # "Consist" : "Yes",
+    # "Cache" : "RWTD",
+    # "Cac" : "-",
+    # "sCC" : "ON",
+    # "Size" : "7.276 TB",
+    # "Name" : ""
+    DG_VD = None
+    dg = None
+    vd = None
+    TYPE = None
+    State = None
+    Access = None
+    Consist = None
+    Cache = None
+    Cac = None
+    sCC = None
+    Size = None
+    Name = None
+    control_id = None
+    SCSI_NAA_Id = None
+    rdisk_list = None
+
+    def __init__(self, vd):
+        self.DG_VD = vd["DG/VD"]
+        self.dg = self.DG_VD.split("/")[0]
+        self.vd = self.DG_VD.split("/")[1]
+        self.__dict__.update(vd)
+
+
+class Rdisk:
+    # disk
+    # "EID:Slt" : "36:2",     EID_Slt
+    # "DID" : 30,
+    # "State" : "Onln",
+    # "DG" : 0,
+    # "Size" : "1.636 TB",
+    # "Intf" : "SAS",
+    # "Med" : "HDD",
+    # "SED" : "N",
+    # "PI" : "N",
+    # "SeSz" : "512B",
+    # "Model" : "AL14SEB18EQ     ",
+    # "Sp" : "U",
+    # "Type" : "-"
+    eid = None
+    slot = None
+    DID = None
+    State = None
+    DG = None
+    Size = None
+    Intf = None
+    Med = None
+    SED = None
+    PI = None
+    SeSz = None
+    Model = None
+    Sp = None
+
+    def __init__(self, disk):
+        self.eid, self.slot = disk["EID:Slt"].split(":")
+        self.__dict__.update(disk)
+
+
+class Enclosure:
+    EID = None
+    Slots = None
+    PD = None
+    Type = None
+
+    def __init__(self, eid):
+        self.EID = eid
+
+
+def set_raid_vd_disk_info(raid_card):
+    # vd_key like this "/cx/vx"
+    # pd for vd like this "PDs for VD x"
+    # "VDx Properties"
+    vd_part = r"^/c\d+/v(\d+$)"
+    error, info = commands.getstatusoutput("storcli64 /c%s /vall show all J" % raid_card.Ctl)
+    if error:
+        Error(1409, info)
+    else:
+        try:
+            controllers = json.loads(info)["Controllers"]
+            for controller in controllers:
+                status = controller["Command Status"]["Status"]
+                description = controller["Command Status"]["Description"]
+                if status != "Success":
+                    Error(1409, description)
+                elif description == "No VDs have been configured":
+                    raid_card.vd_list = []
+                else:
+                    response = controller["Response Data"]
+                    keys = response.keys()
+                    # get vd list
+                    vd_list = []
+                    for key in keys:
+                        res = re.match(vd_part, key)
+                        if res:
+                            vd_id = res.group(1)
+                            vd = Vd(response[key][0])
+                            vd.control_id = raid_card.Ctl
+                            vd.SCSI_NAA_Id = response["VD%s Properties" % vd_id]["SCSI NAA Id"]
+                            vd.rdisk_list = [Rdisk(disk) for disk in response["PDs for VD %s" % vd_id]]
+                            vd_list.append(vd)
+                    raid_card.vd_list = vd_list
+        except Exception, e:
+            Error(1409, e)
+
+
+def set_raid_enclosure_info(raid_card):
+    # enclosure_part = r"^Enclosure /c\d+/e(\d+$)"
+    error, info = commands.getstatusoutput("storcli64 /c%s /eall show all J" % raid_card.Ctl)
+    if error:
+        Error(1409, info)
+    else:
+        try:
+            controllers = json.loads(info)["Controllers"]
+            for controller in controllers:
+                status = controller["Command Status"]["Status"]
+                description = controller["Command Status"]["Description"]
+                if status != "Success":
+                    Error(1409, description)
+                else:
+                    response = controller["Response Data"]
+                    keys = response.keys()
+                    # get enclosure list
+                    enclosure_list = []
+                    for key in keys:
+                        enclosure_info = response[key]
+                        eid = enclosure_info["Information"]["Device ID"]
+                        slots = enclosure_info["Properties"][0]["Slots"]
+                        etype = enclosure_info["Information"]["Enclosure Type"]
+                        pd = enclosure_info["Properties"][0]["PD"]
+                        enclosure = Enclosure(eid)
+                        enclosure.PD = pd
+                        enclosure.Slots = slots
+                        enclosure.Type = etype
+                        enclosure_list.append(enclosure)
+                    raid_card.enclosure_list = enclosure_list
+        except Exception, e:
+            Error(1409, e)
+
+
+def get_all_raid():
+    raid_card_list = []
+    error, info = commands.getstatusoutput("storcli64 show J")
+    if error:
+        Error(1408, info)
+    else:
+        try:
+            raid_info_json = json.loads(info)
+            Controllers = raid_info_json["Controllers"]
+            for controller in Controllers:
+                system_overview = controller["Response Data"]["System Overview"]
+                for raid_card_info in system_overview:
+                    raid_card = Raid(raid_card_info)
+                    set_raid_vd_disk_info(raid_card)
+                    set_raid_enclosure_info(raid_card)
+                    raid_card_list.append(raid_card)
+        except:
+            pass
+    return raid_card_list
+
+
+def get_slot_dic_raid(raid_list):
+    # c_VD
+    slot_dic = {}
+    slot = 0
+    raid_list.sort(key=lambda raid: int(raid.Ctl))
+    for raid in raid_list:
+        vd_list = raid.vd_list
+        vd_list.sort(key=lambda vd: int(vd.vd))
+        for vd in vd_list:
+            slot_dic[str(raid.Ctl)+"_"+str(vd.vd)] = slot
+            slot += 1
+    return slot_dic
+
+
+def Error(num, info=None):
+    if not info:
+        info = ""
+    if num == 610:
+        print "Error(610): Invalid input!"
+    elif num == 1401:
+        print "Error(621): Unrecognized sas type!"
+    elif num == 1402:
+        print "Error(622): This index of controller not exists!"
+    elif num == 1403:
+        print "Error(623): This drive not available!"
+    elif num == 1404:
+        print "Error(624): This slot_number not exists!"
+    elif num == 1405:
+        print "Error(625): Can't find sas card!"
+    elif num == 715:
+        print "Error(715): Slot not exits!"
+    elif num == 100:
+        print "Error(100): Saltstack anomaly", info
+    elif num == 731:
+        print "Error(731): Get mds info error ", info
+    elif num == 1399:
+        print "Error(1399): Unknow error", info
+    elif num == 1408:
+        print "Error(1408): Get raid card info error ", info
+    elif num == 1409:
+        print "Error(1409): Get virtual device info error ", info
+    else:
+        print "Error(553): Unknow error ", info
+
+
+def check_sas():
+    sas_version_info = commands.getoutput("lspci | grep -i sas | grep -v -i raid")
+    if sas_version_info == "":
+        Error(1405)
+        sys.exit(1)
+    elif "SAS3008" in sas_version_info:
+        sasircu_command = "sas3ircu"
+    elif "SAS2308" in sas_version_info:
+        sasircu_command = "sas2ircu"
+    else:
+        Error(621)
+        sys.exit(1)
+    return sasircu_command
+
+
+# 开启磁盘灯时，获取 sasindex号，Enclosure号，slot号
+def light_control(nodename, slot_number):
+    # check is raid or not
+    raid_list = get_all_raid()
+    if raid_list:
+        self_name = commands.getoutput("hostname")
+        if self_name == nodename:
+            raid_on_off(slot_number, raid_list, action)
+        else:
+            error, info = commands.getstatusoutput("ssh root@%s 'icfs-disk-locate --%s --node %s --slot %s'" % (nodename, action, nodename, slot_number))
+            print info
+            if "Error" in info:
+                sys.exit(1)
+    else:
+        # filter salt stderror so that output can be parsed correctly
+        disk_num = commands.getoutput(
+            "salt '%s' cmd.run 'icfs-system-disk --sas' 2>/dev/null|awk '{if($4==%s) print $1,$2,$3}'" % (nodename, slot_number))
+        # print status
+        # print output
+        if disk_num == "":
+            Error(715)
+            sys.exit(1)
+        else:
+            disk_num = disk_num.split(" ")
+            Sasindex = disk_num[0]
+            Enclosure = disk_num[1]
+            slot = disk_num[2]
+            if Sasindex == "":
+                Error(1404)
+                sys.exit(1)
+            else:
+                # print "the Sasindex is: %s" % (Sasindex)
+                # print "the Enclosure is: %s" % (Enclosure)
+                # print "the slot is: %s" % (slot)
+                sasircu_on_off(Sasindex, Enclosure, slot, action, nodename)
+
+
+def raid_on_off(slot_number, raid_list, action):
+    if action == "ON":
+        daction = "start"
+    else:
+        daction = "stop"
+    slot_dic = get_slot_dic_raid(raid_list)
+    # control-id_virtual-disk-id
+    c_v = None
+    for key, value in slot_dic.items():
+        if str(value) == str(slot_number):
+            c_v = key
+            break
+    if not c_v:
+        Error(1403)
+        sys.exit(1)
+    control_id = c_v.split("_")[0]
+    vd_id = c_v.split("_")[1]
+    vd = None
+    for control in raid_list:
+        if str(control.Ctl) == control_id:
+            for vd_tmp in control.vd_list:
+                if str(vd_tmp.vd) == vd_id:
+                    vd = vd_tmp
+                    break
+    if not vd:
+        Error(1403)
+        sys.exit(1)
+    rdisk_list = vd.rdisk_list
+    error = 0
+    errorInfo = ""
+    for rdisk in rdisk_list:
+        # print "storcli64 /c%s /e%s /s%s %s locate" % (str(control_id), str(rdisk.eid), str(rdisk.slot), daction)
+        info = commands.getoutput("storcli64 /c%s /e%s /s%s %s locate" % (str(control_id), str(rdisk.eid), str(rdisk.slot), daction))
+        infos = info.splitlines()
+        status = "Success"
+        description = ""
+        for line in infos:
+            if line.startswith("Status"):
+                status = line.split("=")[1].strip()
+            if line.startswith("Description"):
+                description = line.split("=")[1].strip()
+        if status != "Success":
+            error = 1
+            errorInfo += description
+    if not error:
+        print "the disk has been turn %s successfully!" % action
+    else:
+        print "the disk has been turn %s error: %s" % (action, errorInfo)
+
+
+def sasircu_on_off(sasindex, enclosure, slot, action, node):
+    sasircu_command = check_sas()
+    status, output = commands.getstatusoutput(
+        "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' '%s %s LOCATE %s:%s %s'" % (
+            node, sasircu_command, sasindex, enclosure, slot, action))
+    if action == "ON":
+        if status == 0:
+            if "Successfully" in output:
+                print "the disk has been turn on successfully!"
+        else:
+            if "Error" in output:
+                Error(1403)
+                sys.exit(1)
+            else:
+                Error(1402)
+                sys.exit(1)
+    elif action == "OFF":
+        #        print action
+        # print status
+        if status == 0:
+            if "Successfully" in output:
+                print "the disk has been turn off successfully!"
+        else:
+            if "Error" in output:
+                Error(1403)
+                sys.exit(1)
+            else:
+                Error(1402)
+                sys.exit(1)
+
+
+# args is canshuzhi
+if __name__ == '__main__':
+    df = None
+    operation = None
+    nodename = None
+    slot_number = None
+    sasircu_command = None
+    try:
+        options, args = getopt.getopt(sys.argv[1:], "h", ["on", "off", "help", "node=", "slot="])
+    except getopt.GetoptError, err:
+        Error(610)
+        sys.exit(1)
+    if not options:
+        Error(610)
+        sys.exit(1)
+    if len(sys.argv[0:]) == 1:
+        Error(610)
+        sys.exit(1)
+    if len(args) != 0:
+        Error(610)
+        sys.exit(1)
+    for o, a in options:
+        if o in ("-h", "--help") and len(sys.argv[0:]) == 2:
+            if "-h" == sys.argv[1] or "--help" == sys.argv[1]:
+                usage()
+                sys.exit(0)
+            else:
+                Error(610)
+                sys.exit(1)
+        elif o == "--node":
+            try:
+                nodename = a
+            except Exception, err:
+                Error(610)
+                sys.exit(1)
+        elif o == "--slot":
+            try:
+                slot_number = a
+            except Exception, err:
+                Error(610)
+                sys.exit(1)
+        elif o == "--on":  # Check the on command argument
+            if len(sys.argv[0:]) == 6:
+                if "--on" in sys.argv[1] and "--node" in sys.argv[2] and "--slot" in sys.argv[4]:
+                    operation = "on_light"
+                    action = "ON"
+                else:
+                    Error(610)
+                    sys.exit(1)
+        elif o == "--off":  # Check the off command argument
+            if "--off" in sys.argv[1] and "--node" in sys.argv[2] and "--slot" in sys.argv[4]:
+                operation = "off_light"
+                action = "OFF"
+            else:
+                Error(610)
+                sys.exit(1)
+
+    if operation == "on_light":  # turn on the disk light
+        light_control(nodename, slot_number)
+    if operation == "off_light":  # turn off the disk light
+        light_control(nodename, slot_number)
+    if operation is None:
+        Error(610)
+        sys.exit(1)

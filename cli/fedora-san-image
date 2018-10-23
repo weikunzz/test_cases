@@ -1,0 +1,449 @@
+#!/usr/bin/python
+# coding:utf-8
+import sys
+import getopt
+import commands
+import re
+import os.path
+from icfs_util import run_remote_cmd
+
+
+def usage():
+    print """Help(-h|--help)for icfs-san-image:
+Usage:
+>> icfs-san-image ------------+ --create +---------><
+                              + --delete +
+                              + --expand +
+                              +  --set   +
+                              +  --get   +
+                              +  --start +
+                              +  --stop  + 
+                              ' --query  '
+Functions: create image,expand image, delete image, query image,start/stop/set/get image qos
+Options:
+  --create:     create images
+  --delete:     delete images
+  --expand:     expand images
+  --query:      query images 
+  --set:        set image qos
+  --get:        get image qos
+  --start/stop: start or stop image qos
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+icfs-san-image --create:
+Usage:
+>> icfs-san-image---- --create ---- --name image name ---- --pool pool name ---- --size image size  --><
+Functions: create image
+Options: 
+  --name:       image name
+  --pool:       pool name
+  --size:       image size
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+icfs-san-image --delete:
+Usage: 
+>> icfs-san-image----- --delete ---- --name image name ---- --pool pool name --><
+Functions: delete image
+Options: 
+  --name:       image name
+  --pool:       pool name
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+  
+icfs-san-image --expand:
+Usage:
+>> icfs-san-image----- --expand ---- --name image name ---- --pool pool name ---- --size image size  --><
+Functions: expand image
+Options: 
+  --name:       image name
+  --pool:       pool name
+  --size:       image size
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+  
+icfs-san-image --query:
+Usage:
+>> icfs-san-image ---- --query ---- --pool pool name ---- --images --><
+Functions: Query image
+Options: --pool:       pool name 
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+  
+icfs-san-image --start/stop:
+Usage:
+>> icfs-san-image -------+   --start       +---- --pool pool name ---- --name image_name --><
+                         '   --stop        '
+Functions: Start/Stop image Qos
+Options:
+    --start:      start commands
+    --stop:       stop  commands
+    --iops:       iops value
+    --bandwidth:  bandwidth value
+    --pool:       pool name
+    --name:      image name
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully  
+icfs-san-image --set:
+Usage:
+>> icfs-san-image ---- --set ----+  --iops iops_value         +-------- --name image_name ---- --pool pool name ----><
+                                 ' --bandwidth bandwidth_balue'
+Functions: Set image Qos
+Options:
+    --set:        set commands
+    --iops:       iops value
+    --bandwidth:  bandwidth value
+    --pool:       pool name
+    --name:      image name
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+  
+icfs-san-image --status:
+Usage:
+>> icfs-san-image -------- --pool pool name ---- --name image_name ---- --status --------------><
+
+Functions: Query image Qos status
+Options:
+    --pool:       pool name
+    --name:      image name
+    --status:     Qos status
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+  icfs-san-image --get:
+Usage:
+>> icfs-san-image ---- --get ----- --pool pool name ---- --name image_name ------------------><
+
+Functions: Query image Qos status
+Options:
+    --get:        Get Qos value
+    --pool:       pool name
+    --name:      image name
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully"""
+
+
+def getlist(pool_name, image_name):
+    pattern_target = re.compile(r"^Target.*?:\s*(.*)\s*$")
+    pattern_lun = re.compile(r"^\s+LUN:\s*(\d+)\s*$")
+    pattern_path = re.compile(r"^\s+Backing store path:\s*(\S+)/(\S+)\s*$")
+    list = []
+    ret_dict = run_remote_cmd("*", "icfs-san-deploy lun show")
+    for node_name, ret in ret_dict.items():
+        target_name = ""
+        lun_id = ""
+        status = 1
+        output = ret["stdout"]
+        lines = output.split("\n")
+        for line in lines:
+            if status == 1:
+                m = pattern_target.match(line)
+                if m is not None:
+                    target_name = m.group(1)
+                    status = 2
+            elif status == 2:
+                m = pattern_target.match(line)
+                if m is not None:
+                    target_name = m.group(1)
+                    lun_id = ""
+                    status = 2
+                    continue
+
+                m = pattern_lun.match(line)
+                if m is not None:
+                    lun_id = m.group(1)
+                    status = 3
+            elif status == 3:
+                m = pattern_target.match(line)
+                if m is not None:
+                    target_name = m.group(1)
+                    lun_id = ""
+                    status = 2
+                    continue
+
+                m = pattern_lun.match(line)
+                if m is not None:
+                    lun_id = m.group(1)
+                    status = 3
+                    continue
+
+                m = pattern_path.match(line)
+                if m is not None and m.group(1) == pool_name and m.group(2) == image_name:
+                    list.append([node_name, target_name, lun_id])
+    return list
+
+
+def name_format(name):
+    if re.findall('^[0-9a-zA-Z_]', name) == [] or re.findall('[^\w_]', name) != []:
+        Error(934)
+
+    
+def create_image(name, size, poolname):
+    image_status, image_output = commands.getstatusoutput("rbd create %s --size %s -p %s" % (name, size, poolname))
+    if image_status != 0:
+        error_pattern = re.compile(r"Error\(\d+\)")
+        if error_pattern.search(image_output):
+            print image_output
+        else:
+            Error(1399, image_output)
+        sys.exit(1)
+    print "Image: %s is creating... [OK]" % name
+
+
+def expand_pool(name, poolname, size):
+    lun_list = getlist(poolname, name)
+    if not lun_list:
+        expand_status, expand_out = commands.getstatusoutput("rbd resize --image %s --pool %s --size %s"
+                                                             % (name, poolname, size))
+        if expand_status != 0:
+            print expand_out 
+            sys.exit(1)
+        print "Image: %s is expanding... [OK]" % name
+    else:
+        has_error = False
+        for nodename, targetname, id_num in lun_list:
+            if targetname.startswith("-"):
+                targetname = "\\\"'%s'\\\"" % targetname
+            resize_out = run_remote_cmd(nodename, "icfs-san-deploy lun resize --targetname %s --lun %s --size %s"
+                                        % (targetname, id_num, size))
+            resize_out = re.sub(r"\[.*OK.*\]", r"[ OK ]", resize_out[nodename]["stdout"])
+            error_pattern = re.compile(r"Error\(\d+\)")
+            if error_pattern.search(resize_out):
+                has_error = True
+        if has_error:
+            print resize_out
+            sys.exit(1)
+        print resize_out
+
+
+def set_qos():
+    cmd_line = ""
+    if set_iops:
+        cmd_line = "rbd qos set iops --pool %s --image %s --size %s" % (poolname, name, iops_value)
+        value = iops_value
+    elif set_bandwidth:
+        cmd_line = "rbd qos set bandwidth --pool %s --image %s --size %s" % (poolname, name, bandwidth_value)
+        value = bandwidth_value
+    if cmd_line == "":
+        Error(610)
+    status, out = commands.getstatusoutput(cmd_line)
+    if status != 0:
+        error_pattern = re.compile(r"Error\(\d+\)")
+        if error_pattern.search(out):
+            print out
+            sys.exit(1)
+        elif "'--size' is invalid" in out:
+            print "Error(980):the argument %s for option '--size' is invalid" % value
+            sys.exit(1)
+        else:
+            Error(1399, out)
+
+
+def start_qos():
+    status, out = commands.getstatusoutput("rbd qos enable --pool %s --image %s" % (poolname, name))
+    if status != 0:
+        error_pattern = re.compile(r"Error\(\d+\)")
+        if error_pattern.search(out):
+            print out
+            sys.exit(1)
+        else:
+            Error(1399, out)
+
+
+def stop_qos():
+    status, out = commands.getstatusoutput("rbd qos disable --pool %s --image %s" % (poolname, name))
+    if status != 0:
+        error_pattern = re.compile(r"Error\(\d+\)")
+        if error_pattern.search(out):
+            print out
+            sys.exit(1)
+        else:
+            Error(1399, out)
+
+
+def image_query(poolname):
+    imagelist_status,imagelist_out = commands.getstatusoutput("rbd ls %s" % (poolname))
+    if imagelist_status != 0:
+        print imagelist_out
+        sys.exit(1)
+    has_pool = True
+    print "Image Name".ljust(15, ' '), "Capacity".ljust(15, ' ')
+    for n in imagelist_out.splitlines():
+        size_status,size_out = commands.getstatusoutput("rbd --image %s --pool %s info|grep size |awk '{print $2}'" % (n, poolname))
+        if size_status != 0:
+            print size_out
+            sys.exit(1)
+        size_out = size_out+"M"
+        print n.ljust(15, ' '), size_out.ljust(15, ' ')
+        has_pool = False
+    if has_pool:
+        print "none".ljust(15, ' '), "none".ljust(15, ' ')
+
+
+def qos_status():
+    status, out = commands.getstatusoutput("rbd info %s/%s|grep qos" % (poolname, name))
+    if status != 0:
+        error_pattern = re.compile(r"Error\(\d+\)")
+        if error_pattern.search(out):
+            print out
+            sys.exit(1)
+        else:
+            Error(1399, out)
+    print "Image Name".ljust(15, ' '), "Status"
+    switch = "Off"
+    if "true" in out:
+        switch = "On"
+    print name.ljust(15, ' '), switch
+
+
+def get_qos_value():
+    get_status, get_output = commands.getstatusoutput("rbd info --pool %s --image %s |grep -Ei 'iops|bandwidth'" % (poolname, name))
+    if get_status != 0:
+        error_pattern = re.compile(r"Error\(\d+\)")
+        if error_pattern.search(get_output):
+            print get_output
+            sys.exit(1)
+        else:
+            Error(1399, get_output)
+
+    print get_output
+    
+            
+def Error(num, *description):
+    if num == 610:
+        print "Error(610): Invalid input! ",
+    if num == 934:
+        print "Error(934): The pool or image name .Only letters,numbers,_ is allowed",
+    if num == 937:
+        print "Error(937):The pgnum should equal to the pgpnum"
+    if num == 938 :
+        print "Error(938):pool %s is already exists" % description
+    if num == 943 :
+        print "Error(943): The argument for option '--size' is invalid",
+    if num==3006:
+        print "Error(3006): This type of Tasks is maximizing",
+    if num==500:
+        print "Error(500): Can not get cluster verson",
+    if num == 944 :
+        print "Error(944):The size of image should  between 0M and 64TB",
+    if num == 945 :
+        print "Error(945):the expand size should between the size that before expansion and 64TB "
+    sys.exit(1)
+        
+if __name__=="__main__":
+    operation = None
+    poolname = None
+    name = None
+    size = None
+    set_iops = False
+    is_cut = False
+    set_bandwidth = False
+    iops_value = None
+    bandwidth_value = None
+    options = []
+    args = []
+    try:
+        options, args = getopt.getopt(sys.argv[1:], "h", ["help", "create", "pool=", "name=", "size=", "delete",
+                                                          "query", "images", "expand", "iops=", "set", "bandwidth=",
+                                                          "start", "stop", "status", "get"])
+    except getopt.GetoptError, err:
+        Error(610)
+    if options == [] or args != []:
+        Error(610)
+    if len(sys.argv) == 1:
+        Error(610)    
+    for x,y in options:
+        if x in ("-h", "--help"):
+            if len(sys.argv) != 2:
+                Error(610)
+            else:
+                usage()
+                sys.exit(0)
+        elif x == "--create":
+            operation = "create"
+        elif x == "--pool":
+            poolname = y
+            name_format(poolname)
+        elif x == "--name":
+            name = y
+            # name_format(name)
+        elif x == "--size":
+            size = y
+        elif x == "--iops":
+            set_iops = True
+            iops_value = y
+        elif x == "--bandwidth":
+            set_bandwidth = True
+            bandwidth_value = y
+        elif x == "--delete":
+            operation = "delete"
+        elif x == "--expand":
+            operation = "expand"
+        elif x == "--query":
+            operation = "query"
+        elif x == "--set":
+            operation = "set"
+        elif x == "--start":
+            operation = "start"
+        elif x == "--stop":
+            operation = "stop"
+        elif x == "--status":
+            operation = "status"
+        elif x == "--get":
+            operation = "get"
+    if operation == "create":
+        if len(sys.argv) == 8 and "--create" == sys.argv[1] and "--name" == sys.argv[2] and "--pool" == sys.argv[4] and "--size" == sys.argv[6]:
+            create_image(name, size, poolname)
+        else:
+            Error(610)
+    elif operation == "delete":
+        if len(sys.argv) == 6 and "--delete" == sys.argv[1] and "--name" == sys.argv[2] and "--pool" == sys.argv[4]:
+            os.system("python /usr/bin/task-manage %s %s %s > /dev/null &"%('Delete_image',name,poolname))
+        else:
+            Error(610)
+    elif operation == "expand":
+        if len(sys.argv) == 8 and "--expand" == sys.argv[1] and "--name" == sys.argv[2] and "--pool" == sys.argv[4] and "--size" ==sys.argv[6] :
+            expand_pool(name, poolname, size)
+        else:
+            Error(610)
+    elif operation == "query":
+        if len(sys.argv) == 5 and "--query" == sys.argv[1] and "--pool" == sys.argv[2] and "--images" == sys.argv[4]:
+            image_query(poolname)
+        else:
+            Error(610)
+    elif operation == "set":
+        if len(sys.argv) == 8 and "--set" == sys.argv[1] and ("--iops" == sys.argv[2] or "--bandwidth" == sys.argv[2]) \
+                and "--name" == sys.argv[4] and "--pool" == sys.argv[6]:
+            set_qos()
+        else:
+            Error(610)
+    elif operation == "start":
+        if len(sys.argv) == 6 and "--start" == sys.argv[1] and "--pool" == sys.argv[2] and "--name" == sys.argv[4]:
+            start_qos()
+        else:
+            Error(610)
+    elif operation == "stop":
+        if len(sys.argv) == 6 and "--stop" == sys.argv[1] and "--pool" == sys.argv[2] and "--name" == sys.argv[4]:
+            stop_qos()
+        else:
+            Error(610)
+    elif operation == "status":
+        if len(sys.argv) == 6 and "--pool" == sys.argv[1] and "--name" == sys.argv[3] and "--status" == sys.argv[5]:
+            qos_status()
+        else:
+            Error(610)
+    elif operation == "get":
+        if len(sys.argv) == 6 and"--get" == sys.argv[1] and "--pool" == sys.argv[2] and "--name" == sys.argv[4]:
+            get_qos_value()
+        else:
+            Error(610)
+    else:
+        Error(610)

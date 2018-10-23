@@ -1,0 +1,216 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+
+import getopt
+import sys
+import socket
+import pdb
+import os
+import re
+import commands
+import hmac
+import random
+from hashlib import sha1
+from optparse import OptionParser
+
+def error(error_number, messgae = ""):
+    if 3601 == error_number:
+        print "Error(3601): Input Error, get help use '-h|--help'"
+    elif 3611 == error_number:
+        print "Error(3611): Input should contain user ID"
+    elif 3612 == error_number:
+        print "Error(3612): Input should contain temp url key"
+
+def usage():
+    print '''Help(-h|--help) for icfs-object-swift-user:
+    Usage:
+    Options:
+      --swift_user_name          : swift user name
+      --swift_user_key           : swift user secret key
+      --temp_url_key             : tempurl key for swift user
+      --path                     : access dir path for swift fs
+      --perm                     : dir permission for swift fs
+    Functions:
+      create_swift_user
+          icfs-object-swift-user --createUser --swift_user_name=  --swift_user_key= --temp_url_key=  
+      delete_swift_user
+          icfs-object-swift-user --deleteUser --swift_user_name= 
+      modify_swift_user
+          icfs-object-swift-user --modifyUser --swift_user_name=  --swift_user_key=  --temp_url_key=  --path=  --perm=  
+      path_swift_user
+          icfs-object-swift-user --pathUser --swift_user_name=
+    Exit status:
+      0 if executed successfully
+      1 if executed unsuccessfully
+      '''
+
+rgw_conf = ["help",
+            "createUser",
+            "modifyUser",
+            "deleteUser",
+            "pathUser",
+            "swift_user_name=",
+            "swift_user_key=",
+            "temp_url_key=",
+            "path=",
+            "perm=",
+     ]
+
+def handlerRet(ret, messgae):
+    if ret != 0:
+        print(messgae)
+        sys.exit(1)
+
+def create_swift_user(options):
+    swift_user_name = ""
+    swift_user_key = ""
+    temp_url_key = ""
+    for name, value in options:
+        if name in ("--swift_user_name"):
+            swift_user_name = value
+        if name in ("--swift_user_key"):
+            swift_user_key = value
+        if name in ("--temp_url_key"):
+            temp_url_key = value
+    if swift_user_name == "":
+        error(3611)
+        sys.exit(1)
+    if temp_url_key == "":
+        error(3612)
+        sys.exit(1)
+    s3_user_name = hmac.new(swift_user_name).hexdigest()
+    radom = str(random.randint(1,10000))
+    display_name = hmac.new(swift_user_name, radom).hexdigest()
+    str1 = "icfs-object-user-admin --multiTenant --tenant=zuhu1 --uid=%s --display-name=%s --temp-url-key=%s --name=client.radosgw.gateway" % (s3_user_name, display_name, temp_url_key)
+    (ret, messgae) = commands.getstatusoutput(str1)
+    handlerRet(ret, messgae)
+    if swift_user_key == "":
+        str2 = ""
+    else:
+        str2 = "--swift_key=%s " % swift_user_key
+    str3 = "icfs-object-user-admin --createSubUser --tenant=zuhu1 --uid=%s --subuser=%s:%s " % (s3_user_name, s3_user_name, swift_user_name)
+    str4 = str3 + str2 + "--name=client.radosgw.gateway"
+    (ret, messgae) = commands.getstatusoutput(str4)
+    handlerRet(ret, messgae)
+    
+def delete_swift_user(options):
+    swift_user_name = ""
+    for name, value in options:
+        if name in ("--swift_user_name"):
+            swift_user_name = value
+    if swift_user_name == "":
+        error(3611)
+        sys.exit(1)
+    s3_user_name = hmac.new(swift_user_name).hexdigest()
+    str1 = "icfs-object-user-admin --deleteUser --tenant=zuhu1 --uid=%s --name=client.radosgw.gateway" % s3_user_name
+    (ret, messgae) = commands.getstatusoutput(str1)
+    handlerRet(ret, messgae)
+    
+def modify_swift_user(options):
+    swift_user_name = ""
+    swift_user_key = ""
+    temp_url_key = ""
+    path = ""
+    perm = ""
+    for name, value in options:
+        if name in ("--swift_user_name"):
+            swift_user_name = value
+        if name in ("--swift_user_key"):
+            swift_user_key = value
+        if name in ("--temp_url_key"):
+            temp_url_key = value
+        if name in ("--path"):
+            path = value
+        if name in ("--perm"):
+            perm = value
+    if swift_user_name == "":
+        error(3611)
+        sys.exit(1)
+    else:
+        s3_user_name = hmac.new(swift_user_name).hexdigest()
+
+    if swift_user_key == "":
+        str1 = ""
+    else:
+        str1 = "--swift_key=%s " % swift_user_key
+
+    if temp_url_key == "":
+        str2 = ""
+    else:
+        str2 = "icfs-object-user-admin --modifyUser --tenant zuhu1 --uid=%s --temp-url-key=%s --name=client.radosgw.gateway 2>/dev/zero" % (s3_user_name, temp_url_key)
+        (ret, messgae) = commands.getstatusoutput(str2)
+        handlerRet(ret, messgae)
+
+    if path == "":
+        str5 = ""
+    else:
+        str5 = "--path=%s " % path
+
+    if perm == "":
+        str6 = ""
+    else:
+        str6 = "--perm=%s " % perm 
+
+    str7 = "icfs-object-user-admin --modifySubUser --tenant=zuhu1 --uid=%s --subuser=%s:%s " % (s3_user_name, s3_user_name, swift_user_name)
+    str8 = str7 + str1 + str5 + str6 + "--name=client.radosgw.gateway"
+    (ret, messgae) = commands.getstatusoutput(str8)
+    handlerRet(ret, messgae)
+     
+def path_swift_user(options):
+    swift_user_name = ""
+    for name, value in options:
+        if name in ("--swift_user_name"):
+            swift_user_name = value
+    if swift_user_name == "":
+        error(3611)
+        sys.exit(1)
+    else:
+        s3_user_name = hmac.new(swift_user_name).hexdigest()
+    str1 = "icfs-object-user-admin --pathSubUser --tenant zuhu1 --uid=%s --subuser=%s:%s --name=client.radosgw.gateway" % (s3_user_name, s3_user_name, swift_user_name)
+    (ret, messgae) = commands.getstatusoutput(str1)
+    print(messgae)
+    if ret != 0:
+        sys.exit(1)
+     
+def deal(options):
+    for o, a in options:
+        if o in ("-h", "--help"):
+            usage()
+            sys.exit(0)
+        elif "--createUser" == o:
+            create_swift_user(options)
+            sys.exit(0)
+        elif "--deleteUser" == o:
+            delete_swift_user(options)
+            sys.exit(0)
+        elif "--modifyUser" == o:
+            modify_swift_user(options)
+            sys.exit(0)
+        elif "--pathUser" == o:
+            path_swift_user(options)
+            sys.exit(0)
+
+
+def main():
+    try:
+        options, args = getopt.getopt(sys.argv[1:], "h", rgw_conf)
+    except getopt.GetoptError, err:
+        error(3601)
+        sys.exit(1)
+    if len(sys.argv[0:]) == 1:
+        usage()
+        sys.exit(1)
+    elif not options:
+        usage()
+        error(3601)
+        sys.exit(1)
+    elif len(args) != 0:
+        usage()
+        error(3601)
+        sys.exit(1)
+    deal(options)
+
+if __name__ == "__main__":
+    main()
+

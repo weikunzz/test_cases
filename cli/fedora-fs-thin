@@ -1,0 +1,314 @@
+#!/usr/bin/python
+# coding:utf-8
+
+
+import os
+import sys
+import json
+import re
+import commands
+from icfs_util import NewConfigParser
+from icfs_util import run_remote_cmd, run_remote_copy, run_local_cmd
+import OptParser
+import math
+
+# icfs default mount point
+MOUNT_POINT = "/mnt/icfs"
+
+
+def usage():
+    print """Help(-h|--help)for icfs-fs-thin:
+Usage:
+>> icfs-fs-thin ---- --set ---- -p path ---- --size size ----><
+Functions: Set thin-provisioning size for specific directory
+Options:
+  --set:       set directory size
+  -p:          directory path
+  --size:      directory size(G|T)
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>> icfs-fs-thin ---- --query ------------------- -p path ----><
+Functions: Query thin-provisioning size for specific directory
+Options:
+  --query:     query directory size
+  -p:          directory path
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>> icfs-fs-thin ---+--- --start ---+-------------------------><
+                   +--- --stop  ---+
+                   '--- --status --'
+Options:
+  --start:  start thin-provisioning function
+  --stop:   stop thin-provisioning function
+  --status: check thin-provisioning function status
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully """
+
+
+def unit_convert(size):
+    try:
+        symbols = ('KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
+        prefix = {}
+        for i, s in enumerate(symbols):
+            prefix[s] = 1 << (i + 1) * 10
+        for s in reversed(symbols):
+            if size >= prefix[s]:
+                value = float(size) / prefix[s]
+                return '%.1f%s' % (value, s)
+        return "%sB" % size
+    except (ValueError, TypeError), err:
+        print "Error(553): Unknown error ", "Convert size %s failed: %s" % (size, err)
+        sys.exit(1)
+
+
+# validationg data
+def change_size_value(data_value):
+    if data_value is None:
+        print "Error(610): Invalid input! need option:" + "size"
+        sys.exit(1)
+    data_value = data_value.upper()
+    try:
+        data_value = int(data_value)
+        unit = 1024 * 1024 * 1024
+        data_value = str(data_value) + "G"
+    except (TypeError, ValueError):
+        if data_value[-1] == "T":
+            unit = 1024 * 1024 * 1024 * 1024
+        elif data_value[-1] == "G":
+            unit = 1024 * 1024 * 1024
+        else:
+            print "Error(610): Invalid input! " + "--size" + ":" + data_value + "  is error"
+            sys.exit(1)
+
+    try:
+        data_value = int(data_value[0:-1])
+    except (TypeError, ValueError):
+        print "Error(610): Invalid input!  type error"
+        sys.exit(1)
+    data_value *= unit
+    return data_value
+
+
+def thin_error(stat, out):
+    if 'Unknown error 608' in out:
+        return 'Error(547): Mds error'
+    elif 'Invalid argument' in out:
+        return 'Error(1605): Thin provisioning size is smaller than existing file size'
+    elif stat != 0:
+        return "Error(553): Unknown error " + out
+    else:
+        return 0
+
+
+# check thin-provisioning status
+def check_thin_provisioning_status():
+    socket_file = "/run/icfs/icfs-client.admin.asok"
+    if not os.path.exists(socket_file):
+        print "Error(1601): Thin provisioning is disabled"
+        sys.exit(1)
+
+    quota_ret = run_local_cmd("icfs daemon %s config get client_dir_quota 2>/dev/null" % socket_file)
+    thin_ret = run_local_cmd("icfs daemon %s config get client_fs_provisioning 2>/dev/null" % socket_file)
+    if quota_ret["retcode"] != 0 or thin_ret["retcode"] != 0:
+        print "Error(1601): Thin provisioning is disabled"
+        sys.exit(1)
+
+    try:
+        quota_dict = json.loads(quota_ret["stdout"])
+        thin_dict = json.loads(thin_ret["stdout"])
+    except ValueError:
+        print "Error(1601): Thin provisioning is disabled"
+        sys.exit(1)
+
+    # check thin provisioning status
+    if thin_dict["client_fs_provisioning"] != "true":
+        print "Error(1601): Thin provisioning is disabled"
+        sys.exit(1)
+
+    # check conflict configration: client_dir_quota
+    if quota_dict["client_dir_quota"] == "true":
+        print "Error(1603): Thin provisioning is conflict with directory quota, please disable directory quota first"
+        sys.exit(1)
+
+
+def thin_set(path, size):
+    # check thin-provisioning status
+    check_thin_provisioning_status()
+    size = change_size_value(size)
+    thin_stat, thin_out = commands.getstatusoutput("setfattr -n icfs.provisioning.max_bytes -v %s %s"
+                                                   % (size, path))
+    flag = thin_error(thin_stat, thin_out)
+    if str(flag) != "0":
+        print flag
+        sys.exit(1)
+
+    print "set success!"
+    sys.exit(0)
+
+
+def thin_delete(path):
+    # check thin-provisioning status
+    check_thin_provisioning_status()
+    thin_stat, thin_out = commands.getstatusoutput("setfattr -n icfs.provisioning.max_bytes -v 0 %s" % path)
+    flag = thin_error(thin_stat, thin_out)
+    if str(flag) != "0":
+        print flag + " " + path
+        sys.exit(1)
+
+
+def thin_query(path):
+    # check thin-provisioning status
+    check_thin_provisioning_status()
+    dir_stat, dir_out = commands.getstatusoutput("getfattr -n icfs.provisioning.max_bytes %s" % path)
+    # get thin size
+    if dir_stat != 0:
+        if "No such attribute" in dir_out:
+            print "Error(1606): Thin provisioning not set"
+            sys.exit(1)
+        else:
+            print 'Error(553): Unknown error ; {0},{1}'.format(path, dir_out)
+            sys.exit(1)
+
+    m = re.search(r".*icfs\.provisioning\.max_bytes=\"(\d+)\".*", dir_out)
+    # m = re.match(r"icfs\.provisioning\.max_bytes=\"(\d+)\"", "icfs.provisioning.max_bytes=\"2147483648\"")
+    if m is None:
+        print "Error(553): Unknown error:", dir_out
+        sys.exit(1)
+    size = int(m.group(1))
+    g_size = size/1024/1024/1024
+    value = "max_Gbytes=" + str(g_size)
+    # get used_bytes
+    info = os.path.getsize(path)
+    value = value + ",used=" + unit_convert(info)
+    return 0, value
+
+
+def check_path(path):
+    if path is None:
+        print "Error(610): Invalid input! -p is need"
+        sys.exit(1)
+    if path.startswith("/"):
+        path = MOUNT_POINT + path
+    else:
+        path = MOUNT_POINT + "/" + path
+    return path
+
+
+def thin_start():
+    congfile_check()
+    cfg_parser = NewConfigParser()
+    cfg_parser.read("/etc/icfs/icfs.conf")
+    # check confilict config: client_dir_quota
+    if cfg_parser.has_option("global", "client_dir_quota") and \
+            cfg_parser.get('global', 'client_dir_quota') == "true":
+        print "Error(1603): Thin provisioning is conflict with directory quota, please disable directory quota first"
+        sys.exit(1)
+
+    if not cfg_parser.has_option("global", "client_fs_provisioning") or \
+            'true' != cfg_parser.get('global', 'client_fs_provisioning'):
+        cfg_parser.set('global', "client_fs_provisioning", 'true')
+        cfg_parser.write(open('/etc/icfs/icfs.conf', 'w'))
+        run_remote_copy("*", "/etc/icfs/icfs.conf", "/etc/icfs/icfs.conf")
+        run_remote_cmd("*", "icfs-client-config --set --key %s --value '%s'" % ("client_fs_provisioning", 'true'))
+ 
+    print "Start thin successfully"
+
+
+def thin_stop():
+    congfile_check()
+    cfg_parser = NewConfigParser()
+    cfg_parser.read("/etc/icfs/icfs.conf")
+    if cfg_parser.has_option("global", "client_fs_provisioning") and \
+            'false' != cfg_parser.get('global', 'client_fs_provisioning'):
+        cfg_parser.set('global', 'client_fs_provisioning', 'false')
+        cfg_parser.write(open('/etc/icfs/icfs.conf', 'w'))
+        run_remote_copy("*", "/etc/icfs/icfs.conf", "/etc/icfs/icfs.conf")
+        run_remote_cmd("*", "icfs-client-config --set --key %s --value '%s'" % ('client_fs_provisioning', 'false'))
+
+    print "Stop thin successfully"
+
+
+def thin_status():
+    congfile_check()
+    cfg_parser = NewConfigParser()
+    cfg_parser.read("/etc/icfs/icfs.conf")
+
+    dir_thin = "false"
+    if cfg_parser.has_option("global", "client_fs_provisioning"):
+        dir_thin = cfg_parser.get("global", "client_fs_provisioning")
+    print dir_thin
+
+
+# check the config file is ok
+def congfile_check():
+    file_path = "/etc/icfs/icfs.conf"
+    cfg_parser = NewConfigParser()
+    read_ok_list = cfg_parser.read(file_path)
+    if file_path not in read_ok_list:
+        print "Error(1710): The config file %s not exist or destroyed" % file_path
+        sys.exit(1)
+    if not cfg_parser.has_section("global"):
+        print "Error(1710): The config file %s not exist or destroyed" % file_path
+        sys.exit(1)
+
+
+def main():
+    path = None
+    size = None
+    try:
+        parser = OptParser.OptParser()
+        # help
+        parser.append("help", "{-h|--help}")
+        # dir thin size
+        parser.append("set", "--set,-p=,--size=")
+        parser.append("delete", "--delete,-p=")
+        parser.append("query", "--query,-p=")
+        # start thin
+        parser.append("start", "--start")
+        # stop thin
+        parser.append("stop", "--stop")
+        # thin status
+        parser.append("status", "--status")
+        m_name, m_opts = parser.parse(sys.argv[1:])
+    except Exception, e:
+        print "Error(610): Invalid input!", e
+        sys.exit(1)
+
+    for k, v in m_opts:
+        if '-p' == k:
+            path = v
+        elif '--size' == k:
+            size = v
+
+    if m_name == "help":
+        usage()
+    elif m_name == "set":
+        path = check_path(path)
+        thin_set(path, size)
+    elif m_name == "delete":
+        path = check_path(path)
+        thin_delete(path)
+    elif m_name == "query":
+        path = check_path(path)
+        flag, info = thin_query(path)
+        if info != "":
+            print info
+        sys.exit(flag)
+    elif m_name == "start":
+        thin_start()
+    elif m_name == "stop":
+        thin_stop()
+    elif m_name == "status":
+        thin_status()
+    else:
+        print "Error(610): Invalid input!"
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

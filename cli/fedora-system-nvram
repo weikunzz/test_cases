@@ -1,0 +1,154 @@
+#!/usr/bin/python
+# coding:utf-8
+'''
+@author: huper
+#change log list
+Created on 2016-12-14 add nvram query function by huper
+modify by huper on 2017-1-10 modify function Error()  print info delete color info 
+'''
+
+import json
+import sys
+import commands
+import getopt
+import datetime
+
+SSHConnectTimeout = 2
+DEBUG = 0
+
+def run_command(comm, node=None):
+    result = None
+    commstart = '\033[1;32;40m'
+    valuestart = '\033[1;33;40m'
+    end = '\033[0m'
+    begintime = 0
+    endtime = 0
+    if node:
+        if DEBUG:
+            print commstart, "[DEBUG info] remote commands: ", ("ssh -o ConnectTimeout=%s -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' \"%s\"" % (SSHConnectTimeout, node, comm)), end
+            begintime = datetime.datetime.now()
+        result = commands.getstatusoutput("ssh -o ConnectTimeout=%s -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' \"%s\"" % (SSHConnectTimeout, node, comm))
+    else:
+        if DEBUG:
+            print commstart, "[DEBUG info] local commands: ", comm, end
+            begintime = datetime.datetime.now()
+        result = commands.getstatusoutput(comm)
+    if DEBUG:
+        endtime = datetime.datetime.now()
+        print valuestart, "run time: " + str((endtime - begintime).seconds) + "s", end
+        print valuestart, "[DEBUG info]", result, end
+    return result
+
+def Error(code, info=None):
+    start = '\033[1;31;40m'
+    end = "\033[0m"
+    if not info:
+        info = ""
+    if code == 610:
+        mess = "Error(610): Invalid input !"
+    elif code == 1406:
+        mess = "Error(1406): Get disk info error"
+    elif code == 1407:
+        mess = "Error(1407): Get vnram stateOfHealth error"
+    else:
+        mess = "Error(553): Unknow error "
+    print mess, info
+
+def get_nvram_list():
+    nvram_list = []
+    error,info = run_command(comm="lsblk -r -o NAME,TYPE,SIZE", node=None)
+    if error:
+        Error(1406,info)
+        return 1
+    for line in info.splitlines():
+        name,type,size = line.split()
+        type = type.replace('"','')
+        if type == "disk":
+            if name.startswith("ev"):
+                nvram_list.append({"name":"/dev/"+name,"size":size})
+    return nvram_list
+
+def get_nvram_stat(nvram):
+    error,info = run_command(comm="ev3util %s json cardStatus"%(nvram), node=None)
+    if error:
+        Error(1407,info)
+        return "None"
+    try:
+        healthjson = json.loads(info)
+        health = healthjson["stateOfHealth"]
+        return health
+    except Exception,e:
+        Error(553,e)
+        return "None"
+
+def query():
+    nvram_list = get_nvram_list()
+    if nvram_list == 1:
+        return 1
+    for nvram in nvram_list:
+        nvram["status"] = get_nvram_stat(nvram["name"])
+    title1 = "device"
+    title2 = "capacity"
+    title3 = "status"
+    tab = 4
+    l1 = len(title1)+4
+    l2 = len(title2)+4
+    for nvram in nvram_list:
+        l1 = max(l1,len(nvram["name"])+4)
+        l2 = max(l2,len(nvram["size"])+4)
+    print title1,(l1-len(title1))*" ",title2,(l2-len(title2))*" ",title3
+    for nvram in nvram_list:
+        c1 = nvram["name"]
+        c2 = nvram["size"]
+        c3 = nvram["status"]
+        print c1,(l1-len(c1))*" ",c2,(l2-len(c2))*" ",c3
+
+def query_by_node(node):
+    if node:
+        error,info = run_command(comm="icfs-system-nvram --query", node=node)
+        print info
+        if error:
+            Error(553,info)
+            return 1
+    else:
+        query()
+
+def mutex_judg(mutex, action):
+    if mutex is None:
+        return action
+    else:
+        Error(610, "--" + action + " cannot use with --" + mutex)
+        sys.exit(1)
+
+def usage():
+    print '''Help(-h|--help) for icfs-system-nvram:
+>>-- icfs-system-nvram ---- --node node ---- --query --------------------------------><
+Options:
+  --query:     query nvram status
+  --node:      node name
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0)
+
+if __name__ == "__main__":
+    node = None
+    operation = None
+    operation_mutex = None
+    try:
+        options, agrs = getopt.getopt(sys.argv[1:], "h", ["help", "query","node="])
+        for key,value in options:
+            if key == "--help" or key == "-h":
+                usage()
+                pass
+            if key == "--query":
+                operation = mutex_judg(operation_mutex, "query")
+                operation_mutex = "query"
+            if key == "--node":
+                node = value
+    except Exception,e:
+        Error(610, e)
+        sys.exit(1)
+    
+    if operation == 'query':
+        sys.exit(query_by_node(node))

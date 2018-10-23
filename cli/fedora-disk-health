@@ -1,0 +1,107 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+import getopt
+import sys
+import commands
+import binascii
+import time
+import re
+import multiprocessing
+import os
+import fcntl
+from icfs_util import salt_run
+from icfs_util import error
+from multiprocessing import Pool
+
+
+def help():
+
+    print '''Help(-h|--help)for icfs-disk-health:
+Usage:
+>> icfs-disk-health ------ --query --------------------------------><
+Functions: Query disk-health info
+Options:
+  --query:  query disk-health status
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0) 
+
+
+def disk_query(n, i):
+    fw = open('osd_health.txt', 'a+')
+
+    disk_health = commands.getoutput("salt '%s' cmd.run 'smartctl -H /dev/%s | grep ^SMART' 2>$0 | grep -v %s" % (n, i, n))
+    if "No" in i:
+        string = n+" "+"none\t\tnone"+" "
+        fcntl.flock(fw.fileno(), fcntl.LOCK_EX)
+        fw.write(string + '\n')
+        fcntl.flock(fw.fileno(), fcntl.LOCK_UN)
+    else:
+        health_info = "abnormal"
+        if "ok" in disk_health.lower() or "passed" in disk_health.lower():
+            health_info = "normal"
+            string = n+" "+"/dev/"+i+"\t"+health_info+" "
+            fcntl.flock(fw.fileno(), fcntl.LOCK_EX)
+            fw.write(string + '\n')
+            fcntl.flock(fw.fileno(), fcntl.LOCK_UN)
+    fw.close()
+
+
+def multiprocess_compute(node_list):
+    pool_size = multiprocessing.cpu_count()
+    pool = Pool(processes=pool_size)  # max processes is num of cpu
+    for n in node_list.splitlines():
+        disk_l = commands.getoutput("salt '%s' cmd.run 'lsblk -d' 2>&1 | grep -v NAME | grep -v %s | \
+        awk '{print $1}'" % (n, n))
+        for i in disk_l.splitlines():
+            result = pool.apply_async(disk_query, (n, i))
+    pool.close()
+    pool.join()
+
+
+def print_result(node_list):
+    for n in node_list.splitlines():
+        fr = open('osd_health.txt', 'r')
+        print "Node: "+n
+        print "Device\t\tStatus"
+        line = fr.readline()
+        while line:
+            if n in line:
+                print line.split(' ')[1]
+            line = fr.readline()
+        fr.close()
+    os.remove('osd_health.txt')
+
+
+def main():
+    salt_run()
+    ret = None
+    try:
+        opts, argv = getopt.getopt(sys.argv[1:], 'h', ['query', 'help'])
+    except getopt.GetoptError, err:
+        error('002')
+    if '-h' in sys.argv or '--help' in sys.argv:
+        if len(opts) != 1 or argv != []:
+            error('002')
+        else:
+            help()
+
+    if argv != []:
+        error('002')
+    for k,v in opts:
+        if '--query' in k:
+            if len(sys.argv) != 2 or '--query' != sys.argv[1]:
+                error('002')
+            else:
+                ret = "query"
+        else:
+            error('002')
+    if ret == "query":
+        node_list = commands.getoutput("salt-key -l acc | grep -v ccept")
+        multiprocess_compute(node_list)
+        print_result(node_list)
+
+if __name__ == '__main__':
+    main()

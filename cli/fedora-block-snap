@@ -1,0 +1,244 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+import getopt
+import sys
+import os
+import commands
+import re
+from icfs_util import error
+
+
+def usage():
+    print """Help(-h|--help)for icfs-block-snap:
+Usage:
+>> icfs-block-snap --+-- --create    --+----><
+                  +-- --delete --+
+                  +-- --purge --+
+                  +-- --rollback --+
+                  '-- --query  --'
+Functions: Create snap, delete snap,query snap,rollback snap,purge snap
+Options:
+  --create:     create new snap
+  --delete:     delete snap
+  --purge:      purge snap
+  --rollback:   rollback snap
+  --query:      query snap information
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-block-snap --create:
+Usage:
+>> icfs-block-snap ---- --create ---- --pool pool_name ---- --image image_name ---- --snap snap_name ------><
+Functions: Create snap
+Options:
+  --pool:       pool name
+  --image:      image name
+  --snap:       snap name 
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-block-snap --purge:
+Usage:
+>> icfs-block-snap ---- --purge ---- --pool pool_name ---- --image image_name ----><
+Functions: Purge snap
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+  
+icfs-block-snap --rollback:
+Usage:
+>> icfs-block-snap ---- --rollback ---- --pool pool_name ---- --image image_name ---- --snap snap_name ------><
+Functions: Rollback snap
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+  
+ icfs-block-snap --delete:
+Usage:
+>> icfs-block-snap ---- --delete ---- --pool pool_name ---- --image image_name --+-- --snap snap_name --+----><
+Functions: Delete snap
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+icfs-block-snap --query:
+Usage:
+>> icfs-admin-snap ---- --query ---- --pool pool_name ---- --image image_name ----><
+Functions: Query the snap information
+Options:
+  As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully """
+    sys.exit(0) 
+
+
+def name_format(name):
+    if re.findall('^[0-9a-zA-Z_]', name) == [] or re.findall('[^\w_]', name) != []:
+        Error(934)
+
+
+def snap_back():
+    # has wrong keys ?
+    invalid_keys = ["-h", "--help", "--delete", "--query", "--create", "--purge"]
+    redundant_keys = [key for key in key_list if key in invalid_keys]
+    if len(redundant_keys) != 0:
+        error("002")
+    # lack of necessary keys ?
+    if snap_name is None or pool_name is None or image_name is None:
+        error("002")
+    os.system("python /usr/bin/task-manage Snap_rollback %s %s %s > /dev/null &" % (image_name, pool_name, snap_name))
+
+
+def snap_create():
+    # has wrong keys ?
+    invalid_keys = ["-h", "--help", "--delete", "--query", "--rollback", "--purge"]
+    redundant_keys = [key for key in key_list if key in invalid_keys]
+    if len(redundant_keys) != 0:
+        error("002")
+    # lack of necessary keys ?
+    if snap_name is None or pool_name is None or image_name is None:
+        error("002")
+    snap_status, snap_out = commands.getstatusoutput("rbd snap create --image %s --pool %s --snap %s"
+                                                     % (image_name, pool_name, snap_name))
+    if snap_status != 0:
+        print snap_out
+        sys.exit(1)
+    print "Create snap successful"
+
+
+def snap_delete():
+    # has wrong keys ?
+    invalid_keys = ["-h", "--help", "--create", "--query", "--rollback", "--purge"]
+    redundant_keys = [key for key in key_list if key in invalid_keys]
+    if len(redundant_keys) != 0:
+        error("002")
+
+    # lack of necessary keys ?
+    if snap_name is None or pool_name is None or image_name is None:
+        error("002")
+    delete_status, delete_out = commands.getstatusoutput("rbd snap rm --image %s --pool %s --snap %s"
+                                                         % (image_name, pool_name, snap_name))
+    if delete_status != 0:
+        print delete_out
+        sys.exit(1)
+    print "Delete snap successful"
+
+
+def snap_query():
+    # has wrong keys ?
+    invalid_keys = ["-h", "--help", "--create", "--delete", "--rollback", "--purge"]
+    redundant_keys = [key for key in key_list if key in invalid_keys]
+    if len(redundant_keys) != 0:
+        error("002")
+
+    # lack of necessary keys ?
+    if pool_name is None or image_name is None:
+        error("002")
+
+    query_status, query_out = commands.getstatusoutput("rbd snap ls --image %s --pool %s" % (image_name, pool_name))
+    if query_status != 0:
+        print query_out
+        sys.exit(1)
+    print "Snap ID".ljust(15, ' '), "Name".ljust(15, ' '), "Size".ljust(15, ' ')
+    query_out = query_out.split("\n")
+    query_list = []
+    for lines in query_out:
+        lines = lines.strip().split(" ")
+        if len(lines) == 4:
+            query_list.append(lines)
+    for snap_id, name, size, unit in query_list:
+        size = size + unit
+        print snap_id.ljust(15, ' '), name.ljust(15, ' '), size.ljust(15, ' ')
+
+
+def snap_purge():
+    # has wrong keys ?
+    invalid_keys = ["-h", "--help", "--create", "--delete", "--rollback", "--query"]
+    redundant_keys = [key for key in key_list if key in invalid_keys]
+    if len(redundant_keys) != 0:
+        error("002")
+
+    # lack of necessary keys ?
+    if pool_name is None or image_name is None:
+        error("002")
+
+    purge_status, purge_out = commands.getstatusoutput("rbd snap purge --image %s --pool %s" % (image_name, pool_name))
+    if purge_status != 0:
+        print purge_out
+        sys.exit(1)
+    print "Delete snap successful"
+
+
+def Error(num, *description):
+    if num == 934:
+        print "Error(934): The pool or image name or snap name.Only letters,numbers,_ is allowed",
+    if num == 1399:
+        print "Error(1399):Unkown error %s" % description
+    sys.exit(1)
+
+
+if __name__ == '__main__':
+    operation = None
+    pool_name = None
+    image_name = None
+    snap_name = None
+    opts = []
+    args = []
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], "h", ["help", "create", "delete", "query", "rollback", "pool=",
+                                                       "image=", "snap=", "purge"])
+    except getopt.GetoptError, err:
+        error('002')
+    
+    if opts == [] or args != []:
+        error('002')
+    
+    for k, v in opts:
+        if k in ('-h', '--help'):
+            operation = "help"
+        elif "--create" == k:
+            operation = "create"
+        elif "--delete" == k:
+            operation = "delete"
+        elif "--query" == k:
+            operation = "query"
+        elif "--rollback" == k:
+            operation = "rollback"
+        elif "--purge" == k:
+            operation = "purge"
+        elif "--pool" == k:
+            pool_name = v
+            name_format(pool_name)
+        elif "--image" == k:
+            image_name = v
+            name_format(image_name)
+        elif "--snap" == k:
+            snap_name = v
+            name_format(snap_name)
+    
+    # has duplicate keys ?
+    key_list = [k for k, v in opts]
+    if len(key_list) != len(set(key_list)):
+        error("002")
+    
+    if operation == "help":
+        usage()
+    elif operation == "create":
+        snap_create()
+    elif operation == "delete":
+        snap_delete()
+    elif operation == "query":
+        snap_query()
+    elif operation == "rollback":
+        snap_back()
+    elif operation == "purge":
+        snap_purge()
+    else:
+        error("002")

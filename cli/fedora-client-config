@@ -1,0 +1,72 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+import os
+import sys
+import re
+from icfs_util import run_local_cmd
+
+import OptParser
+
+socket_dir = "/var/run/icfs"
+
+
+def usage():
+    print """Help(-h|--help)for icfs-client-config:
+Usage:
+>> icfs-client-config ---- --set ---- --key key ---- --value value ----><
+Functions: set icfs client parameter
+Options:
+  --set:       set parameter
+  --key:       key
+  --value:     value
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully """
+
+
+def config_set(key, value):
+    # NFS socket  : icfs-client.3500709-77.asok
+    # CIFS socket : icfs-client.925390.asok
+    # FUSE socket : icfs-client.admin.asok
+    ret = run_local_cmd("ss -nplx | grep -E 'icfs-client.*asok' | awk '{print $5}'")
+    file_path_list = ret["stdout"].splitlines()
+    for file_path in file_path_list:
+        # exclude backend socket
+        if "icfs-client.backend.asok" in file_path:
+            continue
+        if value == "":
+            value = " "
+        run_local_cmd("icfs daemon %s config set %s '%s'" % (file_path, key, value))
+
+
+def main():
+    key = None
+    value = None
+    try:
+        parser = OptParser.OptParser()
+        parser.append("help", "{-h|--help}")
+        parser.append("set", "--set,--key=,--value=")
+        m_name, m_opts = parser.parse(sys.argv[1:])
+    except Exception, e:
+        print e
+        print "Error(610): Invalid input! "
+        sys.exit(1)
+
+    for k, v in m_opts:
+        if k == "--key":
+            key = v
+        elif k == "--value":
+            value = v
+
+    if m_name == "help":
+        usage()
+    elif m_name == "set":
+        config_set(key, value)
+    else:
+        print "Error(610): Invalid input! "
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,271 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+import sys
+import getopt
+import re
+import binascii
+from icfs_util import error, is_rack
+from icfs_util import run_command, run_local_cmd, run_remote_cmd
+
+
+def power_query_local():
+    result = run_local_cmd("ipmitool sdr", timeout=20)
+    if result["retcode"] != 0 or result["stdout"] == '':
+        error('3001')
+    elif 'No' in result["stdout"]:
+        error('3002')
+
+    else:
+        result_list_str = ""
+
+        from collections import defaultdict
+        power_info = defaultdict(dict)
+
+        patt_1 = re.compile("^PSU([0-9]+)_(\S+)\s+.*?")
+        sensor_lines = result["stdout"].splitlines()
+        for line in sensor_lines:
+            m_1 = patt_1.match(line)
+            if m_1:
+                id = int(m_1.groups()[0])
+                power_info[id]["slot"] = str(id)
+                type = m_1.groups()[1]
+
+                power_info[id]["name"] = "power" + str(id)
+
+                if type.upper() in ("SUPPLY",):
+                    try:
+                        power_info[id]["status"] = "normal" if "0x0180" in line else "abnormal"
+                    except Exception:
+                        power_info[id]["status"] = "--"
+
+                elif type.upper() in ("STATUS",):
+                    try:
+                        power_info[id]["status"] = "normal" if "0x0180" in line else "abnormal"
+                    except Exception:
+                        power_info[id]["status"] = "--"
+
+                status, version, types, serial = get_power_info(str(id))
+                try:
+                    power_info[id]["version"] = version
+                except Exception:
+                    power_info[id]["version"] = "--"
+
+                try:
+                    power_info[id]["types"] = types
+                except Exception:
+                    power_info[id]["types"] = "--"
+
+                try:
+                    power_info[id]["serial"] = serial
+                except Exception:
+                    power_info[id]["serial"] = "--"
+
+        result_list = []
+        for key, value in power_info.iteritems():
+            result_list.append({key: value})
+
+        result_list.sort(key=lambda x: x.keys()[0])
+
+        result_list_str = []
+        for item in result_list:
+            for key, value in item.iteritems():
+                a = ""
+
+                try:
+                    a += "Name:%s" % str(value["name"])
+                except Exception:
+                    a += "Name:--"
+                a += "\n"
+
+                try:
+                    a += "Slot:%s" % str(value["slot"])
+                except Exception:
+                    a += "Slot:--"
+                a += "\n"
+
+                try:
+                    a += "State: %s" % str(value["status"])
+                except Exception:
+                    a += "State: --"
+                a += "\n"
+
+                try:
+                    a += "Type:%s" % str(value["types"])
+                except Exception:
+                    a += "Type:--"
+                a += "\n"
+
+                try:
+                    a += "Serial:%s" % str(value["serial"])
+                except Exception:
+                    a += "Serial:--"
+                a += "\n"
+
+                try:
+                    a += "Version:%s" % str(value["version"])
+                except Exception:
+                    a += "Version:--"
+                a += "\n"
+
+                result_list_str.append(a)
+
+        print "\n".join(result_list_str)
+
+
+def power_query():
+    result = run_remote_cmd("*", "icfs-system-powerstatus --query local")
+    for hostName, returnInfor in result.iteritems():
+        print "Node:%s" % str(hostName)
+        print returnInfor["stdout"]
+        print ""
+
+
+def get_power_info(name):
+    if int(name) < 9:
+        power_info = run_local_cmd("ipmitool raw 0x3a 0x71 0x0%s" % name, timeout=10)
+    else:
+        power_info = run_local_cmd("ipmitool raw 0x3a 0x71 0x%s" % name, timeout=10)
+    if power_info["retcode"] != 0:
+        return "--", "--", "--", "--"
+    elif 'No' in power_info["stdout"]:
+        return "--", "--", "--", "--"
+    elif 'Unable to send RAW command' in power_info["stdout"]:
+        return "--", "--", "--", "--"
+    else:
+        power_info_list = power_info["stdout"].split()  # 空白符分隔（包括空格，table,换行）
+        power_status = 'normal'
+        power_version = ''
+        power_type = ''
+        power_serial = 'None'
+        for a in power_info_list[21:29]:
+            if a == '00':
+                continue
+            power_version += binascii.a2b_hex(a)
+
+        for a in power_info_list[29:45]:
+            if a == '00':
+                continue
+            power_type += binascii.a2b_hex(a)
+
+        for a in power_info_list[61:77]:
+            if a == '00':
+                continue
+            power_serial += binascii.a2b_hex(a)
+        if power_serial != 'None':
+            power_serial = power_serial[4:]
+    return power_status, power_version, power_type, power_serial
+
+
+def rack_power_query():
+    rack_power_sn = {}
+
+    rack_info_cache = 'cat /usr/local/ism/Agent/src/Cache/rack_info.txt'
+    rack_info = run_command(rack_info_cache)[1]
+    if rack_info == '' or 'No such file' in rack_info:
+        error('3005')
+    else:
+        rack_info_split = re.split('\n\s*\n', rack_info)  # 换行分隔
+        for r in rack_info_split:
+
+            if 'PSUID' in r and 'SN' in r:
+                psu_sn = r.splitlines()  # 电源模块每一行组成的列表
+                if len(psu_sn) < 3:
+                    error('3005')
+                else:
+                    for sn in psu_sn[2:]:
+                        # sn_dict = {}
+                        rack_sn = sn.split()
+                        if len(rack_sn) < 2:
+                            error('3005')
+                        sn_dict = {rack_sn[0]: rack_sn[1]}
+                        rack_power_sn.update(sn_dict)
+
+            elif 'PSUID' in r and 'Status' in r and 'Health' in r:
+                psu_split = r.splitlines()  # 电源模块每一行组成的列表
+                if len(psu_split) < 3:
+                    error('3005')
+                else:
+                    for psu_line in psu_split[2:]:  # 从第三行开始的某一行
+                        psu = psu_line.split()
+                        if len(psu) < 3:
+                            error('3005')
+                        power_name = psu[0].replace('PSU-', 'power')
+                        power_slot = psu[0][-2:]
+                        status = 'normal'
+                        if psu[1] != 'On':
+                            status = 'abnormal'
+                        serial = '0'
+                        if psu[0] in rack_power_sn:
+                            serial = rack_power_sn[psu[0]]
+                        # print 'Racks:'+'0'  
+                        print 'Name:' + power_name
+                        print 'Slot:' + power_slot
+                        print 'State:' + status
+                        print 'Serial:' + serial
+                        if psu_line != psu_split[2:][-1]:
+                            print ''
+
+
+def usage():
+    print '''Help(-h|--help)for icfs-system-powerstatus:
+Usage:
+>> icfs-system-powerstatus ------ --query --------------------------------><
+Functions: Query powers info
+Options:
+  --query:  query powers info
+  
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+ Usage:
+>> icfs-system-powerstatus ------ --query smartrack ------------------------------><
+Functions: Query Racks powers info
+Options:
+  --query:  query Racks powers info
+  
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+
+    name_list = []
+    ret = None
+    racks = None
+    try:
+        opts, argv = getopt.getopt(sys.argv[1:], 'h', ['query', 'help'])
+    except getopt.GetoptError, err:
+        error('002')
+    if '-h' in sys.argv or '--help' in sys.argv:
+        if len(opts) != 1 or argv != []:
+            error('002')
+        else:
+            usage()
+
+    for k, v in opts:
+        if k == "--query":
+            if len(sys.argv) == 2:
+                ret = "query"
+            elif len(sys.argv) == 3 and argv[0] == "smartrack":
+                ret = "query_rack"
+            elif len(sys.argv) == 3 and argv[0] == "local":
+                ret = "query_local"
+            else:
+                error('002')
+        else:
+            error('002')
+
+    rack = is_rack()
+    if ret == "query":
+        if rack:
+            error('3009')
+        power_query()
+    elif ret == "query_rack":
+        if not rack:
+            error('3007')
+        rack_power_query()
+    else:
+        power_query_local()

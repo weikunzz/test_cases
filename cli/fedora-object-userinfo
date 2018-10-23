@@ -1,0 +1,90 @@
+#! /bin/bash
+
+function usage() 
+{
+        echo "usage(-h | --help):"
+        printf "\ticfs-object-userinfo all\t            show all s3 users information\n"
+        printf "\ticfs-object-userinfo tenant uid\t     show specified s3 user informatioin with tenant\n"
+        printf "\ticfs-object-userinfo uid\t            show specified s3 user informatioin without tenant\n"
+}
+
+function show_all_info()
+{
+  rgw_user_pool=`rados lspools | grep rgw.users.uid 2>/dev/null`
+  if [ -z "$rgw_user_pool" ]
+  then
+    echo "Error(3610): Could not fetch user info: no user info saved"
+    exit 1
+  fi
+  ret=`radosgw-admin metadata list userinfo --name client.radosgw.gateway 2>/dev/zero`
+  if [ $ret == "[]" ] 2>/dev/zero
+  then
+    echo "Error(3610): Could not fetch user info: no user info saved"
+    exit 1
+  else
+    radosgw-admin metadata list userinfo --name client.radosgw.gateway 2>/dev/zero
+    exit 0
+  fi
+}
+
+function show_info_with_tenant()
+{
+  ret=`radosgw-admin user info --tenant $1 --uid $2 --name client.radosgw.gateway 2>/dev/zero`
+  if [ -z $ret ] 2>/dev/zero
+  then
+    echo "Error(3610): Could not fetch user info: no user info saved"
+    exit 1
+  else
+    radosgw-admin user info --tenant $1 --uid $2 --name client.radosgw.gateway 2>/dev/zero
+    exit 0
+  fi
+
+}
+
+function show_info_without_tenant()
+{
+  ret=`radosgw-admin user info --uid $1 --name client.radosgw.gateway 2>/dev/zero`
+  if [ -z $ret ] 2>/dev/zero
+  then
+    echo "Error(3610): Could not fetch user info: no user info saved"
+    exit 1
+  else
+    radosgw-admin user info --uid $1 --name client.radosgw.gateway 2>/dev/zero
+    exit 0
+  fi
+
+}
+
+function main()
+{
+    
+    if [ $# -eq 0 ]
+    then
+      usage
+      exit 1
+    fi
+
+    if [ $# -eq 1 ]
+    then
+      if [ $1 == "-h" -o $1 == "--help" ]
+      then
+        usage
+        exit 0
+      elif [ $1 == "all" ]
+      then
+        show_all_info
+      else
+        show_info_without_tenant $@
+      fi
+    fi
+
+    if [ $# -ne 2 ]
+    then
+      echo "Error(3607): Input should contain tenant and uid"
+      usage
+      exit 1
+    else
+      show_info_with_tenant $@
+    fi
+}
+main $@

@@ -1,0 +1,173 @@
+#!/usr/bin/python
+# -*- coding: utf-8 -*-
+
+from OptParser import OptParser
+import sys
+import os
+import LinuxConfigParser
+
+
+def usage():
+    print '''Help(-h|--help) for icfs-linux-config:
+Usage:
+>> icfs-linux-config ---- --query ---- --file file_path --+-- --key key --+----><
+                                                          '-- --all     --'
+Functions: Query value of specific key/all keys in the linux style config file
+Options:
+  --query: query the value in linux style config file specified
+  --file:  the file path
+  --key:   the name of key
+  --all:   list all key-value in specified file
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>> icfs-linux-config ---- --set ---- --file file_path ---- --key key ---- --value value ----><
+Functions: Update value of specific key in the linux style config file
+Options:
+  --set:    set the value of specific key in the linux style config file
+  --key:    the name of key
+  --value:  value of the key
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>> icfs-linux-config ---- --delete ---- --file file_path ---- --key key ----><
+Functions: Update value of specific key in the linux style config file
+Options:
+  --delete: delete specific key in the linux style config file
+  --key:    the name of key
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+
+
+def query_all(file_path):
+    if not os.path.isfile(file_path):
+        print "file not exist:", file_path
+        sys.exit(1)
+
+    config_parser = LinuxConfigParser.LinuxConfigParser()
+    try:
+        config_parser.read(file_path)
+    except IOError, err:
+        print "read config file error:", file_path
+        print err
+        sys.exit(1)
+
+    for key, value in config_parser.items():
+        print "%-15s %s" % (key, value)
+
+
+def query_key(file_path, key):
+    if not os.path.isfile(file_path):
+        print "file not exist:", file_path
+        sys.exit(1)
+
+    config_parser = LinuxConfigParser.LinuxConfigParser()
+    try:
+        config_parser.read(file_path)
+    except IOError, err:
+        print "read config file error:", file_path
+        print err
+        sys.exit(1)
+
+    if key not in config_parser.keys():
+        print "key not exist:", key
+        sys.exit(1)
+
+    print config_parser.get(key)
+
+
+def set_key_value(file_path, key, value):
+    if not os.path.isfile(file_path):
+        print "file not exist:", file_path
+        sys.exit(1)
+
+    config_parser = LinuxConfigParser.LinuxConfigParser()
+    try:
+        config_parser.read(file_path)
+    except IOError, err:
+        print "read config file error:", file_path
+        print err
+        sys.exit(1)
+
+    config_parser.set(key, value)
+    try:
+        config_parser.write(file_path)
+    except IOError, err:
+        print "write config file error:", file_path
+        print err
+        sys.exit(1)
+
+    print "set success"
+
+
+def delete_key(file_path, key):
+    if not os.path.isfile(file_path):
+        print "file not exist:", file_path
+        sys.exit(1)
+
+    config_parser = LinuxConfigParser.LinuxConfigParser()
+    try:
+        config_parser.read(file_path)
+    except IOError, err:
+        print "read config file error:", file_path
+        print err
+        sys.exit(1)
+
+    config_parser.remove(key)
+    try:
+        config_parser.write(file_path)
+    except IOError, err:
+        print "write config file error:", file_path
+        print err
+        sys.exit(1)
+
+    print "delete success"
+
+
+def main():
+    key = None
+    file_path = None
+    value = None
+
+    try:
+        parser = OptParser()
+        parser.append("help", "{-h|--help}")
+        parser.append("query_all", "--query,--file=,--all")
+        parser.append("query_key", "--query,--file=,--key=")
+        parser.append("set", "--set,--file=,--key=,--value=")
+        parser.append("delete", "--delete,--file=,--key=")
+
+        m_name, m_opts = parser.parse(sys.argv[1:])
+    except Exception, err:
+        print "Error(610): Invalid input!"
+        print err
+        sys.exit(1)
+
+    for x, y in m_opts:
+        if '--key' == x:
+            key = y
+        elif '--file' == x:
+            file_path = y
+        elif '--value' == x:
+            value = y
+
+    if m_name == 'help':
+        usage()
+    elif m_name == 'query_all':
+        query_all(file_path)
+    elif m_name == "query_key":
+        query_key(file_path, key)
+    elif m_name == 'set':
+        set_key_value(file_path, key, value)
+    elif m_name == "delete":
+        delete_key(file_path, key)
+    else:
+        print "Error(610): Invalid input!"
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

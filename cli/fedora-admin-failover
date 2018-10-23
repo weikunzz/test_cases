@@ -1,0 +1,294 @@
+#!/usr/bin/python
+# coding:utf-8
+
+# change log list
+# 20170712 sunyekuan create
+# 20170802 sunyekuan add query() function
+
+import sys
+import commands
+from icfs_util import NewConfigParser
+from LinuxConfigParser import LinuxConfigParser
+from icfs_util import run_remote_cmd, run_remote_copy, error
+import OptParser
+
+
+def usage():
+    print """Help(-h|--help) for icfs-admin-failover:
+Usage:
+>> icfs-admin-failover ----+-- --enable ---- -c redundant_count --+-----><
+                           +--           --disable              --+
+                           '--           --query                --'
+                       
+  --enable:  enable the transparent failover function
+  -c:       ctdb redundant count
+  --disable: disable the transparent failover function
+  --query: query whether enable the transparent failover or not. if so, print the redundant count
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully"""
+
+
+def Error(num, *description):
+    if num == 125:
+        print "Error(125): public_addresses is not configured"
+    if num == 610:
+        print "Error(610): Invalid input!"
+    elif num == 703:
+        print "Error(703): Synchronization configuration file failed %s" % description
+    elif num == 743:
+        print "Error(743): Failed to restart samba for %s" % description
+    sys.exit(1)
+
+def get_pub_nic():
+    pub_nic = ""
+    pub_nic = commands.getoutput("cat /etc/ctdb/public_addresses |grep -v '#'|sed -n '1p'|awk '{print $2}'")
+    return pub_nic
+
+def get_pub_ips():
+    pub_ips = ""
+    pub_mask_ips_lines = commands.getoutput("cat /etc/ctdb/public_addresses |grep -v '#'|awk '{print $1}'")
+    if not pub_mask_ips_lines:
+        return ""
+    pub_mask_ips = pub_mask_ips_lines.replace('\r', '').replace('\n', ' ')
+    for ip in pub_mask_ips.split(" "):
+        pub_ips += ip.split("/")[0]
+        pub_ips += " "
+    return pub_ips.strip()
+
+def enable_failover_smb(config_file):
+    pub_nic = get_pub_nic()
+    if not pub_nic:
+        Error(125)
+    #print pub_nic
+
+    pub_ips = get_pub_ips()
+    if not pub_nic:
+        Error(125)
+    #print pub_ips
+
+    smbconf = NewConfigParser()
+    smbconf.read(config_file)
+
+    smbconf.set("global", "icfs aio force", 0)
+    smbconf.set("global", "icfs timeout", 30)
+    smbconf.set("global", "smb2 leases", "true")
+    smbconf.set("global", "smb2 dir leases", "false")
+    smbconf.set("global", "case sensitive", "auto")
+    smbconf.set("global", "enable disk free opt", "no")
+    smbconf.set("global", "enable ftruncate opt", "no")
+    smbconf.set("global", "enable ntimes opt", "no")
+    smbconf.set("global", "disable smbd uid sid check", "no")
+    smbconf.set("global", "disable smbd gid sid check", "no")
+    smbconf.set("global", "enable open preread", "no")
+    smbconf.set("global", "enable response in main", "no")
+
+    smbconf.set("global", "interfaces", pub_nic)
+    smbconf.set("global", "kernel oplocks", "no")
+    smbconf.set("global", "kernel share modes", "no")
+    smbconf.set("global", "posix locking", "no")
+    smbconf.set("global", "durable handles", "yes")
+    smbconf.set("global", "strict sync", "yes")
+    smbconf.set("global", "sync always", "yes")
+    smbconf.set("global", "smbd:announce persistent handles", "yes")
+    smbconf.set("global", "smbd:announce cluster", "true")
+    smbconf.set("global", "smbd:announce ca", "true")
+    smbconf.set("global", "witness:max version", 2)
+    smbconf.set("global", "rpc_daemon:witnessd", "fork")
+    smbconf.set("global", "rpc_daemon:epmd", "fork")
+    smbconf.set("global", "rpc_server:epmapper", "external")
+    smbconf.set("global", "rpc_server:register_embedded_np", "yes")
+    smbconf.set("global", "rpc_server:tcpip", "yes")
+    smbconf.set("global", "rpc_server:mgmt", "external")
+    smbconf.set("global", "witness:ipv4 interfaces", pub_ips)
+
+    smbconf.write(open(config_file, "w"))
+
+    # synchonize config file
+    ret_dict = run_remote_copy("*", config_file, config_file)
+    fail_list = [name for name, ret in ret_dict.items() if ret["retcode"] != 0]
+    if fail_list:
+        Error(703)
+        sys.exit(1)
+
+    return 0
+
+
+def disable_failover_smb(config_file):
+    smbconf = NewConfigParser()
+    smbconf.read(config_file)
+
+    smbconf.remove_option("global", "icfs aio force")
+    smbconf.remove_option("global", "icfs timeout")
+    smbconf.remove_option("global", "smb2 leases")
+    smbconf.remove_option("global", "smb2 dir leases")
+    smbconf.remove_option("global", "case sensitive")
+    smbconf.remove_option("global", "enable disk free opt")
+    smbconf.remove_option("global", "enable ftruncate opt")
+    smbconf.remove_option("global", "enable ntimes opt")
+    smbconf.remove_option("global", "disable smbd uid sid check")
+    smbconf.remove_option("global", "disable smbd gid sid check")
+    smbconf.remove_option("global", "enable open preread")
+    smbconf.remove_option("global", "enable response in main")
+
+    smbconf.remove_option("global", "interfaces")
+    smbconf.remove_option("global", "kernel oplocks")
+    smbconf.remove_option("global", "kernel share modes")
+    smbconf.remove_option("global", "posix locking")
+    smbconf.remove_option("global", "durable handles")
+    smbconf.remove_option("global", "strict sync")
+    smbconf.remove_option("global", "sync always")
+    smbconf.remove_option("global", "smbd:announce persistent handles")
+    smbconf.remove_option("global", "smbd:announce cluster")
+    smbconf.remove_option("global", "smbd:announce ca")
+    smbconf.remove_option("global", "witness:max version")
+    smbconf.remove_option("global", "rpc_daemon:witnessd")
+    smbconf.remove_option("global", "rpc_daemon:epmd")
+    smbconf.remove_option("global", "rpc_server:epmapper")
+    smbconf.remove_option("global", "rpc_server:register_embedded_np")
+    smbconf.remove_option("global", "rpc_server:tcpip")
+    smbconf.remove_option("global", "rpc_server:mgmt")
+    smbconf.remove_option("global", "witness:ipv4 interfaces")
+
+    smbconf.write(open(config_file, "w"))
+
+    # synchonize config file
+    ret_dict = run_remote_copy("*", config_file, config_file)
+    fail_list = [name for name, ret in ret_dict.items() if ret["retcode"] != 0]
+    if fail_list:
+        Error(703)
+        sys.exit(1)
+
+    return 0
+
+def enable_failover_ctdb(config_file, redundant_count):
+    ctdbconf = LinuxConfigParser()
+    ctdbconf.read(config_file)
+
+    ctdbconf.set("CTDB_REDUNDANT_COUNT", redundant_count)
+
+    ctdbconf.write(config_file)
+
+    # synchonize config file
+    ret_dict = run_remote_copy("*", config_file, config_file)
+    fail_list = [name for name, ret in ret_dict.items() if ret["retcode"] != 0]
+    if fail_list:
+        Error(703)
+        sys.exit(1)
+    # restart ctdb
+    ret_dict = run_remote_cmd("*", "systemctl restart ctdb")
+    fail_list = [name for name, ret in ret_dict.items() if ret["retcode"] != 0]
+    if fail_list:
+        Error(743, ",".join(fail_list))
+    
+    return 0
+
+def disable_failover_ctdb(config_file):
+    ctdbconf = LinuxConfigParser()
+    ctdbconf.read(config_file)
+
+    ctdbconf.remove("CTDB_REDUNDANT_COUNT")
+
+    ctdbconf.write(config_file)
+
+    # synchonize config file
+    ret_dict = run_remote_copy("*", config_file, config_file)
+    fail_list = [name for name, ret in ret_dict.items() if ret["retcode"] != 0]
+    if fail_list:
+        Error(703)
+        sys.exit(1)
+    # restart ctdb
+    ret_dict = run_remote_cmd("*", "systemctl restart ctdb")
+    fail_list = [name for name, ret in ret_dict.items() if ret["retcode"] != 0]
+    if fail_list:
+        Error(743, ",".join(fail_list))
+
+    return 0
+
+def query_failover(smb_config_file, ctdb_config_file):
+    pub_nic = get_pub_nic()
+    if not pub_nic:
+        Error(125)
+    #print pub_nic
+
+    #pub_ips = get_pub_ips()
+    #if not pub_nic:
+    #    Error(125)
+    #print pub_ips
+
+    t_redundant_count = 0
+
+    smbconf = NewConfigParser()
+    smbconf.read(smb_config_file)
+
+    ctdbconf = LinuxConfigParser()
+    ctdbconf.read(ctdb_config_file)
+
+    if smbconf.has_option("global", "interfaces") and smbconf.get("global", "interfaces") == pub_nic \
+and smbconf.has_option("global", "durable handles") and smbconf.get("global", "durable handles") == "yes" \
+and smbconf.has_option("global", "strict sync") and smbconf.get("global", "strict sync") == "yes" \
+and smbconf.has_option("global", "sync always") and smbconf.get("global", "sync always") == "yes" \
+and smbconf.has_option("global", "smbd:announce persistent handles") and smbconf.get("global", "smbd:announce persistent handles") == "yes" \
+and smbconf.has_option("global", "smbd:announce cluster") and smbconf.get("global", "smbd:announce cluster") == "true" \
+and smbconf.has_option("global", "smbd:announce ca") and smbconf.get("global", "smbd:announce ca") == "true" \
+and smbconf.has_option("global", "rpc_daemon:witnessd") and smbconf.get("global", "rpc_daemon:witnessd") == "fork" \
+and smbconf.has_option("global", "rpc_daemon:epmd") and smbconf.get("global", "rpc_daemon:epmd") == "fork" \
+and smbconf.has_option("global", "rpc_server:epmapper") and smbconf.get("global", "rpc_server:epmapper") == "external":
+#and smbconf.has_option("global", "kernel oplocks") and smbconf.get("global", "kernel oplocks") == "no" \
+#and smbconf.has_option("global", "kernel share modes") and smbconf.get("global", "kernel share modes") == "no" \
+#and smbconf.has_option("global", "posix locking") and smbconf.get("global", "posix locking") == "no" \
+#and smbconf.has_option("global", "witness:max version") and smbconf.getint("global", "witness:max version") == 2 \
+#and smbconf.has_option("global", "rpc_server:register_embedded_np") and smbconf.get("global", "rpc_server:register_embedded_np") == "yes" \
+#and smbconf.has_option("global", "rpc_server:tcpip") and smbconf.get("global", "rpc_server:tcpip") == "yes" \
+#and smbconf.has_option("global", "rpc_server:mgmt") and smbconf.get("global", "rpc_server:mgmt") == "external" \
+#and smbconf.has_option("global", "witness:ipv4 interfaces") and smbconf.get("global", "witness:ipv4 interfaces") == pub_ips:
+        if ctdbconf.has_key("CTDB_REDUNDANT_COUNT"):
+            t_redundant_count = ctdbconf.get("CTDB_REDUNDANT_COUNT").strip()
+            if not t_redundant_count.isdigit():
+                t_redundant_count = 0
+        else:
+            t_redundant_count = 0
+    else:
+        t_redundant_count = 0
+
+    print "RedundantCount"
+    print t_redundant_count
+
+    return 0
+
+if __name__ == '__main__':
+    smb_config_file = "/etc/samba/smb.conf"
+    ctdb_config_file = "/etc/ctdb/ctdbd.conf"
+    ctdb_redundant_count = 0
+    try:
+        opt_parser = OptParser.OptParser()
+        # help
+        opt_parser.append("help", "{-h|--help}")
+        # enable failover
+        opt_parser.append("enable", "--enable,-c=")
+        # disable failover
+        opt_parser.append("disable", "--disable")
+        # query failover
+        opt_parser.append("query", "--query")
+        m_name, m_opts = opt_parser.parse(sys.argv[1:])
+    except Exception, e:
+        print "Error(610): Invalid input! "
+        print e
+        sys.exit(1)
+
+    for ops, arg in m_opts:
+        if ops == "-c":
+            ctdb_redundant_count = arg
+
+    if m_name == "help":
+        usage()
+    elif m_name == "enable":
+        enable_failover_smb(smb_config_file)
+        enable_failover_ctdb(ctdb_config_file, ctdb_redundant_count)
+    elif m_name == "disable":
+        disable_failover_smb(smb_config_file)
+        disable_failover_ctdb(ctdb_config_file)
+    elif m_name == "query":
+        query_failover(smb_config_file, ctdb_config_file)
+    else:
+        Error(610)

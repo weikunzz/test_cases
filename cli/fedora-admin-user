@@ -1,0 +1,267 @@
+#!/usr/bin/python
+# coding:utf-8
+import sys
+import icfs_util
+import icfs_admin_user_ad
+import icfs_admin_user_nis
+import icfs_admin_user_local
+import icfs_admin_user_ldap
+try:
+    import icfs_admin_user_list
+except:
+    pass
+
+
+def usage():
+    print '''Help(-h|--help)for icfs-admin-user:
+Usage:
+>> icfs-admin-user ----+ --local +--------------------------------------------><
+                       +  --ad   +
+                       +  --nis  +
+                       '  --ldap '
+Functions: Choose local user or ad service or nis service or ldap service
+Options:
+  --local:  create/delete/query/set local user
+  --ad:     join/quit/query/test ad service
+  --nis:    join/query/test nis service
+  --ldap:   join/query/test ldap service
+
+icfs-admin-user --local:
+Usage:
+>> icfs-admin-user ----local ---+ --create +--------------------------------><
+                                + --delete +
+                                + --query  +
+                                ' --set    '
+Functions: Create/Delete/Query/Set local user
+Options:
+  --create:  create user or group
+  --delete:  delete the user or group
+  --query:   query the user or group
+  --set:     modify the user's password or group
+
+icfs-admin-user --local --create:
+Usage:
+>> icfs-admin-user ----local --create -+ -g group_name ----------------------------------+-><
+                                       ' -u user_name --passwd pass_word +---------------+-'
+                                                                         ' -g group_name '
+Functions: Create user or group
+Options:
+  -g:        the groupname which you want to create
+  -u:        the username which you want to create
+  --passwd:  set password for the user
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-user --local --delete:
+Usage:
+>> icfs-admin-user ----local --delete -+ -u user_name +----------------------><
+                                      ' -g group_name '
+Functions: Delete user or group
+Options:
+  -g:  the groupname which you want to delete
+  -u:  the username which you want to delete
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-user --local --query:
+Usage:
+>> icfs-admin-user ----local --query -+ -u +----------------------------------><
+                                      ' -g '
+Functions: Query all the users or groups
+Options:
+  -g:  query all the groups
+  -u:  query all the users
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-user --local --set:
+Usage:
+>> icfs-admin-user ----local --set -- -u user_name -+ --passwd pass_word -g group_name +-><
+                                                    +         -g group_name           +
+                                                    '        --passwd pass_word       '
+Functions: Modify the user's password or group
+Options:
+  -u:        the username which you want to modify
+  -g:        the groupname which you want to delete
+  --passwd:  modify the user's password
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-user --ad:
+Usage:
+>> icfs-admin-user ---- --ad -+ --join  +--------------------------------------><
+                             + --query +
+                             + --test  +
+                             ' --quit  '
+Functions: Join/Query/Test/Quit ad service
+Options:
+  --join:   join to ad
+  --query:  query ad's information
+  --test:   test connect to DomainController
+  --quit:   quit ad service
+
+icfs-admin-user --ad --join:
+Usage:
+>> icfs-admin-user ---- --ad -- --join -- -u user_name --- --passwd pass_word --->
+>---- --domain domain_name --- --ip dcip ---------------------------------------><
+Functions: Join to ad
+Options:
+  -u:        the administrator's name of ad service
+  --passwd:  the administrator's password of ad service
+  --domain:  ad's domain name
+  --ip:      the DomainController's  IP
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-user --ad --quit:
+Usage:
+>> icfs-admin-user ---- --ad -- --quit --- -u user_name --- --passwd pass_word -><
+Functions: Quit ad service
+Options:
+  --u:       the administrator's name of ad service
+  --passwd:  the administrator's password of ad service
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-user --ad --query:
+Usage:
+>> icfs-admin-user ---- --ad -- --query ---------------------------------------><
+Functions: Query ad's information
+Options:
+  --query:  query ad's information
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-user --ad --test:
+Usage:
+>> icfs-admin-user ---- --ad -- --test - --domain domain_name ----------------><
+Functions: Test connect to DomainController
+Options:
+  --domain:  ad's domain name
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-user --nis:
+Usage:
+>> icfs-admin-user ---- --nis -+ --join +-------------------------------------><
+                              + --query +
+                              ' --test  '
+Functions: Join/Query/Test nis service
+Options:
+  --join:   join to nis
+  --query:  query nis's information
+  --test:   test connect to nis server
+
+icfs-admin-user --nis --join:
+Usage:
+>> icfs-admin-user ---- --nis -- --join -- --ip ip --domain domain_name ------><
+Functions: Join to nis
+Options:
+  --ip:      the NISServer's IP
+  --domain:  the full domain name of NIS
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-user --nis --query:
+Usage:
+>> icfs-admin-user ---- --nis -- --query ---------------------------------------><
+Functions: Query nis's information
+Options:
+  --query:  query nis's information
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-user --nis --test:
+Usage:
+>> icfs-admin-user ---- --nis -- --test --- --ip ip ---------------------------><
+Functions: Test connect to NISServer
+Options:
+  --ip:  the NISServer's IP
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-user --ldap:
+Usage:
+>> icfs-admin-user ---- --ldap -+ --join  +---------------------------------><
+                                + --query +
+                                ' --test  '
+Functions: Join/Query/Test ldap service
+Options:
+  --join:   join to ldap
+  --query:  query ldap's information
+  --test:   test connect to ldap server
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-user --ldap --join:
+Usage:
+>> icfs-admin-user ---- --ldap -- --join --- --ip ip --- --port port_number-->
+>------------ -b baseDN ----------------------------------------------------><
+Functions: Join to ldap
+Options:
+  --ip:    the ldapServer's IP
+  --port:  the ldapServer's port
+  -b:      the full domain name of ldap
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-user --ldap --query:
+Usage:
+>> icfs-admin-user ---- --ldap -- --query ----------------------------------><
+Functions: Query ldap's information
+Options:
+  --query:  query ldap's information
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-user --ldap --test:
+Usage:
+>> icfs-admin-user ---- --ldap -- --test --- --ip ip -------------------------><
+Functions: Test connect to ldapServer
+Options:
+  --ip:  the ldapServer's IP
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    if len(sys.argv[1:]) < 1:
+        icfs_util.error('002')
+    elif '-h' in sys.argv[1:] or '--help' in sys.argv[1:]:
+        if len(sys.argv[1:]) == 1:
+            usage()
+        else:
+            icfs_util.error('002')
+    else:
+        if '--ad' in sys.argv[1:]:
+            icfs_admin_user_ad.ad()
+        elif '--ldap' in sys.argv[1:]:
+            icfs_admin_user_ldap.ldap()
+        elif '--nis' in sys.argv[1:]:
+            icfs_admin_user_nis.nis()
+        elif '--local' in sys.argv[1:]:
+            icfs_admin_user_local.local()
+        elif '--user' in sys.argv[1:]:
+            try:
+                icfs_admin_user_list.admin()
+            except Exception, e:
+                print e
+                sys.exit(1)
+        else:
+            icfs_util.error('002')

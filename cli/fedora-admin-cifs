@@ -1,0 +1,2525 @@
+#!/usr/bin/python
+# coding:utf-8
+
+# change log list
+# 20161207 shaoning (cifs_query_user) Bug fix: acl expand "v" flag, add compatible code
+# 20161214 shaoning (cifs_set_service) Bug fix: check_for_path need relative path
+# 20161214 shizonghua Add CIFS access audit function(cifs_set_audit_level,cifs_audit_query)
+# 20161226 shaoning (setacl_for_path) Bug fix: "v"(visual) added in ACL after version 3.5.1.1(included)
+# 20161226 shizonghua Add adjust if there need audit info when create share.
+# 20170103 shaoning (cifs_query_user) add display failover status
+# 20170110 shizonghua fix samba config file have duplicated vfs object config option
+# 20170110 zhangpan Bug(0005521)fix samba config file have duplicated vfs object config option
+# 20170119 shaoning (cifs_create_share) delete samba attribute "store dos attributes" when creating cifs share
+# 20170222 shaoning (cifs_set_limit) add function to set max connections number
+# 20170614 shaoning (all_function) instead getopt with OptParser, optimize code style
+
+import os
+import re
+import sys
+import commands
+import platform
+import multiprocessing
+import time
+import subprocess
+import signal
+
+from icfs_util import NewConfigParser
+from icfs_util import IcfsVersion
+from LinuxConfigParser import LinuxConfigParser
+from icfs_util import get_remote_host_list, error, is_rack
+from icfs_util import run_remote_ping, run_local_cmd
+import OptParser
+
+
+def usage():
+    print """Help(-h|--help) for icfs-admin-cifs:
+Usage:
+>> icfs-admin-cifs ----+ --create +----><
+                       + --set    +
+                       + --delete +
+                       + --query  +
+                       + --start  +
+                       ' --stop   '
+                       
+Functions: Create/Set/Delete/Query CIFS service 
+Options:
+  --create:  create cifs service
+  --set:     modify cifs service
+  --delete:  delete cifs service
+  --query:   query cifs service
+  --start:   start cifs service
+  --stop:    stop cifs service
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-cifs --create:
+Usage: 
+>> icfs-admin-cifs ---- --create ---- -p path ---- -n share_name -+-----------------+-><
+                                                                  '--failover --flag'
+Functions: Create share path only or add user with acl at the same time
+Options:
+  -p:          path of cifs service, which is required
+  -n:          share name of the path, which is required and exclusively
+  -u:          user which is to add in cifs service
+  -g:          group which is to add in cifs service
+  -a:          acl of user/group
+  --local:     local mode is corresponding to security=user; which requires local user or group
+  --domain:    domain mode is corresponding to security=ads; which requires domain user or group
+  --everyone:  map anonymous login to everyone group 
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>> icfs-admin-cifs ---- --create ---- -n share_name ------------->
+>--+----------  --everyone  -----------+-- -a acl_value --------><
+   '--+ --local  +--+ -u user_name  +--'  
+      ' --domain '  ' -g group_name '
+Functions: Add user/group to share name
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-cifs --set: 
+Usage:
+>> icfs-admin-cifs ---- --set ---- -n share_name ------------------------------------------>
+>--+-----  -p path  --- --grace grace_period --- --overtime overtime_period----+-----------><
+   +-----  --failover failover_flag -------------------------------------------+
+   +-----  --audit level ------------------------------------------------------+
+   '----+------  --everyone  --------------+-- -a acl_value -------------------'
+        '--+ --local  +--+ -u user_name +--'  
+           ' --domain '  ' -g group_name '
+Functions: Modify the acl of user/group
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>> icfs-admin-cifs ---- --set --+ --local  +----------------------------->
+                                ' --domain '
+>--+-----------------+----+---------------------------------+------------>
+   ' --guest + yes + '    ' --homedir + no  +---------------'
+             ' no  '                  ' yes '--+---------+--'
+                                               ' -p path '
+>--+------------------+----+----------------+----+------------------+---><
+   ' --notify + yes + '    ' --sign + yes + '    ' --cosign + yes + '
+              ' no  '               ' no  '                 ' no  '
+>> icfs-admin-cifs ---- --set ---- --audit --- --setlevel --level ------><
+>> icfs-admin-cifs ---- --set ---- --limit --- limit_number ------------><
+Functions: Set CIFS service
+Options: 
+  --local:    set security = user
+  --domain:   set security = ads
+  --homedir:  set home service, which allows user to access specified share path
+  --guest:    set guest account service 
+  --notify:   set notify service to specify whether samba reply to client's notify request
+  --sign:     set SMB1 signing service
+  --cosign:   set SMB signing service, while set to yes, SMB signing is required
+  --grace :   set grace period values
+  --overtime: set overtime period values 
+  --failover: set failover 
+  --audit:    set audit
+  --setlevel  set access audit level
+  --limit     set max connections number
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-cifs --delete:
+Usage: 
+>> icfs-admin-cifs ---- --delete ---- -n share_name ---->
+>--+-----------------------------------+---------------><
+   +----------  --everyone  -----------+
+   +----------  --worm  -----------+
+   '--+ --local  +--+ -u user_name  +--'  
+      ' --domain '  ' -g group_name '
+Functions: Delete CIFS service or delete user/group or delete worm
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-cifs --query:
+Usage:
+>> icfs-admin-cifs ------ --query ------+----------------------+---><
+                                        +     --on             +
+                                        +   --service          +
+                                        +   --audit            +
+                                        +   --clients          +
+                                        ' -n share_name        '
+Functions: Query share name and path, or user/group under share name,
+           or total numbers of users online, or CIFS service settings
+Options: 
+  --on:       query total numbers of users online
+  --service:  query CIFS service settings
+  --audit:    query the access audit info
+  -n sharename: query the user of specified share
+  --clients:  query the list of service clients
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+  
+icfs-admin-cifs --stop\start:
+Usage:
+icfs-admin-cifs -----+ --start +--><
+                     ' --stop  '
+Functions: Start or stop the cifs service
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully"""
+
+
+def Error(num, *description):
+    if num == 3006:
+        print "Error(3006): This type of Tasks is maximizing",
+    if num == 24:
+        print 'Error(024):The username must be between 1 and 32 characters'
+    if num == 47:
+        print 'Error(047):The group name must be between 1 and 32 characters',
+    if num == 48:
+        print 'Error(048):Invalid user name %s' % description
+    if num == 49:
+        print 'Error(049):Invalid group name %s' % description
+    if num == 100:
+        print "Error(100): Can not find path in cluster file system!"
+    if num == 110:
+        print "Error(110): Failed to mount icfs-fuse for %s" % description
+    if num == 120:
+        print "Error(120): Cifs's share name %s has existed" % description
+    if num == 121:
+        print "Error(121): Cifs's share name %s not exist" % description
+    if num == 125:
+        print "Error(125): Cifs's share path not exist"
+    if num == 126:
+        print "Error(126): Cifs's share user %s has existed" % description
+    if num == 127:
+        print "Error(127): Cifs's share user %s not exist" % description
+    if num == 203:
+        print "Error(203): Don't support batch operation for path"
+    if num == 205:
+        print "Error(205): Don't support batch operation for acl"
+    if num == 206:
+        print "Error(206): Don't support batch operation for share name"
+    if num == 210:
+        print "Error(210): Local user %s not exist" % description
+    if num == 215:
+        print "Error(215): Local group %s not exist" % description
+    if num == 220:
+        print "Error(220): Domain user %s not exist" % description
+    if num == 225:
+        print "Error(225): Domain group %s not exist" % description
+    if num == 240:
+        print "Error(240): Samba share mode doesn't support"
+    if num == 250:
+        print "Error(250): acl_value input wrong!"
+    if num == 255:
+        print "Error(255): Failed to set acl for user"
+    if num == 299:
+        print "Error(299): Invalid salt service"
+    if num == 300:
+        print "Error(300): Failed to restart smb for %s" % description
+    if num == 301:
+        print "Error(301): Failed to restart nmb for %s" % description
+    if num == 302:
+        print "Error(302): Failed to reload smb configuration for %s" % description
+    if num == 303:
+        print "Error(303): Failed to synchronize smb.conf for %s" % description
+    if num == 305:
+        print "Error(305): SMB unrecognized service"
+    if num == 306:
+        print "Error(306): NMB unrecognized service"
+    if num == 307:
+        print "Error(307): Salt service down in %s" % description
+    if num == 308:
+        print "Error(308): Invalid salt-key"
+    if num == 310:
+        print "Error(310): Failed to get ADC server name/ip"
+    if num == 311:
+        print "Error(311):The subdir %s of the section %s doesn't support worm" % description
+    if num == 312:
+        print "Error(312):Worm service of %s is not setted" % description
+    if num == 313:
+        print "Error(313):grace can not bigger than overtime"
+    if num == 314:
+        print "Error(314): Can not enable CIFS failover, CTDB service is not runing"
+    if num == 315:
+        print "Error(315): Can not enable CIFS failover, CTDB service does not manage samba"
+    if num == 316:
+        print "Error(316): Can not enable CIFS failover, CTDB virtual ip list is empty"
+    if num == 319:
+        print "Error(319):The grace_period value should between 10s and 60s"
+    if num == 320:
+        print "Error(320):The overtime_period value should between 10s and 2207520000s"
+    if num == 321:
+        print "Error(321):The grace_period or overtime_period should be a number"
+    if num == 322:
+        print "Error(322): CIFS access audit information is not complete in config file"
+    if num == 323:
+        print "Error(323): CIFS access audit unknown value level"
+    if num == 324:
+        print "Error(324): CIFS access audit level hasn't been set"
+    if num == 325:
+        print "Error(325): CIFS access audit not all shares are been set the audit level"
+    if num == 326:
+        print "Error(326): can not set worm path"
+    if num == 327:
+        print "Error(327): The sequence of vfs objects option in %s is incorrect" % description
+    if num == 328:
+        print "Error(328): The limit number must be integer between 0 included and 2147483647 included"
+    if num == 329:
+        print "Error(329): CIFS config file %s not exist or destroyed" % description
+    if num == 610:
+        print "Error(610): Invalid input!"
+    if num == 721:
+        print "Error(721): Invalid path"
+    if num == 504:
+        print "Error(504): File system not mount! "   
+    if num == 500:
+        print "Error(500): Can not get cluster version! "
+    sys.exit(1)
+
+
+def run_remote_cmd(tgt, cmd):
+    processes = []
+    ret_dict = {}
+    hosts_in_cluster = get_hostname_list()
+    if tgt == '*':
+        hosts = hosts_in_cluster
+    else:
+        hosts = tgt.strip().split(',')
+        host_not_in_cluster = [host for host in hosts if host not in hosts_in_cluster]
+        if host_not_in_cluster:
+            print "Error(610): Invalid input, %s not in cluster." % host_not_in_cluster
+            sys.exit(1)
+
+    # if execute time out kill the subprocess
+    def timeout_handler(signum, frame):
+        for p in processes:
+            if p['po'].returncode is None:
+                p['po'].terminate()
+        print "Execute remote cmd timeout!"
+        sys.exit(1)
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(30)
+    # execute remote action
+    for host in hosts:
+        process = {}
+        command = "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  'root@%s' \"%s\"" % (host, cmd)
+        process['po'] = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        process['host'] = host
+        processes.append(process)
+    # wait the subprocess execute end
+    for process in processes:
+        process['stdout'], process['stderr'] = process['po'].communicate()
+    # get execute result
+    for process in processes:
+        ret_dict[process['host']] = {"retcode": process['po'].returncode, "stdout": process['stdout'],
+                                     "stderr": process['stderr']}
+    return ret_dict
+
+
+def get_hostname_list():
+    hostname = []
+    pattern = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(.*?)(?:#.*)?$")
+    try:
+        with open("/etc/hosts", "r") as fp:
+            lines = fp.readlines()
+    except IOError:
+        return hostname
+
+    for line in lines:
+        m = pattern.match(line)
+        if m is None:
+            continue
+        if m.group(2) == 'localhost localhost.localdomain localhost4 localhost4.localdomain4':
+            continue
+        hostname.append(m.group(2).strip())
+
+    return hostname
+
+
+class OsInfo(object):
+    def __init__(self, os_name, os_version, os_edtion):
+        self.os_name = os_name
+        self.os_version = os_version
+        self.os_edtion = os_edtion
+
+
+class Worker(multiprocessing.Process):
+    def __init__(self, host, queue):
+        super(Worker, self).__init__()
+        self._host = host
+        self._queue = queue
+        self._stat = ""
+        self._id_num = ""
+        self._sn_output = ""
+        self._version_output = ""
+        self._success = ""
+
+    def get_host(self): return self._host
+
+    def get_stat(self): return self._stat
+
+    def get_id_num(self): return self._id_num
+
+    def get_sn_output(self): return self._sn_output
+
+    def get_version_output(self): return self._version_output
+
+    def get_success(self): return self._success
+
+    def run(self):
+        os_type = get_os_type()
+        if os_type.os_version.startswith("7."):
+            cmd = "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no " \
+                  "-o StrictHostKeyChecking=no %s 'systemctl status smb | grep Active' " % self._host
+        else:
+            cmd = "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no " \
+                  "-o StrictHostKeyChecking=no %s 'service smb status' " % self._host
+        stat, output = commands.getstatusoutput(cmd)
+        if has_version:
+            if stat == 65280:
+                msg = (self.get_host() + ":").ljust(15) + " " + "unknown".ljust(15) + " " + \
+                      "Nodeid:".ljust(15) + " " + "None".ljust(15) + " " + "Version:".ljust(15) + " " + \
+                      "None".ljust(15) + " " + "Device SN:".ljust(15) + " " + "None"
+                self._queue.put(msg)
+                return
+            # get node id
+            ret_list = run_remote_cmd(self._host, "smbd -V| awk '{print \$2}'")
+            version_status = ret_list[self._host]["retcode"]
+            version_out = ret_list[self._host]["stdout"]
+            if version_status != 0:
+                print version_out
+                sys.exit(1)
+            self._version_output = version_out
+            sn_status, sn_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o "
+                                                            "PasswordAuthentication=no -o StrictHostKeyChecking=no "
+                                                            "'root@%s' 'dmidecode -t system| grep Serial'|"
+                                                            " awk -F ':' '{print $2}'" % self._host)
+            if sn_status != 0:
+                Error(1399, sn_output)
+            elif "Not Specified" in sn_output:
+                self._sn_output = "None"
+            else:
+                self._sn_output = sn_output
+            if is_rack():
+                try:
+                    with open("/usr/local/ism/Agent/src/Cache/rack_info.txt", "r") as f:
+                        ip = get_ip_by_hostname(self._host)
+                        content = f.read()
+                        node_info = re.split('\n\s*\n', content)
+                        for line in node_info:
+                            if 'NodeID' in line and 'ProductName' in line and "SN" in line and "CPU" in line:
+                                node_line = line.splitlines()
+                                for line in node_line[2:]:
+                                    info = line.split()
+                                    if ip == info[5]:
+                                        self._id_num = info[0]
+                except IOError, e:
+                    error('3005')
+            else:
+                self._id_num = "None"
+
+            # version_status, version_out = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o "
+            #                                                        "PasswordAuthentication=no -o StrictHostKeyChecking=no"
+            #                                                        " %s 'smbd -V' | awk '{print $2}' " % self._host)
+            # if version_status != 0:
+            #     print version_out
+            #     sys.exit(1)
+            # self._version_output = version_out
+        if stat == 65280:
+            self._stat = "unknown"
+        elif "running" in output:
+            self._stat = "running"
+            self._success = True
+        else:
+            self._stat = "dead"
+            self._success = True
+
+        if has_version:
+            msg = (self.get_host() + ":").ljust(15) + " " + self.get_stat().ljust(15) + " " + \
+                "Nodeid:".ljust(15) + " " + self.get_id_num().ljust(15) + " " + "Version:".ljust(15) + " " + \
+                self.get_version_output().strip().ljust(15) + " " + "Device SN:".ljust(15) + " " + self.get_sn_output()
+        else:
+            msg = (self.get_host() + ":").ljust(15) + ' ' + self.get_stat()
+
+        self._queue.put(msg)
+
+
+def get_os_type():
+    os_info = platform.linux_distribution()
+    return OsInfo(os_info[0], os_info[1], os_info[2])
+
+
+def cifs_share_name_format(name):
+    try:
+        u_name = unicode(name, 'utf8')
+    except (TypeError, UnicodeDecodeError):
+        Error(48, name)
+        sys.exit(1)
+
+    if len(u_name) > 32:
+        Error(24)
+
+    if re.match(u"^[a-zA-Z0-9\u4e00-\u9fa5\\\\/._][a-zA-Z0-9\u4e00-\u9fa5\\\\/._-]{0,31}$", u_name) is None:
+        Error(48, name)
+
+
+def cifs_user_name_format(name):
+    try:
+        u_name = unicode(name, 'utf8')
+    except (TypeError, UnicodeDecodeError):
+        Error(48, name)
+        sys.exit(1)
+
+    if len(u_name) > 32:
+        Error(24)
+
+    if re.match(u"^[a-zA-Z0-9\u4e00-\u9fa5\\\\/._][a-zA-Z0-9\u4e00-\u9fa5\\\\/._-]{0,31}$", u_name) is None:
+        Error(48, name)
+
+
+def cifs_group_name_format(group_name):
+    try:
+        u_group_name = unicode(group_name, 'utf8')
+    except (TypeError, UnicodeDecodeError):
+        Error(49, group_name)
+        sys.exit(1)
+
+    if len(u_group_name) > 32:
+        Error(47)
+
+    if re.match(u"^[a-zA-Z0-9\u4e00-\u9fa5\\\\/._][a-zA-Z0-9\u4e00-\u9fa5\\\\/._-]{0,31}$", u_group_name) is None:
+        Error(49, group_name)
+
+
+# Check for input-path under /mnt/icfs
+def check_for_path(chk_path):
+    chk_path = '/mnt/icfs' + chk_path
+    if chk_path[-1:] == "/":
+        clstpath = chk_path[:-1]
+    elif chk_path[-1:] == ".":
+        if chk_path[-2:-1] == "/":
+            clstpath = chk_path[:-2]
+        else:
+            clstpath = chk_path
+    else:
+        clstpath = chk_path
+    fuse_stat, fuse_path = commands.getstatusoutput("mount | grep -w icfs-fuse|awk '{print $3}'")
+    host_n = commands.getoutput("echo $HOSTNAME")
+    if not fuse_path or "/mnt/icfs" not in fuse_path:
+        for p_d, p_sd, p_f in os.walk("/mnt/icfs"):
+            if p_sd or p_f:
+                Error(110, host_n)
+        icfuse_stat, icfuse_reslt = commands.getstatusoutput('icfs-fuse /mnt/icfs')
+        if "fuse failed to start" in icfuse_reslt:
+            Error(110, host_n)
+        path_fd_relt = os.path.isdir(clstpath)
+        if not path_fd_relt:
+            Error(100)
+    elif "/mnt/icfs" in fuse_path:
+        path_fd_relt = os.path.isdir(clstpath)
+        if not path_fd_relt:
+            Error(100)
+
+
+# Query sharepath for sharename inputed 
+def check_for_shamepath(chkame):
+    chk_path_cfg = NewConfigParser()
+    chk_path_cfg.read("/etc/samba/smb.conf")
+    if "path" in chk_path_cfg.options(chkame):
+        chk_path = chk_path_cfg.get(chkame, "path")
+        return chk_path
+    else:
+        return 0
+
+
+def get_ip_by_hostname(hostname):
+    ip = ""
+    pattern = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(.*?)(?:#.*)?$")
+    try:
+        with open("/etc/hosts", "r") as fp:
+            lines = fp.readlines()
+    except IOError:
+        return ip
+
+    for line in lines:
+        m = pattern.match(line)
+        if m is None:
+            continue
+
+        hostname_list = m.group(2).split()
+        if hostname in hostname_list:
+            ip = m.group(1)
+            break
+
+    return ip
+
+
+# Check whether sharename exist
+def check_for_sharename(cname):
+    cifs_sh_cfg = NewConfigParser()
+    cifs_sh_cfg.read("/etc/samba/smb.conf")
+    cifs_sh_section = cifs_sh_cfg.sections()
+    if cname in cifs_sh_section:
+        return 1
+    else:
+        return 0
+
+
+# check the dir is nested or not
+def check_dir_and_subdir(dir, subdir):
+    dir.strip()
+    subdir.strip()
+    if subdir == dir:
+        return False
+    if dir == "/" or subdir == "/":
+        return True
+    if subdir.find(dir) == -1 and dir.find(subdir) == -1:
+        return False
+    if (subdir.find(dir) == 0 and subdir[len(dir)] == '/') or \
+       (dir.find(subdir) == 0 and dir[len(subdir)] == '/'):
+        return True
+    return False
+
+
+# Check whether input-user exist
+def check_for_user(module, usertype, user_chk_list):
+    user_chk_list = list(set(user_chk_list))
+    if module == "local":
+        if usertype == "u":
+            for user_var in user_chk_list:
+                chk_u_s, chk_u_r = commands.getstatusoutput("cat /etc/passwd|grep '^%s:'|awk -F: '$1~/%s/{print $1}'" % (user_var.replace(".", r"\."), user_var.replace(".", r"\.")))
+                if chk_u_s or chk_u_r != user_var:
+                    if user_var == "nobody":
+                        user_var = "Everyone"
+                    Error(210, user_var)
+        elif usertype == "g":
+            for user_var in user_chk_list:
+                chk_g_s, chk_g_r = commands.getstatusoutput("cat /etc/group|grep '^%s:'|awk -F: '$1~/%s/{print $1}'" % (user_var.replace(".", r"\."), user_var.replace(".", r"\.")))
+                if chk_g_s or chk_g_r != user_var:
+                    Error(215, user_var)
+    elif module == "domain":
+        if usertype == "u":
+            for user_var in user_chk_list:
+                wbin_u_s, wbin_u_relt = commands.getstatusoutput("wbinfo -u|grep -x %s" % user_var.replace(".", r"\."))
+                if wbin_u_s or wbin_u_relt != user_var:
+                    Error(220, user_var)
+        elif usertype == "g":
+            for user_var in user_chk_list:
+                wbin_u_s, wbin_u_relt = commands.getstatusoutput("wbinfo -g|grep -x %s" % user_var.replace(".", r"\."))
+                if wbin_u_s or wbin_u_relt != user_var:
+                    Error(225, user_var)
+
+
+# Check whether inpurt-user in smb.conf, and return none-exist/valid/invalid/exist user list
+def check_for_shareuser(cfshame, smbuser):
+    user_list_n = []
+    user_list_v = []
+    user_list_i = []
+    user_list_e = []
+    smb_user_list = smbuser.split(',')
+    smb_user_list = list(set(smb_user_list))
+    cifs_usr_cfg = NewConfigParser()
+    cifs_usr_cfg.read("/etc/samba/smb.conf")
+    cifs_usr_option = cifs_usr_cfg.options(cfshame)
+    if "valid users" in cifs_usr_option:
+        cifs_usr_v = cifs_usr_cfg.get(cfshame, "valid users")
+        cifs_usr_v = cifs_usr_v.replace(" ", "")
+        if cifs_usr_v:
+            user_list_v = cifs_usr_v.split(',')
+    if "invalid users" in cifs_usr_option:
+        cifs_usr_i = cifs_usr_cfg.get(cfshame, "invalid users")
+        cifs_usr_i = cifs_usr_i.replace(" ", "")
+        if cifs_usr_i:
+            user_list_i = cifs_usr_i.split(',')
+    for smb_user in smb_user_list:
+        if smb_user in user_list_v or smb_user in user_list_i:
+            user_list_e.append(smb_user)
+        else:
+            user_list_n.append(smb_user)
+    user_list_n = list(set(user_list_n))
+    user_list_v = list(set(user_list_v))
+    user_list_i = list(set(user_list_i))
+    user_list_e = list(set(user_list_e))
+    return user_list_n, user_list_v, user_list_i, user_list_e
+
+
+def check_failover_precondition():
+    # check whether ctdb is running
+    os_type = get_os_type()
+    out = ""
+    if os_type.os_version.startswith("7."):
+        out = commands.getoutput("for i in `cat /etc/hosts | grep -v localhost.localdomain | grep -v ^$ | grep -v ^# | \
+        awk '{print $2}' | sort -u` ; do ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+         -o StrictHostKeyChecking=no $i 'systemctl status ctdb' ; done | grep Active")
+    elif os_type.os_version.startswith("6."):
+        out = commands.getoutput("for i in `cat /etc/hosts | grep -v localhost.localdomain | grep -v ^$ | grep -v ^# | \
+        awk '{print $2}' | sort -u` ; do ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+         -o StrictHostKeyChecking=no $i 'service ctdb status' ; done ")
+    if "running" not in out:
+        Error(314)
+
+    # check whether ctdb manages samba
+    ctdb_parser = LinuxConfigParser()
+    ctdb_parser.read("/etc/ctdb/ctdbd.conf")
+    if not ctdb_parser.has_key("CTDB_MANAGES_SAMBA") or ctdb_parser.get("CTDB_MANAGES_SAMBA") != "yes":
+        Error(315)
+
+    # check whether virtual ip exist
+    smb_parser = NewConfigParser()
+    smb_parser.read("/etc/samba/smb.conf")
+    if not smb_parser.has_option("global", "witness:ipv4 interfaces") or smb_parser.get("global", "witness:ipv4 interfaces") == "":
+        Error(316)
+
+
+# Add inpurt-user in smb.conf: valid users= , invalid users= 
+def add_user_acl(ad_name, ad_user_list, ad_a, ad_v, ad_i):
+    ad_user_list = list(set(ad_user_list))
+    ad_v = list(set(ad_v))
+    ad_i = list(set(ad_i))
+    ad_file_cfg = NewConfigParser()
+    ad_file_cfg.read("/etc/samba/smb.conf")
+    if "nobody" in ad_user_list:
+        ad_file_cfg.set(ad_name, "guest ok", "yes")
+    if ad_a in ("rwx", "rw-", "r--"):
+        ad_file_cfg.set(ad_name, "writeable", "yes")
+        ad_v += ad_user_list
+        ad_user_v = ','.join(ad_v)
+        ad_file_cfg.set(ad_name, "valid users", ad_user_v)
+    elif ad_a in "---":
+        ad_i += ad_user_list
+        ad_user_i = ','.join(ad_i)
+        ad_file_cfg.set(ad_name, "invalid users", ad_user_i)
+    ad_file_cfg.write(open("/etc/samba/smb.conf", "w"))
+
+
+# Set acl for input-user: setfacl dir/file
+def setacl_for_path(setpath, typeuser, set_user_list, setacl):
+    set_user_list = list(set(set_user_list))
+    # "v"(visual) added in ACL after version 3.5.1.1(included)
+    if IcfsVersion.current_version() >= IcfsVersion("3.5.1.1"):
+        if setacl == "rwx":
+            dir_acl = "rwxdv"
+        elif setacl == "rw-":
+            dir_acl = "rwx-v"
+        elif setacl == "r--":
+            dir_acl = "r-x-v"
+        elif setacl == "---":
+            dir_acl = "-----"
+        else:
+            Error(250)
+    else:
+        if setacl == "rwx":
+            dir_acl = "rwxd"
+        elif setacl == "rw-":
+            dir_acl = "rwx-"
+        elif setacl == "r--":
+            dir_acl = "r-x-"
+        elif setacl == "---":
+            dir_acl = "----"
+        else:
+            Error(250)
+    fuse_stat, fuse_path = commands.getstatusoutput("mount | grep -w icfs-fuse|awk '{print $3}'")
+    host_n = commands.getoutput("echo $HOSTNAME")
+    if not fuse_path or "/mnt/icfs" not in fuse_path:
+        for path_d, path_sd, path_f in os.walk("/mnt/icfs"):
+            if path_sd or path_f:
+                Error(110, host_n)
+        acl_fuse_stat, acl_fuse_relt = commands.getstatusoutput('icfs-fuse /mnt/icfs')
+        if "fuse failed to start" in acl_fuse_relt:
+            Error(110, host_n)
+        abs_setpath = "/mnt/icfs" + setpath
+    elif "/mnt/icfs" in fuse_path:
+        abs_setpath = "/mnt/icfs" + setpath 
+    if typeuser == "u":
+        for user_b in set_user_list:
+            if user_b == "invalid_user_nologin":
+                continue
+            set_status, set_output = commands.getstatusoutput("icfs-admin-acl --set -r -u %s -a %s -d %s"
+                                                              % (user_b, dir_acl, abs_setpath))
+            if set_output or set_status:
+                Error(255)
+            set_def_status, set_def_output = commands.getstatusoutput("icfs-admin-acl --set -r -e -u %s -a %s -d %s"
+                                                                      % (user_b, dir_acl, abs_setpath))
+            if set_def_output or set_def_status:
+                Error(255)
+    if typeuser == "g":
+        for user_b in set_user_list:
+            set_status, set_output = commands.getstatusoutput("icfs-admin-acl --set -r -g %s -a %s -d %s"
+                                                              % (user_b, dir_acl, abs_setpath))
+            if set_output or set_status:
+                Error(255)
+            set_def_status, set_def_output = commands.getstatusoutput("icfs-admin-acl --set -r -e -g %s -a %s -d %s"
+                                                                      % (user_b, dir_acl, abs_setpath))
+            if set_def_output or set_def_status:
+                Error(255)
+
+
+# Modify acl in smb.conf, valid users=, invalid users=, read list=
+def setacl_in_smb(sname, suser_list, sacl): 
+    suser_v_list = []
+    suser_i_list = []
+    suser_list = list(set(suser_list))
+    acl_usr_cfg = NewConfigParser()
+    acl_usr_cfg.read("/etc/samba/smb.conf")
+    if "valid users" in acl_usr_cfg.options(sname):
+        suser_sh_v = acl_usr_cfg.get(sname, "valid users")
+        suser_sh_v = suser_sh_v.replace(" ", "")
+        if suser_sh_v:
+            suser_v_list = suser_sh_v.split(',')
+    if "invalid users" in acl_usr_cfg.options(sname):
+        suser_sh_i = acl_usr_cfg.get(sname, "invalid users")
+        suser_sh_i = suser_sh_i.replace(" ", "")
+        if suser_sh_i:
+            suser_i_list = suser_sh_i.split(',')
+    if sacl in ("rwx", "rw-", "r--"):
+        acl_usr_cfg.set(sname, "writeable", "yes")
+        for suser_sngl in suser_list:
+            if suser_sngl == "nobody":
+                acl_usr_cfg.set(sname, "guest ok", "yes")
+            if suser_sngl in suser_i_list:
+                suser_i_list.remove(suser_sngl)
+                suser_v_list.append(suser_sngl)
+    elif sacl in "---":
+        for suser_sngl in suser_list:
+            if suser_sngl == "nobody":
+                acl_usr_cfg.set(sname, "guest ok", "no")
+            if suser_sngl in suser_v_list:
+                suser_v_list.remove(suser_sngl)
+                suser_i_list.append(suser_sngl)
+    suser_v_list = list(set(suser_v_list))
+    suser_i_list = list(set(suser_i_list))
+    suser_v_u = ','.join(suser_v_list)
+    suser_i_u = ','.join(suser_i_list)
+    if not suser_v_list:
+        acl_usr_cfg.set(sname, "valid users", "invalid_user_nologin")
+    else:
+        acl_usr_cfg.set(sname, "valid users", suser_v_u)
+    if not suser_i_list:
+        acl_usr_cfg.remove_option(sname, "invalid users")
+    else:
+        acl_usr_cfg.set(sname, "invalid users", suser_i_u)
+    acl_usr_cfg.write(open("/etc/samba/smb.conf", "w"))
+
+
+# Set configuration for security=ads in smb.conf: realm, server ip=, workgroup=
+def set_smb_ads():
+    krb5_conf = open("/etc/krb5.conf", "r")
+    krb5_ln = krb5_conf.read()
+    krb5_conf.close()
+    realm_pat = re.compile(r'default_realm[^\w]+(\S+)')
+    realm_sea = realm_pat.search(krb5_ln)
+    if realm_sea:
+        realm_up = realm_sea.group(1).upper()
+        realm_nm = commands.getoutput("echo %s|sed -E 's/\.[[:alnum:]]+//g'" % realm_up)
+        ser_ip_pat = re.compile(r'%s( = |=| =|= ){[^}]+kdc( = |=)(\S+)' % realm_up)
+        ser_ip_sea = ser_ip_pat.search(krb5_ln)
+        if ser_ip_sea:
+            ser_ip_all = ser_ip_sea.group(3)
+            if ":" in ser_ip_all:
+                ser_ip_sngl = commands.getoutput("echo %s|sed 's/:[^[:space:]]*//g'" % ser_ip_all)
+            else:
+                ser_ip_sngl = ser_ip_all
+        else:
+            Error(310)
+            sys.exit(1)
+    else:
+        Error(310)
+        sys.exit(1)
+    set_ads_conf = NewConfigParser()
+    set_ads_conf.read("/etc/samba/smb.conf")
+    ads_wkg = set_ads_conf.get("global", "workgroup")
+    set_ads_conf.set("global", "realm", realm_up)
+    set_ads_conf.set("global", "password server", ser_ip_sngl)
+    set_ads_conf.set("global", "workgroup", realm_nm)
+    set_ads_conf.remove_option("global", "idmap config " + ads_wkg)
+    set_ads_conf.remove_option("global", "idmap config " + ads_wkg)
+    set_ads_conf.remove_option("global", "idmap conifg " + ads_wkg + " = backend")
+    set_ads_conf.remove_option("global", "idmap config " + ads_wkg + " = range")
+    set_ads_conf.set("global", "idmap config " + realm_nm + " : range", "100000-499998")
+    set_ads_conf.set("global", "idmap config " + realm_nm + " : backend", "rid")
+    if "netbios name" in set_ads_conf.options("global"):
+        set_ads_conf.remove_option("global", "netbios name")
+    set_ads_conf.write(open("/etc/samba/smb.conf", "w"))
+    commands.getoutput("mkdir -p /home/%s|chmod 777 /home/%s" % (realm_nm, realm_nm))
+
+
+def smb_ad_format():
+    strip_s = commands.getoutput("sed -i -E 's/^\s+//g;/^$/d' /etc/samba/smb.conf")
+    conf = NewConfigParser()
+    conf.read("/etc/samba/smb.conf")
+    work = conf.get("global", "security")
+    line_n = commands.getoutput("cat /etc/samba/smb.conf|grep -n 'idmap config'|awk -F: '{print $1}'")
+    if line_n and work in ("ads", "ADS"):
+        wkgp = conf.get("global", "workgroup")
+        line_l = line_n.split("\n")
+        if len(line_l) == 2:
+            idmap_back = commands.getoutput("sed -i '%ss/.*/idmap config %s : backend = rid/g' /etc/samba/smb.conf" % (line_l[0], wkgp))
+            idmap_rid = commands.getoutput("sed -i '%ss/.*/idmap config %s : range = 100000-499999/g' /etc/samba/smb.conf" % (line_l[1], wkgp))
+        elif len(line_l) == 1:
+            idmap_back = commands.getoutput("sed -i '%ss/.*/idmap config %s : backend = rid/g' /etc/samba/smb.conf" % (line_l[0], wkgp))
+            idmap_rid = commands.getoutput("sed -i '%siidmap config %s : range = 100000-499999' /etc/samba/smb.conf" % (int(line_l[0]) + 1, wkgp))
+    icfs_format = commands.getoutput("sed -i -E \"s/icfs[[:blank:]]*=[[:blank:]]*config_file[[:blank:]]*=[[:blank:]]*\/etc\/icfs\/icfs.conf/icfs:config_file=\/etc\/icfs\/icfs.conf/g\" /etc/samba/smb.conf")
+
+
+# Delete input-users in smb.conf: valid users=, invalid users=
+def share_user_delete(delsec, del_user_list, del_v_list, del_i_list):
+    del_user_list = list(set(del_user_list))
+    del_v_list = list(set(del_v_list))
+    del_i_list = list(set(del_i_list))
+    del_file_cfg = NewConfigParser()
+    del_file_cfg.read("/etc/samba/smb.conf")
+    del_file_path = del_file_cfg.get(delsec, "path")
+    if not del_file_path:
+        Error(125)
+    else:
+        del_file_path = "/mnt/icfs" + del_file_path
+    for del_user_sngl in del_user_list:
+        if del_user_sngl == "invalid_user_nologin":
+            continue
+        if del_user_sngl == "nobody":
+            del_file_cfg.set(delsec, "guest ok", "no")
+        if del_user_sngl in del_v_list:
+            del_v_list.remove(del_user_sngl)
+        if del_user_sngl in del_i_list:
+            del_i_list.remove(del_user_sngl)
+    if not del_v_list:
+        del_file_cfg.set(delsec, "valid users", "invalid_user_nologin")
+    else:
+        del_v_str = ','.join(del_v_list)
+        del_file_cfg.set(delsec, "valid users", del_v_str)
+    if not del_i_list:
+        del_file_cfg.remove_option(delsec, "invalid users")
+    else:
+        del_i_str = ','.join(del_i_list)
+        del_file_cfg.set(delsec, "invalid users", del_i_str)
+    del_file_cfg.write(open("/etc/samba/smb.conf", "w"))
+
+
+# delete acl for input-user: setxacl -x u:user dir/file
+def delacl_for_path(setpath, typeuser, set_user_list):
+    parser = NewConfigParser()
+    parser.read("/etc/icfs/icfs.conf")
+    if parser.has_option("global", "client_ip_acl") and parser.get("global", "client_ip_acl") == "true":
+        return
+
+    set_user_list = list(set(set_user_list))
+    fuse_stat, fuse_path = commands.getstatusoutput("mount | grep -w icfs-fuse|awk '{print $3}'")
+    host_n = commands.getoutput("echo $HOSTNAME")
+    if not fuse_path or "/mnt/icfs" not in fuse_path:
+        for path_d, path_sd, path_f in os.walk("/mnt/icfs"):
+            if path_sd or path_f:
+                Error(110, host_n)
+        acl_fuse_stat, acl_fuse_relt = commands.getstatusoutput('icfs-fuse /mnt/icfs')
+        if "fuse failed to start" in acl_fuse_relt:
+            Error(110, host_n)
+        abs_setpath = "/mnt/icfs" + setpath
+    elif "/mnt/icfs" in fuse_path:
+        abs_setpath = "/mnt/icfs" + setpath 
+    if typeuser == "u":
+        for user_b in set_user_list:
+            if user_b == "invalid_user_nologin":
+                continue
+            set_status, set_output = commands.getstatusoutput("icfs-admin-acl --delete -r -u %s -d %s"
+                                                              % (user_b, abs_setpath))
+            if set_status and "Error(1713)" not in set_output:
+                Error(255)
+            set_def_status, set_def_output = commands.getstatusoutput("icfs-admin-acl --delete -r -e -u %s -d %s"
+                                                                      % (user_b, abs_setpath))
+            if set_def_status and "Error(1713)" not in set_def_output:
+                Error(255)
+    if typeuser == "g":
+        for user_b in set_user_list:
+            set_status, set_output = commands.getstatusoutput("icfs-admin-acl --delete -r -g %s -d %s"
+                                                              % (user_b[1:], abs_setpath))
+            if set_status and "Error(1713)" not in set_output:
+                Error(255)
+            set_def_status, set_def_output = commands.getstatusoutput("icfs-admin-acl --delete -r -e -g %s -d %s"
+                                                                      % (user_b[1:], abs_setpath))
+            if set_def_status and "Error(1713)" not in set_def_output:
+                Error(255)
+
+
+# check remote host status
+def check_remote_host_stat():
+    host_list = get_remote_host_list()
+    if not host_list:
+        print "Error(056): Remote hosts list is empty"
+        sys.exit(1)
+
+    ret_dict = run_remote_ping("*")
+    fail_list = [name for name, ret in ret_dict.items() if ret["status"] is False]
+    if fail_list:
+        print "Error(057): Remote hosts %s is not accessable" % ",".join(fail_list)
+        sys.exit(1)
+
+
+# check icfs-fuse /mnt/icfs, auto mount if not mount
+def check_mount_point():
+    # whether or not nfsd and icfs-fuse exist
+    if not commands.getstatusoutput('mount|grep -w /mnt/icfs')[1]:
+        commands.getstatusoutput('icfs-fuse /mnt/icfs')
+
+    if not commands.getstatusoutput('mount|grep -w /mnt/icfs')[1]:
+        Error(110, platform.node())
+        sys.exit(1)
+
+
+def run_remote_copy(tgt, local_path, remote_path):
+    # hosts = []
+    processes = []
+    ret_dict = {}
+    # check path
+    if not os.path.exists(local_path):
+        Error(721)
+    hosts_in_cluster = get_remote_host_list()
+    if tgt == '*':
+        hosts = hosts_in_cluster
+    else:
+        hosts = tgt.strip().split(',')
+        host_not_in_cluster = [host for host in hosts if host not in hosts_in_cluster]
+        if host_not_in_cluster:
+            print "Error(610): Invalid input, %s not in cluster." % host_not_in_cluster
+            sys.exit(1)
+
+        # if execute time out kill the subprocess
+        def timeout_handler(signum, frame):
+            for p in processes:
+                if p['po'].returncode is None:
+                    p['po'].terminate()
+            print "Execute remote cmd timeout!"
+            sys.exit(1)
+
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(10)
+
+    # execute remote action
+    for host in hosts:
+        process = {}
+        cmd = "scp -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                      -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                      %s root@%s:%s" % (local_path, host, remote_path)
+        process['po'] = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        process['host'] = host
+        processes.append(process)
+    # wait the subprocess execute end
+    for process in processes:
+        process['po'].wait()
+
+    # get execute result
+    for process in processes:
+        ret_dict[process['host']] = {"retcode": process['po'].returncode, "stdout": process['po'].stdout.read(),
+                                     "stderr": process['po'].stderr.read()}
+    return ret_dict
+
+
+# synchronize smb.conf on all clients
+def synchronize_smb_conf():
+    ret_dict = run_remote_copy("*", "/etc/samba/smb.conf", "/etc/samba/smb.conf")
+    fail_list = [name for name, ret in ret_dict.items() if ret["retcode"] not in (0, 1)]
+    if fail_list:
+        Error(303, ",".join(fail_list))
+        sys.exit(1)
+
+
+# restart smb service on all clients
+def restart_smb():
+    ret_dict = run_remote_cmd("*", "systemctl restart smb")
+    fail_list = [node_name for node_name, node_ret in ret_dict.items() if node_ret["retcode"] not in (0, 255)]
+    if fail_list:
+        Error(300, ",".join(fail_list))
+
+
+# reload smb.conf on all clients
+def reload_config():
+    ret_dict = run_remote_cmd("*", "smbcontrol all reload-config")
+    fail_list = [node_name for node_name, node_ret in ret_dict.items() if node_ret["retcode"] not in (0, 255)]
+    if fail_list:
+        Error(302, ",".join(fail_list))
+
+
+# Modify user's acl mode
+def cifs_set_user():
+    global smbuser, path, shame, acl, usrtp
+    set_md_cfg = NewConfigParser()
+    set_md_cfg.read("/etc/samba/smb.conf")
+    set_md = set_md_cfg.get("global", "security")
+    if set_md in ("USER", "user") and mod == "domain":
+        Error(240)
+    elif set_md in ("ADS", "ads") and mod in ("local", "everyone"):
+        Error(240)
+    if len(shame.split(',')) != 1:
+        Error(206)
+    if len(smbuser.split(',')) != 1:
+        Error(205)
+    if not check_for_sharename(shame):
+        Error(121, shame)
+    if not check_for_shamepath(shame):
+        Error(125)
+    set_path = check_for_shamepath(shame)
+    if mod in ("local", "domain"):
+        if acl not in ("rwx", "rw-", "r--", "---"):
+            Error(250)
+        # check_remote_host_stat()
+        check_mount_point()
+        if usrtp == "g":
+            real_user = "@" + smbuser
+        else:
+            real_user = smbuser
+        set_user_e = check_for_shareuser(shame, real_user)[3]
+        if not set_user_e:
+            Error(127, smbuser)
+        check_for_path(set_path)
+        smbuser_l = smbuser.split(',')
+        setacl_for_path(set_path, usrtp, smbuser_l, acl)
+        setacl_in_smb(shame, set_user_e, acl)
+        smb_ad_format()
+        # synchronize config file
+        synchronize_smb_conf()
+        # reload config file
+        reload_config()
+    elif mod == "everyone":
+        if acl not in ("rwx", "rw-", "r--", "---"):
+            Error(250)
+        # check_remote_host_stat()
+        check_mount_point()
+        every_user_e = check_for_shareuser(shame, smbuser)[3]
+        if not every_user_e:
+            if smbuser == "nobody":
+                smbuser_every = "Everyone"
+            else:
+                smbuser_every = smbuser
+            Error(127, smbuser_every)
+        check_for_path(set_path)
+        smbuser_l = smbuser.split(',')
+        setacl_for_path(set_path, usrtp, smbuser_l, acl)
+        setacl_in_smb(shame, every_user_e, acl)
+        smb_ad_format()
+        # synchronize config file
+        synchronize_smb_conf()
+        # reload config file
+        reload_config()
+
+
+# check worm path is nested or not
+def worm_check_path(path):
+    if not commands.getstatusoutput("mount|grep -w icfs-fuse|grep -w /mnt/icfs")[1]:
+        Error(504)
+        Error(500)
+
+    worm_check_path = NewConfigParser()
+    worm_check_path.read("/etc/samba/smb.conf")
+    alist = worm_check_path.sections()
+    alist.remove("global")
+    all_worm_path = []
+    for cname in alist[0:]:
+        options = worm_check_path.options(cname)
+        if "path" in options and "vfs objects" in options and \
+           "worm"in worm_check_path.get(cname, "vfs objects") and "worm:grace_period" in options and \
+           "worm:overtime_period" in options:
+            all_worm_path.append(worm_check_path.get(cname, "path"))
+    abs_path = path
+    spath = abs_path.rstrip("/")
+    if spath == "":
+        spath = "/"
+    for dir in all_worm_path:
+        if check_dir_and_subdir(dir, spath):
+            sys.exit(1)
+
+
+# Set CIFS service: local/domain smb.conf; homes; guest accout; change notity; client signing; server signing
+def cifs_set_service():
+    global smbuser, path, shame, acl, usrtp
+    # check_remote_host_stat()
+    check_mount_point()
+    if hmdir != "yes" and path is not None:
+        Error(610)
+
+    cifs_ser_cfg = NewConfigParser()
+    cifs_ser_cfg.read("/etc/samba/smb.conf")
+    cf_ser_list = cifs_ser_cfg.options("global")
+    cf_ser_md = cifs_ser_cfg.get("global", "security")
+    if "--guest" in sys.argv[0:]:
+        if gst == "no":
+            if "map to guest" in cf_ser_list:
+                cifs_ser_cfg.remove_option("global", "map to guest",)
+            if "guest account" in cf_ser_list:
+                cifs_ser_cfg.remove_option("global", "guest account")
+        elif gst == "yes":
+            cifs_ser_cfg.set("global", "map to guest", "Bad User")
+            cifs_ser_cfg.set("global", "guest account", "nobody")
+    if "--homedir" in sys.argv[0:]:
+        if hmdir == "yes":
+            if "homes" not in cifs_ser_cfg.sections():
+                cifs_ser_cfg.add_section("homes")
+            cifs_ser_cfg.set("homes", "writeable", "yes")
+            cifs_ser_cfg.set("homes", "create mask", "0777")
+            cifs_ser_cfg.set("homes", "directory mask", "0777")
+            if "-p" in sys.argv[0:] and path != "/home/nas":
+                hmdir_path = "/mnt/icfs" + path
+                # check_for_path need relative path  modify by shaoning 2016-12-14
+                check_for_path(path)
+                if cf_ser_md in ("ADS", "ads"):
+                    if "template homedir" in cf_ser_list:
+                        cifs_ser_cfg.remove_option("global", "template homedir")
+                    # cifs_ser_cfg.set("homes","valid users","/%D/%U")
+                    cifs_ser_cfg.set("homes", "path", hmdir_path)
+                elif cf_ser_md in ("user", "USER"):
+                    cifs_ser_cfg.set("homes", "path", hmdir_path)
+            else:
+                if cf_ser_md in ("ADS", "ads"):
+                    cifs_ser_cfg.set("global", "template homedir", "/homes/%D/%U")
+                    cifs_ser_cfg.set("homes", "path", "/homes/%D/%U")
+                    # cifs_ser_cfg.set("homes","valid users","/%D/%U")
+                elif cf_ser_md in ("user", "USER"):
+                    cifs_ser_cfg.set("homes", "path", "/%H")
+        elif hmdir == "no":
+            if "homes" in cifs_ser_cfg.sections():
+                cifs_ser_cfg.remove_section("homes")
+    if "--notify" in sys.argv[0:]:
+        if ntf == "yes":
+            if "change notify" in cf_ser_list:
+                cifs_ser_cfg.remove_option("global", "change notify")
+        elif ntf == "no":
+            cifs_ser_cfg.set("global", "change notify", "no")
+    if "--sign" in sys.argv[0:]:
+        if sgn == "yes":
+            cifs_ser_cfg.set("global", "server signing", "auto")
+        elif sgn == "no":
+            if "server signing" in cf_ser_list:
+                cifs_ser_cfg.remove_option("global", "server signing")
+    if "--cosign" in sys.argv[0:]:
+        if csgn == "yes":
+            cifs_ser_cfg.set("global", "client signing", "mandatory")
+        elif csgn == "no":
+            if "client signing" in cf_ser_list:
+                cifs_ser_cfg.remove_option("global", "client signing")
+#        if "--domain" in sys.argv[0:]:
+#            set_smb_ads()
+    cifs_ser_cfg.write(open("/etc/samba/smb.conf", "w"))
+    smb_ad_format()
+    # synchronize config file
+    synchronize_smb_conf()
+    # reload config file
+    reload_config()
+
+
+def cifs_set_share_failover():
+    # check failover precondition
+    if failover == "on":
+        check_failover_precondition()
+    parser = NewConfigParser()
+    parser.read("/etc/samba/smb.conf")
+    if not parser.has_section(shame):
+        Error(121, shame)
+    if failover == "on":
+        # set param
+        parser.set(shame, "smbd:announce cluster", "true")
+        parser.set(shame, "smbd:announce ca", "true")
+    else:
+        # remove global param
+        parser.remove_option(shame, "smbd:announce cluster")
+        parser.remove_option(shame, "smbd:announce ca")
+    parser.write(open("/etc/samba/smb.conf", "w"))
+    smb_ad_format()
+    # synchronize config file
+    synchronize_smb_conf()
+    # reload config file
+    reload_config()
+
+
+# delete sharename in smb.conf
+def cifs_delete_share():
+    global smbuser, path, shame, acl, usrtp
+    del_list_n = []
+    del_list_e = []
+    sh_name_r = shame.split(',')
+    sh_name_list = list(set(sh_name_r))
+    for sh_name_sngl in sh_name_list:
+        if not check_for_sharename(sh_name_sngl):
+            del_list_n.append(sh_name_sngl)
+        else:
+            del_list_e.append(sh_name_sngl)
+    if not del_list_e:
+        Error(121, ','.join(sh_name_list))
+    else:
+        # check_remote_host_stat()
+        check_mount_point()
+        cifs_file = NewConfigParser()
+        cifs_file.read("/etc/samba/smb.conf")
+        del_md = cifs_file.get("global", "security")
+        for sh_path_del in del_list_e:
+            cifs_file.remove_section(sh_path_del)
+        cifs_file.write(open("/etc/samba/smb.conf", "w"))
+        smb_ad_format()
+        # synchronize config file
+        synchronize_smb_conf()
+        # reload config file
+        for sh_path_del in del_list_e:
+            ret_dict = run_remote_cmd("*", "smbcontrol smbd close-share %s" % sh_path_del)
+            fail_list = []
+            for node_name, node_ret in ret_dict.items():
+                # retcode == 0, indicate reload success
+                # "Can't find pid for destination 'smbd'", indicate smbd service is down
+                if node_ret["retcode"] not in (0, 255) and "Can't find pid for destination 'smbd'" not in node_ret["stderr"]:
+                    fail_list.append(node_name)
+
+            if fail_list:
+                Error(302, ",".join(fail_list))
+    if del_list_n:
+        Error(121, ','.join(del_list_n))
+
+
+# Set worm service
+def worm_set(shame,path, grace_period, overtime_period):
+    if not check_for_sharename(shame):
+        Error(121, shame)
+    if commands.getstatusoutput("mount|grep -w icfs-fuse|grep -w /mnt/icfs")[1]:
+        a = '/mnt/icfs'
+    else:
+        Error(504)
+        Error(500)
+    # check_remote_host_stat()
+    check_mount_point()
+    worm_set_file = NewConfigParser()
+    worm_set_file.read("/etc/samba/smb.conf")
+    alist = worm_set_file.sections()
+    alist.remove("global")
+    all_worm_path = []
+    for cname in alist[0:]:
+        options = worm_set_file.options(cname)
+        if "path" in options and "vfs objects" in options and \
+           "worm"in worm_set_file.get(cname, "vfs objects") and "worm:grace_period" in options and \
+           "worm:overtime_period" in options:
+            all_worm_path.append(worm_set_file.get(cname, "path"))
+    abs_path = path
+    spath = abs_path.rstrip("/")
+    if spath == "":
+        spath = "/"
+    for dir in all_worm_path:
+        if check_dir_and_subdir(dir, spath):
+            Error(311, spath, shame)
+    try:
+        grace_period = long(grace_period)
+        overtime_period = long(overtime_period)
+    except ValueError, e:
+        Error(610)
+    if overtime_period < grace_period:
+        Error(313)
+    worm_path = worm_set_file.get(shame,"path")
+    if path != worm_path:
+        Error(326)
+    worm_set_file.set(shame, "path", spath)
+    worm_set_file.set(shame, "worm:grace_period", grace_period)
+    worm_set_file.set(shame, "worm:overtime_period", overtime_period)
+    if "full_audit" in worm_set_file.get(shame, "vfs objects"):
+        worm_set_file.set(shame, "vfs objects", "full_audit worm icfs")
+    else:
+        worm_set_file.set(shame, "vfs objects", "worm icfs")
+    worm_set_file.write(open("/etc/samba/smb.conf", "w"))
+    # synchronize config file
+    synchronize_smb_conf()
+    # restart smb service
+    restart_smb()
+    print "successful"
+
+
+# delete share users in smb.conf
+def cifs_delete_user():
+    global smbuser, path, shame, acl, usrtp
+    del_md_cfg = NewConfigParser()
+    del_md_cfg.read("/etc/samba/smb.conf")
+    del_md = del_md_cfg.get("global", "security")
+    if del_md in ("USER", "user") and mod == "domain":
+        Error(240)
+    if del_md in ("ads", "ADS") and mod in ("local", "everyone"):
+        Error(240)
+    if mod in ("local", "domain"):
+        if len(shame.split(',')) != 1:
+            Error(206)
+        if not check_for_sharename(shame):
+            Error(121, shame)
+        del_path = check_for_shamepath(shame)
+        if not del_path:
+            Error(125)
+        # check_remote_host_stat()
+        check_mount_point()
+        smbuser_l = smbuser.split(',')
+        smbuser = ','.join(list(set(smbuser_l)))
+        if usrtp == "g":
+            real_user_stat, real_user = commands.getstatusoutput("echo %s|sed 's/^/@/g;s/,/,@/g'" % smbuser)
+        else:
+            real_user = smbuser
+        share_user_n, share_user_v, share_user_i, share_user_e = check_for_shareuser(shame, real_user)
+        if not share_user_e:
+            share_user_n_st = ','.join(share_user_n).replace('@', '')
+            Error(127, share_user_n_st)
+        else:
+            delacl_for_path(del_path, usrtp, share_user_e)
+            share_user_delete(shame, share_user_e, share_user_v, share_user_i)
+            smb_ad_format()
+            # synchronize config file
+            synchronize_smb_conf()
+            # reload config file
+            reload_config()
+        if share_user_n:
+            share_user_n_st = ','.join(share_user_n).replace('@', '')
+            Error(127, share_user_n_st)
+    elif mod == "everyone":
+        if not check_for_sharename(shame):
+            Error(121, shame)
+        del_path = check_for_shamepath(shame)
+        if not del_path:
+            Error(125)
+        # check_remote_host_stat()
+        check_mount_point()
+        share_user_n, share_user_v, share_user_i, share_user_e = check_for_shareuser(shame, smbuser)
+        if not share_user_e:
+            if smbuser == "nobody":
+                smbuser_every = "Everyone"
+            else:
+                smbuser_every = smbuser
+            Error(127, smbuser_every)
+        else:
+            delacl_for_path(del_path, usrtp, share_user_e)
+            share_user_delete(shame, share_user_e, share_user_v, share_user_i)
+            smb_ad_format()
+            # synchronize config file
+            synchronize_smb_conf()
+            # reload config file
+            reload_config()
+        if share_user_n:
+            smb_every_sh = ','.join(share_user_n)
+            if smb_every_sh == "nobody":
+                smb_every_sh_e = "Everyone"
+            else:
+                smb_every_sh_e = smb_every_sh
+            Error(127, smb_every_sh_e)
+
+
+# query share name-path
+def cifs_query_share():
+    global smbuser, path, shame, acl, usrtp
+    path_list = []
+    print "%-30s %-30s %s" % ("Name", "Path", "Failover")
+    que_file_cfg = NewConfigParser()
+    que_file_cfg.read("/etc/samba/smb.conf")
+    que_file_sec = que_file_cfg.sections()
+    for que_sec in que_file_sec:
+        if que_sec == "homes":
+            continue
+        
+        if "path" not in que_file_cfg.options(que_sec):
+            continue
+        
+        que_path_dir = que_file_cfg.get(que_sec, "path")
+        failover_flag = "off"
+        if que_file_cfg.has_option(que_sec, "smbd:announce cluster") and que_file_cfg.get(que_sec, "smbd:announce cluster") == "true" and \
+           que_file_cfg.has_option(que_sec, "smbd:announce ca") and que_file_cfg.get(que_sec, "smbd:announce ca") == "true":
+            failover_flag = "on"
+        path_list.append((que_sec, que_path_dir, failover_flag))
+    
+    if not path_list:
+        print "%-30s %-30s %s" % ("None", "None", "None")
+    else:
+        for que_shame, que_dir, que_failover in path_list:
+            print "%-30s %-30s %s" % (que_shame, que_dir, que_failover)
+
+
+# query user-acl under sharename
+def cifs_query_user():
+    global smbuser, path, shame, acl, usrtp
+    if len(shame.split(',')) != 1:
+        Error(206)
+    if not check_for_sharename(shame):
+        Error(121, shame)
+    que_file_cfg = NewConfigParser()
+    que_file_cfg.read("/etc/samba/smb.conf")
+    que_md = que_file_cfg.get("global", "security")
+    que_opt = que_file_cfg.options(shame)
+    if "path" not in que_opt:
+        Error(125)
+    que_path = que_file_cfg.get(shame, "path")
+    if que_path[-1:] == "/":
+        que_path_sl = que_path[:-1]
+    elif que_path[1:] == ".":
+        if que_path[-2:-1] == "/":
+            que_path_sl = que_path[:-2]
+        else:
+            que_path_sl = que_path
+    else:
+        que_path_sl = que_path
+    que_path_stat, que_path_relt = commands.getstatusoutput("mount | grep -w icfs-fuse|awk '{print $3}'")
+    host_n = commands.getoutput("echo $HOSTNAME")
+    if not que_path_relt or "/mnt/icfs" not in que_path_relt:
+        for que_p_d, que_p_sd, que_p_f in os.walk("/mnt/icfs"):
+            if que_p_sd or que_p_f:
+                Error(110, host_n)
+        que_path_fuse_s, que_path_fuse = commands.getstatusoutput('icfs-fuse /mnt/icfs')
+        if "fuse failed to start" in que_path_fuse:
+            Error(110, host_n)
+    elif "/mnt/icfs" not in que_path_relt:
+        Error(110, host_n)
+
+    que_path_isdir = "/mnt/icfs" + que_path_sl
+    que_path_fd = os.path.isdir(que_path_isdir)
+    if not que_path_fd:
+        Error(100)
+
+    acl_output = commands.getoutput("icfs-admin-acl --query -d %s" % que_path_isdir)
+    acl_list = acl_output.split("\n")
+    
+    if que_path == "/mnt/icfs":
+        que_path_shame = "/"
+    else:
+        que_path_shame = que_path
+    # worm ralative parameter
+    que_gtperiod = "none"
+    que_otperiod = "none"
+    if "vfs objects" in que_opt and "worm" in que_file_cfg.get(shame, "vfs objects") and \
+       "worm:grace_period" in que_opt and "worm:overtime_period" in que_opt:
+        que_gtperiod = que_file_cfg.get(shame, "worm:grace_period")
+        que_otperiod = que_file_cfg.get(shame, "worm:overtime_period")
+    # failover ralative parameter
+    failover_flag = "off"
+    if "smbd:announce cluster" in que_opt and que_file_cfg.get(shame, "smbd:announce cluster") == "true" and \
+       "smbd:announce ca" in que_opt and que_file_cfg.get(shame, "smbd:announce ca") == "true":
+        failover_flag = "on"
+    print "CIFS_Path    ", que_path_shame
+    print "Grace_peirod   ", que_gtperiod
+    print "Overtime_peirod   ", que_otperiod
+    print "Failover   ", failover_flag
+    user_titl = ["CIFS_Users", "Type", "Acl"]
+    print "%-33s    %-15s    %s" % (user_titl[0], user_titl[1], user_titl[2])
+    que_v_lst = []
+    que_i_lst = []
+    if "valid users" in que_opt:
+        que_v = que_file_cfg.get(shame, "valid users")
+        que_v = que_v.replace(" ", "")
+        if que_v:
+            que_v_lst = que_v.split(',')
+    if "invalid users" in que_opt:
+        que_i = que_file_cfg.get(shame, "invalid users")
+        que_i = que_i.replace(" ", "")
+        if que_i:
+            que_i_lst = que_i.split(',')
+    if "invalid_user_nologin" in que_v_lst:
+        que_v_lst.remove("invalid_user_nologin")
+    if que_md in ("ADS", "ads"):
+        que_md_r = "domain"
+    elif que_md in ("USER", "user"):
+        que_md_r = "local"
+    if que_v_lst:
+        que_v_w = list(set(que_v_lst) - set(que_i_lst))
+        for que_sngl in que_v_w:
+            if que_sngl[0] == "@":
+                que_sngl_g = que_sngl[1:]
+                # change name to acl format
+                acl_group_name = que_sngl_g
+                if "/" in acl_group_name:
+                    tmp_list = acl_group_name.split("/")
+                    tmp_list[0] = re.sub(r"\.com$", "", tmp_list[0])
+                    acl_group_name = "/".join(tmp_list)
+
+                que_acl_relt = None
+                # pattern = re.compile(r"^group:([^:]*):([\w-]+)\s*(?:#.*)?")
+                pattern = re.compile(r"^no\s+group\s+(\S+)\s+([\w-]+)\s+[\w-]+\s*$")
+                for acl in acl_list:
+                    m = pattern.match(acl)
+                    if m is not None and m.group(1).lower() == acl_group_name.lower():
+                        que_acl_relt = m.group(2)
+
+                if not que_acl_relt:
+                    que_set_other = "-----"
+                    que_owner_relt = commands.getoutput("ls -ld %s|awk '{print $4}'" % que_path_isdir)
+                    if que_owner_relt == acl_group_name:
+                        # pattern = re.compile(r"^group::([\w-]+)\s*(?:#.*)?")
+                        pattern = re.compile(r"^no\s+group\s+-\s+([\w-]+)\s+[\w-]+\s*$")
+                        for acl in acl_list:
+                            m = pattern.match(acl)
+                            if m is not None:
+                                que_set_other = m.group(1)
+                    else:
+                        # pattern = re.compile(r"^other::([\w-]+)\s*(?:#.*)?")
+                        pattern = re.compile(r"^no\s+other\s+-\s+([\w-]+)\s+[\w-]+\s*$")
+                        for acl in acl_list:
+                            m = pattern.match(acl)
+                            if m is not None:
+                                que_set_other = m.group(1)
+                    # modify by shaoning 2016-12-7
+                    if que_set_other.startswith("rwxd"):
+                        que_set_other_a = "rwx"
+                    elif que_set_other.startswith("rwx-"):
+                        que_set_other_a = "rw-"
+                    elif que_set_other.startswith("r-x-"):
+                        que_set_other_a = "r--"
+                    else:
+                        que_set_other_a = "---"
+                    print "%-33s    %-15s    %s" % (que_sngl_g, que_md_r + "-group", que_set_other_a)
+                else:
+                    # modify by shaoning 2016-12-7
+                    if que_acl_relt.startswith("rwxd"):
+                        que_set_acl_ui = "rwx"
+                    elif que_acl_relt.startswith("rwx-"):
+                        que_set_acl_ui = "rw-"
+                    elif que_acl_relt.startswith("r-x-"):
+                        que_set_acl_ui = "r--"
+                    else:
+                        que_set_acl_ui = "---"
+                    print "%-33s    %-15s    %s" % (que_sngl_g, que_md_r + "-group", que_set_acl_ui)
+            else:
+                # change name to acl format
+                acl_user_name = que_sngl
+                if "/" in acl_user_name:
+                    tmp_list = acl_user_name.split("/")
+                    tmp_list[0] = re.sub(r"\.com$", "", tmp_list[0])
+                    acl_user_name = "/".join(tmp_list)
+                que_acl_relt = None
+                # pattern = re.compile(r"^user:([^:]*):([\w-]+)\s*(?:#.*)?")
+                pattern = re.compile(r"^no\s+user\s+(\S+)\s+([\w-]+)\s+[\w-]+\s*$")
+                for acl in acl_list:
+                    m = pattern.match(acl)
+                    if m is not None and m.group(1).lower() == acl_user_name.lower():
+                        que_acl_relt = m.group(2)
+
+                if not que_acl_relt:
+                    que_set_other = "-----"
+                    que_owner_relt = commands.getoutput("ls -ld %s|awk '{print $3}'" % que_path_isdir)
+                    if que_owner_relt == acl_user_name:
+                        # pattern = re.compile(r"^user::([\w-]+)\s*(?:#.*)?")
+                        pattern = re.compile(r"^no\s+user\s+-\s+([\w-]+)\s+[\w-]+\s*$")
+                        for acl in acl_list:
+                            m = pattern.match(acl)
+                            if m is not None:
+                                que_set_other = m.group(1)
+                    else:
+                        # pattern = re.compile(r"^other::([\w-]+)\s*(?:#.*)?")
+                        pattern = re.compile(r"^no\s+other\s+-\s+([\w-]+)\s+[\w-]+\s*$")
+                        for acl in acl_list:
+                            m = pattern.match(acl)
+                            if m is not None:
+                                que_set_other = m.group(1)
+                    # modify by shaoning 2016-12-7
+                    if que_set_other.startswith("rwxd"):
+                        que_set_acl_ui = "rwx"
+                    elif que_set_other.startswith("rwx-"):
+                        que_set_acl_ui = "rw-"
+                    elif que_set_other.startswith("r-x-"):
+                        que_set_acl_ui = "r--"
+                    else:
+                        que_set_acl_ui = "---"
+                    if que_sngl == "nobody":
+                        print "%-33s    %-15s    %s" % ("Everyone", "Everyone", que_set_acl_ui)
+                    else: 
+                        print "%-33s    %-15s    %s" % (que_sngl, que_md_r + "-user", que_set_acl_ui)
+                else:
+                    # modify by shaoning 2016-12-7
+                    if que_acl_relt.startswith("rwx-"):
+                        que_set_acl_ui = "rw-"
+                    elif que_acl_relt.startswith("rwxd"):
+                        que_set_acl_ui = "rwx"
+                    elif que_acl_relt.startswith("r-x-"):
+                        que_set_acl_ui = "r--"
+                    else:
+                        que_set_acl_ui = "---"
+                    if que_sngl == "nobody":
+                        print "%-33s    %-15s    %s" % ("Everyone", "Everyone", que_set_acl_ui)
+                    else: 
+                        print "%-33s    %-15s    %s" % (que_sngl, que_md_r + "-user", que_set_acl_ui)
+    if que_i_lst:
+        for que_sngl_i in que_i_lst:
+            if que_sngl_i[0] == "@":
+                print "%-33s    %-15s    %s" % (que_sngl_i[1:], que_md_r + "-group", "---")
+            else:
+                if que_sngl_i == "nobody":
+                    print "%-33s    %-15s    %s" % ("Everyone", "Everyone", "---")
+                else:
+                    print "%-33s    %-15s    %s" % (que_sngl_i, que_md_r + "-user", "---")
+    if not que_i_lst and not que_v_lst:
+        print "%-33s    %-15s    %s" % ("None", "None", "None")
+    if "smb.acl.temp~" in os.listdir("/etc/samba/"):
+        commands.getoutput("rm -rf /etc/samba/smb.acl.temp~")
+
+
+# query total numbers of users-online
+def cifs_query_on():
+    smb_online_num = 0
+    pattern_connect = re.compile(r"^\s*(\S+)\s+\d+\s+(\S+)\s+.*$")
+    # query smb status
+    ret = run_remote_cmd('*', 'smbstatus -S')
+    fail_info = [item+':'+ret[item]['stdout']+ret[item]['stderr'] for item in ret.iterkeys() if ret[item]['retcode'] not in (0, 255)]
+    if fail_info:
+        print "Error(330) can't get smb status, fail_info: %s" % fail_info
+        sys.exit(1)
+    # match the online connect
+    for item in ret.itervalues():
+        lines = item['stdout'].split("\n")
+        for line in lines:
+            m = pattern_connect.match(line)
+            if m is not None and m.group(1) != "IPC$":
+                smb_online_num += 1
+
+    print "%s:    %s" % ("CIFS_Online", smb_online_num)
+
+
+def cifs_query_clients():
+    print "%-15s %-15s %s" % ("CLIENT", "SERVICE", "SERVER")
+    pattern_host = re.compile(r"^(\S+):$")
+    pattern_connect = re.compile(r"^\s*(\S+)\s+\d+\s+(\S+)\s+.*$")
+
+    # query the smb status
+    ret = run_remote_cmd('*', 'smbstatus -S')
+    fail_info = [item + ':' + ret[item]['stdout'] + ret[item]['stderr'] for item in ret.iterkeys() if
+                 ret[item]['retcode'] not in (0, 255)]
+    if fail_info:
+        print "Error(330) can't get smb status, fail_info: %s" % fail_info
+        sys.exit(1)
+
+    # match the clients
+    for item in ret.iteritems():
+        lines = item[1]['stdout'].split("\n")
+        for line in lines:
+            m = pattern_connect.match(line)
+            if m is not None and m.group(1) != "IPC$":
+                share_name = m.group(1)
+                ip_address = m.group(2)
+                print "%-15s %-15s %s" % (ip_address, share_name, item[0])
+
+
+# query cifs service settings
+def cifs_query_service():
+    que_ser_list = []
+    que_file_cfg = NewConfigParser()
+    que_file_cfg.read("/etc/samba/smb.conf")
+    que_opt = que_file_cfg.options("global")
+    cifs_mode = que_file_cfg.get("global", "security")
+    cifs_mode_r = "AD" if cifs_mode in ("ads", "ADS") else "LOCAL"
+    print "%-15s%s" % ("CIFS_MODE:", cifs_mode_r)
+    limit_number_str = "0"
+    if que_file_cfg.has_option("global", "max smbd processes"):
+        limit_number_str = que_file_cfg.get("global", "max smbd processes")
+    print "%-15s%s" % ("Limit:", limit_number_str)
+    if "homes" in que_file_cfg.sections():
+        if "path" in que_file_cfg.options("homes"):
+            que_path_dir = que_file_cfg.get("homes", "path")
+            if que_path_dir[:9] == "/mnt/icfs":
+                if que_path_dir == "/mnt/icfs":
+                    que_path_dir = "/"
+                else:
+                    que_path_dir = que_path_dir[9:]
+            else:
+                que_path_dir = "/home/nas"
+        else:
+            que_path_dir = "/home/nas"
+        que_ser_list.append("homedir " + que_path_dir)
+    if "guest account" in que_opt:
+        que_ser_list.append("guest")
+    if "change notify" not in que_opt:
+        que_ser_list.append("notify")
+    else:
+        if que_file_cfg.get("global", "change notify") == "yes":
+            que_ser_list.append("notify")
+    if "server signing" in que_opt and que_file_cfg.get("global", "server signing") == "auto":
+        que_ser_list.append("sign")
+    if "client signing" in que_opt and que_file_cfg.get("global", "client signing") == "mandatory":
+        que_ser_list.append("cosign")
+    if not que_ser_list:
+        print "%-15s%s" % ("Services:", "None")
+    else:
+        print "%-15s%s" % ("Services:", que_ser_list[0])
+        del que_ser_list[0]
+        for que_ser_sngl in que_ser_list:
+            print "%-15s%s" % ("", que_ser_sngl)
+
+
+# create cifs share
+def cifs_create_share():
+    global path, shame, failover
+    if check_for_sharename(shame):
+        Error(120, shame)
+    check_for_path(path)
+    # check failover precondition
+    if failover == "on":
+        check_failover_precondition()
+    # check_remote_host_stat()
+    check_mount_point()
+    cifs_file = NewConfigParser()
+    cifs_file.read("/etc/samba/smb.conf")
+    cifs_file.add_section(shame)
+    cifs_file.set(shame, "public", "no")
+    cifs_file.set(shame, "valid users", "invalid_user_nologin")
+    cifs_file.set(shame, "path", path)
+    cifs_file.set(shame, "writeable", "yes")
+    cifs_file.set(shame, "printable", "no")
+    # cifs_file.set(shame, "inherit acls", "yes")
+    # cifs_file.set(shame, "map acl inherit", "yes")
+    # cifs_file.set(shame, "map readonly", "perms")
+    cifs_file.set(shame, "directory mask", "0777")
+    cifs_file.set(shame, "vfs objects", "icfs")
+    cifs_file.set(shame, "create mask", "0777")
+    cifs_file.set(shame, "icfs:config_file", "/etc/icfs/icfs.conf")
+    # failover
+    if failover == "on":
+        cifs_file.set(shame, "smbd:announce cluster", "true")
+        cifs_file.set(shame, "smbd:announce ca", "true")
+    else:
+        cifs_file.remove_option(shame, "smbd:announce cluster")
+        cifs_file.remove_option(shame, "smbd:announce ca")
+    # 20161226 shizonghua Adjust if there need to add audit info
+    add_need_audit_info(cifs_file, shame)
+    f_open = open("/etc/samba/smb.conf", "w")
+    cifs_file.write(f_open)
+    f_open.flush()
+    f_open.close()
+    smb_ad_format()
+    # synchronize config file
+    synchronize_smb_conf()
+    # reload config file
+    reload_config()
+
+# create cifs user
+def cifs_create_user():
+    global shame, mod, smbuser, usrtp, acl
+    if not check_for_sharename(shame):
+        Error(121, shame)
+    cre_md_cfg = NewConfigParser()
+    cre_md_cfg.read("/etc/samba/smb.conf")
+    cre_md = cre_md_cfg.get("global", "security")
+    if cre_md in ("USER", "user") and mod == "domain":
+        Error(240)
+    elif cre_md in ("ads", "ADS") and mod in ("local", "everyone"):
+        Error(240)
+    if mod == "local" and usrtp == "u":
+        local_user = commands.getoutput("cat /etc/passwd |grep -P '^%s:'" % smbuser)
+        if local_user == '':
+            Error(210, smbuser)
+    elif mod == "local" and usrtp == "g":
+        local_group = commands.getoutput("cat /etc/group |grep -P '^%s:'" % smbuser)
+        if local_group == '':
+            Error(215, smbuser)
+    # elif mod == "domain" and usrtp == "u":
+    #     wbin_u = commands.getoutput("wbinfo -u|grep -w %s" % smbuser)
+    #     if wbin_u == '':
+    #         Error(220, smbuser)
+    # elif mod == "domain" and usrtp == "g":
+    #     wbin_g = commands.getoutput("wbinfo -g|grep -w %s" % smbuser)
+    #     if wbin_g == '':
+    #         Error(225, smbuser)
+    os.system("python /usr/bin/task-manage Cifs_create_user %s %s %s %s %s > /dev/null &"
+              % (shame, mod, usrtp, smbuser, acl))
+
+
+def start():
+    # start cifs on all nodes
+    # start success return 1
+    # start error return 0
+    host_list = get_remote_host_list()
+    status = 0
+    os_type = get_os_type()
+    if os_type.os_version.startswith("7."):
+        for host in host_list:
+            commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                               "-o StrictHostKeyChecking=no %s 'systemctl start smb' " % host)
+            out = commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                                     "-o StrictHostKeyChecking=no %s 'systemctl status smb' | grep Active" % host)
+            if "running" in out:
+                status = 1
+            else:
+                print out
+    else:
+        for host in host_list:
+            commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                               "-o StrictHostKeyChecking=no %s 'service smb start' " % host)
+            out = commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                                     "-o StrictHostKeyChecking=no %s 'service smb status' " % host)
+            if "running" in out:
+                status = 1
+            else:
+                print out
+    return status
+
+
+def status():
+    import signal
+
+    # timeout event handler
+    def timeout_handler(signum, frame):
+        for worker in worker_list:
+            # os.kill(worker.pid, signal.SIGKILL)
+            worker.terminate()
+        print "Error(553): Unknown error"
+        print "timeout"
+        sys.exit(1)
+
+    # auto exit after 30s
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(30)
+
+    msg_queue = multiprocessing.Queue()
+    # check cifs status
+    host_list = get_remote_host_list()
+    worker_list = []
+    for host in host_list:
+        worker_list.append(Worker(host, msg_queue))
+
+    for worker in worker_list:
+        worker.start()
+
+    for worker in worker_list:
+        worker.join()
+
+    for i in range(msg_queue.qsize()):
+        msg = msg_queue.get()
+        print msg
+
+    # while True:
+    #     if msg_queue.qsize() == len(host_list):
+    #         for i in range(msg_queue.qsize()):
+    #             msg = msg_queue.get()
+    #             print msg
+    #         sys.exit(0)
+    #     else:
+    #         time.sleep(1)
+
+
+def stop():
+    # stop all cifs
+    # stop success return 1
+    # stop error return 0
+    host_list = get_remote_host_list()
+    status = 1
+    os_type = get_os_type()
+    if os_type.os_version.startswith("7."):
+        for host in host_list:
+            commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                               "-o StrictHostKeyChecking=no %s 'systemctl stop smb'" % host)
+            out = commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                                     "-o StrictHostKeyChecking=no %s 'systemctl status smb | grep Active'" % host)
+            if "running" in out:
+                status = 0
+    else:
+        for host in host_list:
+            commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                               "-o StrictHostKeyChecking=no %s 'service smb stop'" % host)
+            out = commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                                     "-o StrictHostKeyChecking=no %s 'service smb status'" % host)
+            if "running" in out:
+                status = 0
+
+    return status
+
+
+def cifs_audit_query():
+    read_level = None
+    config_count = 0
+    unconfig_count = 0
+    level = {'high': 'rmdir rename unlink',
+             'middle': 'rmdir rename unlink read pread write pwrite pread_send pread_recv pwrite_send pwrite_recv',
+             'low': 'connect disconnect opendir mkdir rmdir closedir open close read pread write pwrite '
+                    'sendfile rename unlink chmod fchmod chown fchown chdir ftruncate lock symlink readlink '
+                    'link mknod realpath pread_send pread_recv pwrite_send pwrite_recv'}
+    if not os.path.exists("/etc/samba/smb.conf"):
+        Error(721)
+        sys.exit(1)
+    cp = NewConfigParser()
+    cp.read("/etc/samba/smb.conf")
+    if 0 == len(cp.sections()) or 1 == len(cp.sections()):
+        Error(322)
+        sys.exit(1)
+    if not cp.has_section("global"):
+        Error(322)
+        sys.exit(1)
+    if not cp.has_option("global", "full_audit:success") and not cp.has_option("global", "full_audit:prefix")\
+            and not cp.has_option("global", "full_audit:failure") and not cp.has_option("global", "full_audit:facility")\
+            and not cp.has_option("global", "full_audit:priority"):
+        for temp in cp.sections():
+            if "global" == temp:
+                continue
+            if not cp.has_option(temp, "vfs objects"):
+                unconfig_count += 1
+            elif 'full_audit' not in cp.get(temp, "vfs objects"):
+                unconfig_count += 1
+            elif 'full_audit' == cp.get(temp, "vfs objects").lstrip().split()[0]:
+                continue
+            else:
+                Error(327, temp)
+                sys.exit(1)
+        if len(cp.sections()) - 1 == unconfig_count:
+            print "Status: disable "
+            sys.exit(0)
+        else:
+            Error(324)
+            sys.exit(1)
+    elif cp.has_option("global", "full_audit:success") and cp.has_option("global", "full_audit:prefix")\
+            and cp.has_option("global", "full_audit:failure") and cp.has_option("global", "full_audit:facility")\
+            and cp.has_option("global", "full_audit:priority"):
+        unconfig_count = 0
+        audit_list = cp.get("global", "full_audit:success")
+        if len(audit_list.split()) != len(set(audit_list.split())):
+            Error(323)
+            sys.exit(1)
+        if not set(audit_list.split()).difference(set(level['high'].split())):
+            read_level = "high"
+        elif not set(audit_list.split()).difference(set(level['middle'].split())):
+            read_level = "middle"
+        elif not set(audit_list.split()).difference(set(level['low'].split())):
+            read_level = "low"
+        else:
+            Error(323)
+            sys.exit(1)
+        if read_level is not None:
+            for temp in cp.sections():
+                if "global" == temp:
+                    continue
+                if cp.has_option(temp, "vfs objects"):
+                    if "full_audit" == cp.get(temp, "vfs objects").lstrip().split()[0]:
+                        config_count += 1
+                    elif "full_audit" in cp.get(temp, "vfs objects"):
+                        Error(327, temp)
+                        sys.exit(1)
+                    else:
+                        unconfig_count += 1
+                else:
+                    unconfig_count += 1
+
+            if len(cp.sections()) - 1 == config_count:
+                print "Status: %s \nLevel: %s" % ("enable", read_level)
+                sys.exit(0)
+            elif len(cp.sections()) - 1 == unconfig_count:
+                print "Status: disable "
+                sys.exit(0)
+            else:
+                Error(325)
+                sys.exit(1)
+    else:
+        Error(322)
+        sys.exit(1)
+
+
+def cifs_set_audit_level(audit_level):
+    # check_remote_host_stat()
+    # check_mount_point()
+    level = {'high': 'rmdir rename unlink',
+             'middle': 'rmdir rename unlink read pread write pwrite pread_send pread_recv pwrite_send pwrite_recv',
+             'low': 'connect disconnect opendir mkdir rmdir closedir open close read pread write pwrite '
+                    'sendfile rename unlink chmod fchmod chown fchown chdir ftruncate lock symlink readlink '
+                    'link mknod realpath pread_send pread_recv pwrite_send pwrite_recv'}
+    if not os.path.exists("/etc/samba/smb.conf"):
+        Error(721)
+        sys.exit(1)
+    cp = NewConfigParser()
+    cp.read("/etc/samba/smb.conf")
+    if 0 == len(cp.sections()) or 1 == len(cp.sections()):
+        Error(322)
+        sys.exit(1)
+    if not cp.has_section("global"):
+        Error(322)
+        sys.exit(1)
+    if "disable" != audit_level:
+        cp.set("global", "full_audit:prefix", "%u|%I|%S")
+        cp.set("global", "full_audit:success", level[audit_level])
+        cp.set("global", "full_audit:failure", "connect")
+        cp.set("global", "full_audit:facility", "local5")
+        cp.set("global", "full_audit:priority", "notice")
+        if not cp.sections():
+            Error(322)
+            sys.exit(1)
+        for temp in cp.sections():
+            if "global" == temp:
+                continue
+            # 20170110 fix samba config file have duplicated vfs object config option
+            if not cp.has_option(temp, "vfs objects"):
+                cp.set(temp, "vfs objects", "full_audit")
+            elif "full_audit" not in cp.get(temp, "vfs objects"):
+                cp.set(temp, "vfs objects", "full_audit %s" % cp.get(temp, "vfs objects").lstrip())
+            elif "full_audit" != cp.get(temp, "vfs objects").lstrip().split()[0]:
+                cuurentvalue = cp.get(temp, "vfs objects").lstrip().split()
+                cuurentvalue.remove("full_audit")
+                set_value = " ".join(cuurentvalue)
+                cp.set(temp, "vfs objects", "full_audit %s" % set_value)
+            else:
+                continue
+    else:
+        cp.remove_option("global", "full_audit:success")
+        cp.remove_option("global", "full_audit:prefix")
+        cp.remove_option("global", "full_audit:failure")
+        cp.remove_option("global", "full_audit:facility")
+        cp.remove_option("global", "full_audit:priority")
+        for temp in cp.sections():
+            if "global" == temp:
+                continue
+            # 20170110 fix samba config file have duplicated vfs object config option
+            if not cp.has_option(temp, "vfs objects"):
+                continue
+            if "full_audit" in cp.get(temp, "vfs objects"):
+                cuurentvalue = cp.get(temp, "vfs objects").lstrip().split()
+                if 1 < len(cuurentvalue):
+                    cuurentvalue.remove("full_audit")
+                    set_value = " ".join(cuurentvalue)
+                    cp.set(temp, "vfs objects", set_value)
+                else:
+                    cp.remove_option(temp, "vfs objects")
+            else:
+                continue
+    cp.write(open('/etc/samba/smb.conf', 'w'))
+    # synchronize config file
+    synchronize_smb_conf()
+    # restart smb service
+    restart_smb()
+    print "set cifs-audit %s success" % audit_level
+
+
+def add_need_audit_info(cifs_file, shame):
+    if cifs_file.has_option("global", "full_audit:success") and \
+       cifs_file.has_option("global", "full_audit:prefix") and \
+       cifs_file.has_option("global", "full_audit:failure") and \
+       cifs_file.has_option("global", "full_audit:facility") and \
+       cifs_file.has_option("global", "full_audit:priority"):
+        cifs_file.set(shame, "vfs objects", "full_audit %s" % cifs_file.get(shame, "vfs objects").lstrip())
+
+
+# delete the worm
+def cifs_delete_worm(shame): 
+    if not os.path.exists("/etc/samba/smb.conf"):
+        Error(721)
+    if not check_for_sharename(shame):
+        Error(121, shame)
+    del_worm = NewConfigParser()
+    del_worm.read("/etc/samba/smb.conf")   
+    options = del_worm.options(shame)
+    has_options = False
+    if "vfs objects" in options and \
+        "worm" in del_worm.get(shame, "vfs objects") and \
+        "worm:grace_period" in options and \
+        "worm:overtime_period" in options:
+        has_options = True
+    if not has_options:
+        print "Error:The %s has not set worm" % shame
+        sys.exit(1)
+    if has_options:
+        del_worm.remove_option(shame, "worm:grace_period")
+        del_worm.remove_option(shame, "worm:overtime_period")
+        if "full_audit" in del_worm.get(shame, "vfs objects"):
+            del_worm.set(shame, "vfs objects", "full_audit icfs")
+        else:
+            del_worm.set(shame, "vfs objects", "icfs")
+    del_worm.write(open('/etc/samba/smb.conf', 'w'))
+    # synchronize config file
+    synchronize_smb_conf()
+    # restart smb service
+    restart_smb()
+    print "Delete successful"
+
+
+# set samba global max smbd process number
+def cifs_set_limit(number):
+    # check_remote_host_stat()
+    check_mount_point()
+    # read config file
+    cfg_parser = NewConfigParser()
+    read_ok_list = cfg_parser.read("/etc/samba/smb.conf")
+    if "/etc/samba/smb.conf" not in read_ok_list:
+        Error(329, "/etc/samba/smb.conf")
+
+    if not cfg_parser.has_section("global"):
+        Error(329, "/etc/samba/smb.conf")
+
+    cfg_parser.set("global", "max smbd processes", number)
+    # write config file
+    cfg_parser.write(open('/etc/samba/smb.conf', 'w'))
+    # synchronize config file
+    synchronize_smb_conf()
+    # reload config file
+    reload_config()
+
+
+def cifs_set_config(config_name, config_value):
+    # check_remote_host_stat()
+    check_mount_point()
+    # read config file
+    cfg_parser = NewConfigParser()
+    read_ok_list = cfg_parser.read("/etc/samba/smb.conf")
+    if "/etc/samba/smb.conf" not in read_ok_list:
+        Error(329, "/etc/samba/smb.conf")
+
+    if not cfg_parser.has_section("global"):
+        Error(329, "/etc/samba/smb.conf")
+    cfg_parser.set("global", config_name, config_value)
+    # write config file
+    cfg_parser.write(open('/etc/samba/smb.conf', 'w'))
+    synchronize_smb_conf()
+
+
+def run_command(command_string):
+    ret_dict = run_remote_cmd("*", command_string)
+    fail_list = [name for name, ret in ret_dict.items() if ret["retcode"] not in (0, 255)]
+    if fail_list:
+        Error(302, ",".join(fail_list))
+
+
+def cifs_set_qos_type(qostype):
+    config_name = "qos type"
+    config_value = qostype
+    cifs_set_config(config_name, config_value)
+    command_string = "icfs-smbd qos set type " + str(qostype)
+    run_command(command_string)
+
+
+def cifs_set_qos_nodein(nodein):
+    config_name = "qos node in bandwidth"
+    config_value = nodein
+    cifs_set_config(config_name, config_value)
+    command_string = "icfs-smbd qos set node-in " + str(nodein)
+    run_command(command_string)
+
+
+def cifs_set_qos_nodeout(nodeout):
+    config_name = "qos node out bandwidth"
+    config_value = nodeout
+    cifs_set_config(config_name, config_value)
+    command_string = "icfs-smbd qos set node-out " + str(nodeout)
+    run_command(command_string)
+
+
+def cifs_set_qos_clientin(clientin):
+    config_name = "qos conn in bandwidth"
+    config_value = clientin
+    cifs_set_config(config_name, config_value)
+    command_string = "icfs-smbd qos set default-client-in " + str(clientin)
+    run_command(command_string)
+
+
+def cifs_set_qos_clientout(clientout):
+    config_name = "qos conn out bandwidth"
+    config_value = clientout
+    cifs_set_config(config_name, config_value)
+    command_string = "icfs-smbd qos set default-client-out " + str(clientout)
+    run_command(command_string)
+
+
+def cifs_query_qos_info():
+    command_string = "icfs-smbd qos get info"
+    result = run_remote_cmd('*', command_string)
+    fail_list = [name for name, ret in result.items() if ret["retcode"] not in (0, 255)]
+    if fail_list:
+        Error(300, ",".join(fail_list))
+    for node_key,qos_value in result.items():
+        print node_key
+        if qos_value["retcode"] == 0:
+            print qos_value["stdout"]
+
+
+def cifs_query_qos_limit():
+    command_string = "icfs-smbd qos get limit"
+    result = run_remote_cmd('*', command_string)
+    fail_list = [name for name, ret in result.items() if ret["retcode"] not in (0, 255)]
+    if fail_list:
+        Error(300, ",".join(fail_list))
+    for node_key,qos_value in result.items():
+        print node_key
+        if qos_value["retcode"] == 0:
+            print qos_value["stdout"]
+
+
+if __name__ == '__main__':
+    path = None
+    shame = None
+    smbuser = None
+    usrtp = None
+    anybody = None
+    mod = None
+    acl = None
+    grace_period = None
+    overtime_period = None
+    audit_level = None
+    has_version = False
+    gst = "no"
+    hmdir = "no"
+    ntf = "yes"
+    sgn = "no"
+    csgn = "no"
+    failover = "off"
+    limit_number = 0
+    qostype = None
+    qosnodein = None
+    qosnodeout = None
+    qosclientin = None
+    qosclientout = None
+
+    try:
+        opt_parser = OptParser.OptParser()
+        # help
+        opt_parser.append("help", "{-h|--help}")
+        # create cifs share
+        opt_parser.append("create_share", "--create,-p=,-n=[--failover=]")
+        # create cifs user
+        opt_parser.append("create_user", "--create,-n={--everyone|{--local|--domain}{-u=|-g=}}[-a=]")
+        # query cifs share
+        opt_parser.append("query_share", "--query")
+        # query user in specific share
+        opt_parser.append("query_user", "--query,-n=")
+        # query service parameter
+        opt_parser.append("query_service", "--query,--service")
+        # query online client number
+        opt_parser.append("query_on", "--query,--on")
+        # query online clients' ip
+        opt_parser.append("query_clients", "--query,--clients")
+        # query audit level
+        opt_parser.append("query_audit", "--query,--audit")
+        # set cifs user
+        opt_parser.append("set_user", "--set,-n={--everyone|{--local|--domain}{-u=|-g=}}-a=")
+        # set failover
+        opt_parser.append("set_failover", "--set,-n=,--failover=")
+        # set worm
+        opt_parser.append("set_worm", "--set,-n=,-p=,--grace=,--overtime=")
+        # set service parameter
+        opt_parser.append("set_service", "--set[--guest=]"
+                                         "[--homedir=[-p=]][--notify=][--sign=][--cosign=]")
+        # set audit level
+        opt_parser.append("set_audit", "--set,--audit,--setlevel=")
+        # set limit
+        opt_parser.append("set_limit", "--set,--limit=")
+        # set qos
+        opt_parser.append("set_qos_type", "--set,--qos-type=")
+        opt_parser.append("set_qos_node_in", "--set,--qos-node-in=")
+        opt_parser.append("set_qos_node_out", "--set,--qos-node-out=")
+        opt_parser.append("set_qos_client_in", "--set,--qos-client-in=")
+        opt_parser.append("set_qos_client_out", "--set,--qos-client-out=")
+        # query qos
+        opt_parser.append("query_qos_limit", "--query,--qos-limit")
+        opt_parser.append("query_qos_info", "--query,--qos-info")
+        # delete cifs share
+        opt_parser.append("delete_share", "--delete,-n=")
+        # delete cifs user
+        opt_parser.append("delete_user", "--delete,-n={--everyone|{--local|--domain}{-u=|-g=}}")
+        # delete worm
+        opt_parser.append("delete_worm", "--delete,-n=,--worm")
+        # start cifs service
+        opt_parser.append("start", "--start")
+        # stop cifs service
+        opt_parser.append("stop", "--stop")
+        # get cifs service status
+        opt_parser.append("status", "--status[--version]")
+        # check path
+        opt_parser.append("check_path", "--check=")
+        m_name, m_opts = opt_parser.parse(sys.argv[1:])
+    except Exception, e:
+        print "Error(610): Invalid input! "
+        print e
+        sys.exit(1)
+
+    for ops, arg in m_opts:
+        if ops == "-p":
+            path = arg
+            if not os.path.isdir("/mnt/icfs" + path):
+                Error(721)
+        elif ops == "-n":
+            shame = arg
+            cifs_share_name_format(shame)
+        elif ops == "-u":
+            usrtp = "u"
+            smbuser = arg
+            cifs_user_name_format(smbuser)
+        elif ops == "-g":
+            usrtp = "g"
+            smbuser = arg
+            cifs_group_name_format(smbuser)
+        elif ops == '--grace':
+            grace_period = arg
+            try:
+                grace_period = long(grace_period)
+            except ValueError, e:
+                Error(321)
+            if grace_period < 10 or grace_period > 60:
+                Error(319)
+        elif ops == '--overtime':
+            overtime_period = arg
+            try:
+                overtime_period = long(overtime_period)
+            except ValueError, e:
+                Error(321)
+            if overtime_period < 10 or overtime_period > 2207520000:
+                Error(320)
+        elif ops == "-a":
+            acl = arg
+            if acl not in ("rwx", "rw-", "r--", "---"):
+                Error(250)
+        elif ops == "--everyone":
+            mod = "everyone"
+            usrtp = "u"
+            smbuser = "nobody"
+        elif ops == "--local":
+            mod = "local"
+        elif ops == "--domain":
+            mod = "domain"
+        elif ops == "--guest":
+            if arg not in ("yes", "no"):
+                Error(610)
+            gst = arg
+        elif ops == "--homedir":
+            if arg not in ("yes", "no"):
+                Error(610)
+            hmdir = arg
+        elif ops == "--notify":
+            if arg not in ("yes", "no"):
+                Error(610)
+            ntf = arg
+        elif ops == "--sign":
+            if arg not in ("yes", "no"):
+                Error(610)
+            sgn = arg
+        elif ops == "--cosign":
+            if arg not in ("yes", "no"):
+                Error(610)
+            csgn = arg
+        elif ops == "--failover":
+            if arg not in ("on", "off"):
+                Error(610)
+            failover = arg
+        elif ops == '--check':
+            path = arg
+        elif ops == "--setlevel":
+            if arg in ("low", "middle", "high", "disable"):
+                audit_level = arg
+            else:
+                Error(610)
+        elif ops == "--limit":
+            try:
+                limit_number = long(arg)
+            except ValueError, e:
+                Error(328)
+            if limit_number < 0 or limit_number > 2147483647:
+                Error(328)
+        elif ops == "--qos-type":
+            try:
+                qostype = int(arg)
+            except ValueError, e:
+                Error(328)
+            if qostype < 0 or qostype > 2:
+                Error(328)
+        elif ops == "--qos-node-in":
+            try:
+                qosnodein = int(arg)
+            except ValueError, e:
+                Error(328)
+            if qosnodein < 0:
+                Error(328)
+        elif ops == "--qos-node-out":
+            try:
+                qosnodeout = int(arg)
+            except ValueError, e:
+                Error(328)
+            if qosnodeout < 0:
+                Error(328)
+        elif ops == "--qos-client-in":
+            try:
+                qosclientin = int(arg)
+            except ValueError, e:
+                Error(328)
+            if qosclientin < 0:
+                Error(328)
+        elif ops == "--qos-client-out":
+            try:
+                qosclientout = int(arg)
+            except ValueError, e:
+                Error(328)
+            if qosclientout < 0:
+                Error(328)
+        elif ops == "--version":
+            has_version = True
+
+    # standardize user name
+    if mod == "domain" and smbuser is not None and re.search(r"[\\/]", smbuser):
+        smbuser = smbuser.replace("\\", "/")
+        dname_uname = smbuser.split("/")
+        dname = dname_uname.pop(0)
+        uname = "/".join(dname_uname)
+
+        smb_conf = NewConfigParser()
+        smb_conf.read("/etc/samba/smb.conf")
+        if (smb_conf.has_option("global", "security") and smb_conf.get("global", "security") == "ads" and
+                smb_conf.has_option("global", "realm") and smb_conf.get("global", "realm").upper() == dname.upper()):
+            smbuser = uname
+
+    if m_name == "help":
+        usage()
+    elif m_name == "create_share":
+        cifs_create_share()
+    elif m_name == "create_user":
+        cifs_create_user()
+    elif m_name == "set_user":
+        cifs_set_user()
+    elif m_name == "set_failover":
+        cifs_set_share_failover()
+    elif m_name == "set_worm":
+        worm_set(shame, path, grace_period, overtime_period)
+    elif m_name == "set_service":
+        cifs_set_service()
+    elif m_name == "set_audit":
+        cifs_set_audit_level(audit_level)
+    elif m_name == "set_limit":
+        cifs_set_limit(limit_number)
+    elif m_name == "set_qos_type":
+        cifs_set_qos_type(qostype)
+    elif m_name == "set_qos_node_in":
+        cifs_set_qos_nodein(qosnodein)
+    elif m_name == "set_qos_node_out":
+        cifs_set_qos_nodeout(qosnodeout)
+    elif m_name == "set_qos_client_in":
+        cifs_set_qos_clientin(qosclientin)
+    elif m_name == "set_qos_client_out":
+        cifs_set_qos_clientout(qosclientout)
+    elif m_name == "delete_share":
+        cifs_delete_share()
+    elif m_name == "delete_user":
+        cifs_delete_user()
+    elif m_name == "delete_worm":
+        cifs_delete_worm(shame)
+    elif m_name == "query_share":
+        cifs_query_share()
+    elif m_name == "query_user":
+        cifs_query_user()
+    elif m_name == "query_service":
+        cifs_query_service()
+    elif m_name == "query_on":
+        cifs_query_on()
+    elif m_name == "query_clients":
+        cifs_query_clients()
+    elif m_name == "query_audit":
+        cifs_audit_query()
+    elif m_name == "query_qos_limit":
+        cifs_query_qos_limit()
+    elif m_name == "query_qos_info":
+        cifs_query_qos_info()
+    elif m_name == "start":
+        # check_remote_host_stat()
+        check_mount_point()
+        flag = start()
+        if flag == 1:
+            print "start cifs success"
+            sys.exit(0)
+        else:
+            print "start cifs error"
+            sys.exit(1)
+    elif m_name == "stop":
+        # check_remote_host_stat()
+        check_mount_point()
+        flag = stop()
+        if flag == 1:
+            print "stop cifs success"
+            sys.exit(0)
+        else:
+            print "stop cifs error"
+            sys.exit(1)
+    elif m_name == "status":
+        status()
+    elif m_name == "check_path":
+        worm_check_path(path)
+    else:
+        Error(610)

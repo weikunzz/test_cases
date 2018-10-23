@@ -1,0 +1,215 @@
+#!/usr/bin/python
+# coding:utf-8
+
+
+import sys
+import pdb
+from icfs_util import run_local_cmd
+import OptParser
+
+
+def usage():
+    print """Help(-h|--help) for icfs-admin-object:
+Usage:
+>>icfs-admin-object----+ --share +----><
+                       + --multipart +
+                       + --abolish +
+                       ' --delete  '
+                       
+Functions: Share/Multipart/Delete/Abolish object 
+Options:
+  --share:   share object
+  --multipart:  multipart object 
+  --delete:  delete object
+  --abolish: abolish object
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-object --share:
+Usage: 
+>> icfs-admin-object ---- --share ---- --accessKey accessKey ---- --secret secretKey ---- --bucketName bucketName ----->
+>---- --objectName objectName ---- --time time ----><
+Functions: Share the object as URL
+Options:
+  --share:   share object
+  --accessKey:  the object access key
+  --secret:     the object secret key
+  --bucketName: the bucket name
+  --objectName: the object name
+  --objectPath: the object path
+  --time:       share the object time
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>>icfs-admin-object ---- --multipart ---- --accessKey accessKey ---- --secret secretKey ------------->
+>------------  --bucketName bucketName ---------------><
+Functions: multipart the uploading object 
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-object --abolish: 
+Usage:
+>> icfs-admin-object ---- --abolish ---- --accessKey accessKey ---- --secret secretKey ------------->
+>------------  --bucketName bucketName ---- --objectName objectName -------- --uploadId uploadId ---------------><
+Functions: Abolish the uploading object
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+icfs-admin-object --delete:
+Usage: 
+>>icfs-admin-object ---- --delete ---- --accessKey accessKey ---- --secret secretKey ------------->
+>------------  --bucketName bucketName ---- --objectName objectName ---------------><
+Functions: Delete the object 
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+"""
+
+
+def handlerRet(ret, stdout, stderr):
+    if "NoSuchBucket" in stderr:
+        error(3691)
+        sys.exit(1)
+    elif "InvalidAccessKeyId" in stderr:
+        error(3638)
+        sys.exit(1)
+    elif "SignatureDoesNotMatch" in stderr:
+        error(3694)
+        sys.exit(1)
+    elif "NoSuchUpload" in stderr:
+        error(3747)
+        sys.exit(1)
+    elif "Not Found" in stderr:
+        error(3748)
+        sys.exit(1)
+
+def error(error_number):
+    if 3691 == error_number:
+        print "Error(3691): NoSuchBucket"
+    elif 3638 == error_number:
+        print "Error(3638):Invalid access key id, no user with this access key"
+    elif 3694 == error_number:
+        print "Error(3694): Signature Does Not Match,check your secret key"
+    elif 3747 == error_number:
+        print "Error(3747): No such upload id"
+    elif 3748 == error_number:
+        print "Error(3748): No such object"
+
+def s3_object_share():
+    bustr = "%s" %bucketName
+    if bustr.endswith("/"):
+        bustr = bustr[:-1]
+    cmd_str = "doscli signurl --access_key=%s --secret_key=%s s3://%s/%s +%s" % (accessKey, secret, bustr, objectName, time)
+    ret = run_local_cmd(cmd_str)
+    if ret["retcode"]:
+        handlerRet(ret["retcode"], ret["stdout"], ret["stderr"])        
+    print ret["stdout"]
+    sys.exit(0)
+
+def s3_object_share_version():
+    cmd_str = "doscli signurl_ver --access_key=%s --secret_key=%s s3://%s/%s +%s %s" % (accessKey, secret, bucketName, objectName, time, versionId)
+    ret = run_local_cmd(cmd_str)
+    if ret["retcode"]:
+        handlerRet(ret["retcode"], ret["stdout"], ret["stderr"])        
+    print ret["stdout"]
+    sys.exit(0)
+
+def s3_object_multipart():
+    cmd_str = "doscli multipart_json --access_key=%s --secret_key=%s s3://%s" % (accessKey, secret, bucketName)
+    ret = run_local_cmd(cmd_str)
+    if ret["retcode"]:
+        handlerRet(ret["retcode"], ret["stdout"], ret["stderr"])        
+    print ret["stdout"]
+    sys.exit(0)
+
+
+def s3_object_abolish():
+    cmd_str = "doscli abortmp --access_key=%s --secret_key=%s s3://%s %s" % (accessKey, secret, objectName, upload_id)
+    ret = run_local_cmd(cmd_str)
+    if ret["retcode"]:
+        handlerRet(ret["retcode"], ret["stdout"], ret["stderr"])        
+    print ret["stdout"]
+    sys.exit(0)
+
+
+def s3_object_delete():
+    if objectName != None:
+        bustr = "%s" %bucketName
+        if bustr.endswith("/"):
+            bustr = bustr[:-1]
+        cmd_str = "doscli del --access_key=%s --secret_key=%s s3://%s/%s" % (accessKey, secret, bustr, objectName)
+        ret = run_local_cmd(cmd_str)
+    else:
+        cmd_str = "doscli del --access_key=%s --secret_key=%s s3://%s --recursive" % (accessKey, secret, bucketName)
+        ret = run_local_cmd(cmd_str)
+
+    if ret["retcode"]:
+        handlerRet(ret["retcode"], ret["stdout"], ret["stderr"])        
+    print ret["stdout"]
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+    uid = None
+    display_name = None
+    accessKey = None
+    secret = None
+    bucketName = None
+    objectName = None
+    time = None
+    versionId = None
+    upload_id = None
+
+    try:
+        opt_parser = OptParser.OptParser()
+        # help
+        opt_parser.append("help", "{-h|--help}")
+        # rgw object share
+        opt_parser.append("object_share", "--share,--accessKey=,--secret=,--bucketName=,--objectName=,--time=")
+        # rgw object share with version
+        opt_parser.append("object_share_version", "--sharever,--accessKey=,--secret=,--bucketName=,--objectName=,--time=,--versionId=")
+        # rgw object multipart
+        opt_parser.append("object_multipart", "--multipart,--accessKey=,--secret=,--bucketName=")
+        # rgw object abolish
+        opt_parser.append("object_abolish", "--abolish,--bucketName=,--accessKey=,--secret=,--objectName=,--uploadId=")
+        # delete S3 object
+        opt_parser.append("object_delete", "--delete,--accessKey=,--secret=,--bucketName=[--objectName=]")
+        m_name, m_opts = opt_parser.parse(sys.argv[1:])
+    except Exception, e:
+        print "Error(3600): Input Error, get help use ‘-h|--help! "
+        sys.exit(1)
+
+    for ops, arg in m_opts:
+        if ops == "--accessKey":
+            accessKey = arg
+        elif ops == "--secret":
+            secret = arg
+        elif ops == '--bucketName':
+            bucketName = arg
+        elif ops == '--objectName':
+            objectName = arg
+        elif ops == '--time':
+            time = arg
+        elif ops == '--versionId':
+            versionId = arg
+        elif ops == "--uploadId":
+            upload_id = arg
+
+    if m_name == "help":
+        usage()
+    elif m_name == "object_share":
+        s3_object_share()
+    elif m_name == "object_share_version":
+        s3_object_share_version()
+    elif m_name == "object_multipart":
+        s3_object_multipart()
+    elif m_name == "object_abolish":
+        s3_object_abolish()
+    elif m_name == "object_delete":
+        s3_object_delete()

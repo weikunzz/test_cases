@@ -1,0 +1,435 @@
+#!/usr/bin/python
+# coding:utf-8
+
+import os
+import sys
+import math
+import commands
+import json
+import re
+import OptParser
+import collections
+from icfs_util import run_remote_cmd, get_remote_host_list, run_remote_ping, run_local_cmd
+import threading
+
+def usage():
+    print '''Help(-h|--help)for icfs-object-locate:
+Usage:
+>> icfs-object-locate    --bucketName ***   --objectName ***   --accessKey ***  --secret ***  
+Functions: Query object storage location
+Options:
+  --bucketName:           bucket name
+  --objectName:           object name
+  --accessKey:            access key
+  --secret                secret key
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0)
+
+
+def error(num, *description):
+    if num == 3600:
+        print "Error(3600): Input argument error "
+    elif num == 3602:
+        print "Error(3602): Input should contain  access_key and secret" 
+    elif num == 3690:
+        print "Error(3690): InvalidBucketName"
+    elif num == 3749:
+        print "Error(3749): Unable to fetch object info"
+    sys.exit(1)
+
+
+def convertBytes(bytes, lst=['B','KB','MB','GB','TB','PB']):
+    if bytes > 0:
+        i = int(math.floor(math.log(bytes, 1024)))
+        if i >= len(lst):
+            i = len(lst) - 1
+        return ('%.2f' + " " + lst[i]) % (bytes/math.pow(1024, i))
+    else:
+        return "0 B"
+
+# check remote host status
+def check_remote_host_stat():
+    host_list = get_remote_host_list()
+    if not host_list:
+        print "Error(056): Remote hosts list is empty"
+        sys.exit(1)
+
+    ret_dict = run_remote_ping("*")
+    fail_list = [name for name, ret in ret_dict.items() if ret["status"] is False]
+    if fail_list:
+        print "Error(057): Remote hosts %s is not accessable" % ",".join(fail_list)
+        sys.exit(1)
+
+
+def sys_data_type():
+    osd_dump = commands.getoutput("/usr/bin/icfs osd tree 2>/dev/null|grep _n1")
+    if osd_dump:
+        return 1
+    else:
+        return 0
+
+
+def get_host_ip_dict():
+    host_ip_dict = {}
+    pattern = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(.*?)(?:#.*)?$")
+    try:
+        with open("/etc/hosts", "r") as fp:
+            lines = fp.readlines()
+    except IOError:
+        return host_ip_dict
+
+    for line in lines:
+        m = pattern.match(line)
+        if m is None:
+            continue
+
+        ip = m.group(1)
+        hostname_list = m.group(2).split()
+        for hostname in hostname_list:
+            host_ip_dict[hostname] = ip
+
+    return host_ip_dict
+
+
+def get_pool_strategy(pool_name):
+    status, output = commands.getstatusoutput("icfs osd dump --format json 2>/dev/null")
+    if status != 0:
+        return "none"
+
+    try:
+        osd_dump_info = json.loads(output)
+        pool_list = osd_dump_info["pools"]
+        for pool in pool_list:
+            if pool["pool_name"] != pool_name:
+                continue
+
+            pool_type = pool["type"]
+            if pool_type == 1:
+                rep_num = pool["size"]
+                return "replicated %d" % rep_num
+            elif pool_type == 3:
+                k_num = pool["min_size"]
+                m_num = pool["size"] - k_num
+                n_num = sys_data_type()
+                return "erasure %d+%d:%d" % (k_num, m_num, n_num)
+            else:
+                return "none"
+    except Exception, err_info:
+        return "none"
+
+    return "none"
+
+
+def get_node_osd():
+    nodeOsdMap = {}
+    result = run_local_cmd("icfs node ls 2>/dev/null")
+    if result["retcode"] == 0:
+        try:
+            result = json.loads(result["stdout"])
+        except Exception:
+            return nodeOsdMap
+    else:
+        return nodeOsdMap
+
+    try:
+        OsdMap = result["osd"]
+    except Exception:
+        return nodeOsdMap
+
+    for hostName, osdNumList in OsdMap.items():
+        for osdNum in osdNumList:
+            nodeOsdMap[osdNum] = hostName
+
+    return nodeOsdMap
+
+
+# get disk info from all nodes
+def get_osd_map():
+    # get host ip dictionary
+    host_ip_dict = get_host_ip_dict()
+
+    # get fsid
+    status, fsid = commands.getstatusoutput("icfs fsid 2>/dev/null")
+    if status != 0:
+        print "get fsid failed"
+        sys.exit(1)
+
+    # get disk info
+    osd_map = {}
+    nodeOsdMap = {}
+    # ret = client.cmd("*", "cmd.run", ["icfs-disk list --format json 2>/dev/null"])
+    ret = run_remote_cmd('*', "icfs-disk list --format json 2>/dev/null")
+    for node_name, returnInfor in ret.items():
+        if returnInfor["retcode"] == 0:
+            node_output = returnInfor["stdout"]
+        else:
+            if nodeOsdMap == {}:
+                nodeOsdMap = get_node_osd()
+            node_ip = host_ip_dict[node_name] if node_name in host_ip_dict else "unknown_ip"
+            if nodeOsdMap != {}:
+                for osd_num in nodeOsdMap.keys():
+                    if osd_num not in osd_map.keys():
+                        if nodeOsdMap[osd_num] == node_name:
+                            osd_map[osd_num] = nodeOsdMap[osd_num] + "(" + node_ip + ")" + ":" + "unknown_disk"
+            continue
+        try:
+            disk_list = json.loads(node_output)
+        except Exception, err_info:
+            print "failed to get disk info from node " + node_name + ":" + err_info.__str__()
+            sys.exit(1)
+
+        node_ip = host_ip_dict[node_name] if node_name in host_ip_dict else "unknown_ip"
+        for disk_info in disk_list:
+            try:
+                if "partitions" in disk_info:
+                    # check partition osd
+                    partition_list = disk_info["partitions"]
+                    for partition_info in partition_list:
+                        if partition_info["type"] == "data" and partition_info["icfs_fsid"] == fsid:
+                            osd_num = int(partition_info["whoami"])
+                            osd_map[osd_num] = node_name + "(" + node_ip + ")" + ":" + disk_info["path"]
+                else:
+                    # check disk osd
+                    if disk_info["type"] == "data" and disk_info["icfs_fsid"] == fsid:
+                        osd_num = int(disk_info["whoami"])
+                        osd_map[osd_num] = node_name + "(" + node_ip + ")" + ":" + disk_info["path"]
+            except StandardError:
+                continue
+
+    return osd_map
+
+def find_tenant(user_info):
+    for user in user_info:
+        s3_keys_map = user["s3_keys_map"]
+        for key in s3_keys_map:
+            if key['val']['access_key'] == accessKey and key['val']['secret_key'] == secret:
+                return user["tenant"]
+
+
+def locate_object():
+    check_remote_host_stat()
+
+    # get osd map
+    osd_map = get_osd_map()
+
+    #get tenant
+    (ret, messgae)  = commands.getstatusoutput("icfs-object-userinfo all")
+    user_info = json.loads(messgae)   
+    tenant = find_tenant(user_info) 
+   
+    # get object info
+    if tenant == "":
+        cmd_str = "radosgw-admin object stat --bucket=%s --object=%s 2>/dev/null" % (bucketName, objectName)
+    else:
+        cmd_str = "radosgw-admin object stat --bucket=%s/%s --object=%s 2>/dev/null" % (tenant, bucketName, objectName)
+    result = run_local_cmd(cmd_str)
+    if result["retcode"] == 0:
+       output = unicode(result["stdout"], errors='ignore')
+       try:
+          object_info = json.loads(output)
+       except Exception:
+          print "get object_json fail"
+    else:
+        error(3749)
+    # get pool name and Strategy
+    pool_name = object_info['manifest']['head_obj']['bucket']['pool']
+    strategy = get_pool_strategy(pool_name)
+    if ":" in strategy.split(" ")[1]:
+        isRep = 0
+    else:
+        isRep = 1
+ 
+    #get object status
+    object_size =  object_info['size']
+    lst=['B','KB','MB','GB','TB','PB']
+    objectsize = convertBytes(object_size, lst) 
+ 
+    stripe_size = 4*1024*1024
+    head_size = object_info['manifest']['head_size']
+    multipart_size = object_info['manifest']['rules'][0]['val']['part_size']
+    prefix_id = object_info['manifest']['prefix']
+    bucket_id = object_info['manifest']['head_obj']['bucket']['bucket_id']
+
+    #calculate object part
+    multipart_flag =  object_info['manifest']['rules'][0]['val']['start_part_num']
+    if multipart_flag == 0:
+        total_objpart_count = (object_size - head_size + stripe_size - 1) / stripe_size + 1
+    else:
+        multipart_count = (object_size - 1) / multipart_size + 1       
+        multipart_obj_count = (multipart_size - 1) / stripe_size + 1        
+        finalmultipart_obj_count = (object_size - multipart_size * (multipart_count - 1) - 1) / stripe_size + 1
+        total_objpart_count = multipart_obj_count * (multipart_count - 1) + finalmultipart_obj_count
+    
+    message = list()
+    message.append("PoolName:       %s" % pool_name)
+    message.append("Strategy:       %s" % strategy)
+    message.append("BucketName:     %s" % bucketName)
+    message.append("ObjectName:     %s" % objectName)
+    message.append("ObjectSize:     %s" % objectsize)
+    message.append("%-23s %-23s" % ("OBJECT_NAME", "LOCATION(HOST:DISK)"))
+    
+    locationPrint1 = collections.defaultdict(list)
+    nodeInfor = {}
+    nodeInfor2 = collections.defaultdict(list)
+    pool_id = "0"
+    for i in range(total_objpart_count):
+        if multipart_flag == 0:
+            if i == 0:
+                object_name = "%s_%s" %  (bucket_id, objectName)
+            else:
+                object_name = "%s__shadow_%s%d" % (bucket_id, prefix_id, i)
+        else:            
+            current_multipart = i / multipart_obj_count + 1
+            if (i %  multipart_obj_count) == 0:
+                object_name = "%s__multipart_%s.%d" % (bucket_id, prefix_id, current_multipart)
+            else:
+                object_name = "%s__shadow_%s.%d_%d" % (bucket_id, prefix_id, current_multipart, (i % multipart_obj_count))
+        status, output = commands.getstatusoutput("icfs osd map %s %s --format json 2>/dev/null" % (pool_name, object_name))
+        if status != 0:
+            print "get object %s location failed: %s" % (object_name, output)
+            sys.exit(1)
+
+        try:
+            osd_map_info = json.loads(output)
+            pool_id = osd_map_info["pool_id"]
+            osd_list = osd_map_info["acting"]
+            disk_list = []
+            sharedOsdNum = 0
+            for osd_num in osd_list:
+                if osd_num == 2147483647:
+                    locationPrint1[object_name].append("unknown_ip:unknown_disk:unknown_location")
+                    sharedOsdNum += 1
+                    continue
+                else:
+                    try:
+                        disk_list.append(osd_map[osd_num])
+                    except KeyError:
+                        locationPrint1[object_name].append("unknown_ip:unknown_disk:unknown_location")
+                        sharedOsdNum += 1
+                        continue
+                hostname = osd_map[osd_num].split("(")[0]
+                nodeInfor2[hostname].append("%s:%s:%s:%s" % (object_name, osd_num, sharedOsdNum, osd_map[osd_num]))
+                sharedOsdNum += 1
+        except Exception:
+            locationPrint1[object_name].append("unknown_ip:unknown_disk:unknown_location")
+
+    for hostName, objectInfor in nodeInfor2.items():
+        objectInfor = ",".join(objectInfor)
+        nodeInfor[hostName] = {"poolId": pool_id, "objectInfor": objectInfor, "isRep": isRep}
+    locationPrint2 = get_all_node_infor(nodeInfor)
+    for objectId, locationInfor in locationPrint1.items():
+        if objectId not in locationPrint2.keys():
+            locationPrint2[objectId].extend(locationInfor)
+        else:
+            locationPrint2[objectId].extend(locationInfor)
+    sortLocationPrint = sorted(locationPrint2.items(), key=lambda e: e[0], reverse=False)
+    for line in message:
+        print line
+    for objected, locationInfor in sortLocationPrint:
+        locationInfor = ",".join(locationInfor)
+       # message.append("%-23s--->>>%-23s" % (objected, locationInfor))
+        print "%-23s--->>>%-23s" % (objected, locationInfor)
+  #  for line in message:
+  #      print line
+
+def query_node_infor(poolId, objectInfor, isRep):
+    location = {}
+    objectList = objectInfor.split(",")
+    for eachObject in objectList:
+        object = eachObject.split(":")
+        location[object[0]] = "%s:%s" % (object[3], object[4])
+    jsonPrint = json.dumps(location)
+    print jsonPrint
+
+class GetNodePrint(threading.Thread):
+    def __init__(self, nodeInfor):
+        threading.Thread.__init__(self)
+        self.nodeInfor = nodeInfor
+
+    def run(self):
+        for hostName, objectInfor in self.nodeInfor.items():
+            result = run_remote_cmd(hostName, "icfs-object-locate --query --poolid %s --object '%s' --strategy %s" %
+                                    (objectInfor["poolId"], objectInfor["objectInfor"], str(objectInfor["isRep"])))
+            self.result = result
+    def get_result(self):
+        return self.result
+
+def get_all_node_infor(nodeInfor):
+    nodeInforList = []
+    for hostName, objectInfor in nodeInfor.items():
+        nodeInforList.append({hostName: objectInfor})
+    if len(nodeInforList) == 0:
+        sys.exit(1)
+    thread_list = []
+    for node in nodeInforList:
+        thread_list.append(GetNodePrint(node))
+    for thread in thread_list:
+        thread.start()
+    for thread in thread_list:
+        thread.join()
+    resultList = []
+    for thread in thread_list:
+        resultList.append(thread.get_result())
+    locationPrint = collections.defaultdict(list)
+    for result in resultList:
+        for hostName, returnInfor in result.items():
+            if result[hostName]["retcode"] == 0:
+                location = result[hostName]["stdout"]
+                try:
+                    location = json.loads(location)
+                except Exception:
+                    continue
+                for objectId, objectLocation in location.items():
+                    locationPrint[objectId].append(objectLocation)
+            else:
+                objectInfor = nodeInfor[hostName]["objectInfor"]
+                objectList = objectInfor.split(",")
+                for object in objectList:
+                    object = object.split(":")
+                    locationPrint[object[0]].append("%s:%s" % (object[3], object[4]))
+
+    return locationPrint
+
+
+if __name__ == '__main__':
+    bucketName = None
+    objectName = None
+    accessKey = None
+    secret = None
+    global JSON
+    JSON = False
+
+    try:
+        parser = OptParser.OptParser()
+        parser.append("help", "{-h|--help}")
+        parser.append("locate", "--bucketName=,--objectName=,--accessKey=,--secret=")
+        m_name, m_opts = parser.parse(sys.argv[1:])
+    except Exception, err:
+        print err
+        error(3600)
+      
+    for k, v in m_opts:
+        if "--json" == k:
+            JSON = True
+        elif "--poolid" == k:
+            poolId = v
+        elif "--object" == k:
+            objectInfor = v
+        elif "--strategy" == k:
+            isRep = v
+        elif "--bucketName" == k:
+            bucketName = v
+        elif "--objectName" == k:
+            objectName = v
+        elif "--accessKey" == k:
+            accessKey = v
+        elif "--secret" == k:
+            secret = v
+    if m_name == "help":
+        usage()
+    elif m_name == "locate":
+        locate_object()
+    else:
+        error(3600)

@@ -1,0 +1,3614 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+
+# change log list
+# 20161207 shaoning (cifs_create) Bug fix: create cifs local group error, group not exist
+# 20161226 shaoning (setacl_for_path) Bug fix: "v"(visual) added in ACL after version 3.5.1.1(included)
+# 20161227 shaoning Check whether arguments are avalible in "except" code block
+# 20161228 shaoning (ftp_create_user) batch create ftp user in task-manage
+# 20170119 shaoning (ftp_create_share) delete samba attribute "store dos attributes" when creating cifs share
+# 20170214 shaoning (ad_join,ad_quit) password support more special characters
+# 20170216 shizonghua (set_rep_layout,...) Add OSD capacity balance in create dir cmd and data consistency set/query
+# 20170223 shizonghua Modify the error log record and the judge of 4+2:1 rule create.
+
+from icfs_util import error, nfs_error, del_dir_error, cifs_create_error, acl_error
+import commands
+import os
+import getopt
+import sys
+import time
+import re
+import json
+import datetime
+import sqlite3
+import fcntl
+import platform
+import pwd
+from icfs_util import NewConfigParser
+from icfs_util import IcfsVersion
+from LinuxConfigParser import LinuxConfigParser
+import RemoteRunner
+
+
+# return value example: ['host1', 'host2', 'host3']
+def get_remote_host_list():
+    try:
+        return RemoteRunner.get_host_list()
+    except Exception, err:
+        print err
+        raise RuntimeError("Failed to get remote hosts list")
+
+
+# tgt:  '*' stands all hosts, 'node1,node2,node3' stands a list of hosts
+# return value: { node_name1: {'status': status}, node_name2: 'status': status}, ... }
+#      such as: { 'node1': {'status': True},
+#                 'node2': {'status': False},
+#                 'node3': {'status': True} }
+#       status: True-reachable False-not reachable
+def run_remote_ping(tgt):
+    try:
+        return RemoteRunner.run_ping(tgt)
+    except Exception, err:
+        print err
+        raise RuntimeError("Failed to test connections to remote hosts")
+
+
+# tgt:  '*' stands all hosts, 'node1,node2,node3' stands a list of hosts
+# cmd:  commnad to run
+# return value: { node_name1: {'retcode': retcode, 'stdout': stdout, 'stderr': stderr}, ... }
+#      such as: { 'node1': {'retcode': 0, 'stdout': 'abc', 'stderr': ''},
+#                 'node2', {'retcode': 1, 'stdout': '', 'stderr': 'error'},
+#                 'node3', {'retcode': -1, 'stdout': '', 'stderr': 'no return'} }
+#      retcode: 0:success 1:failed -1:not accessable
+def run_remote_cmd(tgt, cmd):
+    try:
+        return RemoteRunner.run_cmd(tgt, cmd)
+    except Exception, err:
+        print err
+        raise RuntimeError("Failed to run command on remote hosts")
+
+
+# tgt:  '*' stands all hosts, 'node1,node2,node3' stands a list of hosts
+# src:  source file path
+# dest: destination file path
+# return value: { node_name1: {'retcode': retcode, 'retout': retout}, ... }
+#      such as: { 'node1': {'retcode': 0, 'retout': ''},
+#                 'node2', {'retcode': 1, 'retout': 'error'},
+#                 'node3', {'retcode': -1, 'retout': 'no return'} }
+#      retcode: 0:success 1:failed -1:not accessable
+def run_remote_copy(tgt, src, dest):
+    try:
+        return RemoteRunner.run_copy(tgt, src, dest)
+    except Exception, err:
+        print err
+        raise RuntimeError("Failed to copy file to remote hosts")
+
+
+def copy_back():
+    commands.getoutput('\cp /etc/krb5.conf.copy /etc/krb5.conf')
+    commands.getoutput('\cp /etc/samba/smb.conf.copy /etc/samba/smb.conf')
+    commands.getoutput("salt-cp '*' /etc/krb5.conf /etc/krb5.conf")
+    commands.getoutput("salt-cp '*' /etc/samba/smb.conf /etc/samba/smb.conf")
+    commands.getoutput('rm -f /etc/krb5.conf.copy')
+    commands.getoutput('rm -f /etc/samba/smb.conf.copy')
+
+
+def con_db():  # remember to close the connection and cursor when calling this method
+    connect_db = sqlite3.connect('/usr/local/db/tasks.db')  # if not exists so ,create it!
+    cur_db = connect_db.cursor()
+
+    f = open("/var/lock/task.lock", 'w')
+    fcntl.flock(f, fcntl.LOCK_EX)
+    cur_db.execute(
+        "CREATE TABLE IF NOT EXISTS task("
+        "id integer primary key,"
+        "name varchar,"
+        "state varchar,"
+        "process varchar,"
+        "username varchar,"
+        "start_time varchar)"
+    )
+    connect_db.commit()
+    f.close()
+
+    return connect_db, cur_db
+
+
+def insert_task(con, cur, task_name, state, process, user_name, start_time):
+    f = open("/var/lock/task.lock", 'w')
+    fcntl.flock(f, fcntl.LOCK_EX)
+    cur.execute("INSERT INTO task (name,state,process,username,start_time) "
+                "VALUES (?,?,?,?,?)",
+                (task_name, state, str(process), user_name, start_time))
+    con.commit()
+    f.close()
+
+
+def update_task(con, cur, start_time, process):
+    f = open("/var/lock/task.lock", 'w')
+    fcntl.flock(f, fcntl.LOCK_EX)
+    cur.execute("UPDATE task SET process=? WHERE start_time=?",
+                (str(process), start_time))
+    con.commit()
+    f.close()
+
+
+def dele_table(times, con, cur):
+    f = open("/var/lock/task.lock", 'w')
+    fcntl.flock(f, fcntl.LOCK_EX)
+    cur.execute("DELETE FROM task WHERE start_time=?", (times,))
+    con.commit()
+    f.close()
+    cur.close()
+    con.close()
+
+
+def write_log(level, module, info):
+    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level %s --module '%s' --info '%s'"
+                       % (level, module, info))
+
+
+def ad_join(types, username, password, domain, dcip, second_domain):
+    task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+    try:
+        con, cur = con_db()
+    except Exception, e:
+        write_log(0, "AdDomain", e)
+        sys.exit(1)
+
+    try:
+        insert_task(con, cur, "ad_join", 'running', 3, 'root', task_start_time)
+
+        # clear directory '/var/lib/samba/' except subdir 'private' before join AD domain
+        commands.getoutput("salt '*' cmd.run \"cd /var/lib/samba; rm -rf \\`ls | grep -v '^private$'\\`\"")
+
+        commands.getoutput('\cp /etc/krb5.conf /etc/krb5.conf.copy')
+        commands.getoutput('\cp /etc/samba/smb.conf /etc/samba/smb.conf.copy')
+
+        krb5_logging = (
+            "[logging]\n"
+            "default = FILE:/var/log/krb5libs.log\n"
+            "kdc = FILE:/var/log/krb5kdc.log\n"
+            "admin_server = FILE:/var/log/kadmind.log\n"
+            "\n"
+        )
+
+        krb5_libdefaults = (
+            "[libdefaults]\n"
+            "default_realm = %s\n"
+            "dns_lookup_realm = true\n"
+            "dns_lookup_kdc = true\n"
+            "ticket_lifetime = 24h\n"
+            "forwardable = yes\n"
+            "\n" % domain.upper()
+        )
+
+        krb5_realms = (
+            "[realms]\n"
+            "%s = {\n"
+            "kdc = %s:88\n"
+            "admin_server = %s:749\n"
+            "default_domain = %s\n"
+            "}\n"
+            "\n" % (domain.upper(), dcip, dcip, dcip)
+        )
+
+        if second_domain == "":
+            krb5_domain_realm = (
+                "[domain_realm]\n"
+                "%s = %s\n"
+                ".%s = %s\n"
+                "\n" % (domain, domain.upper(), domain, domain.upper())
+            )
+        else:
+            krb5_domain_realm = (
+                "[domain_realm]\n"
+                "%s = %s\n"
+                ".%s = %s\n"
+                "%s = %s\n"
+                ".%s = %s\n"
+                "\n" % (domain, domain.upper(), domain, domain.upper(), second_domain,
+                        second_domain.upper(), second_domain, second_domain.upper())
+            )
+
+        krb5_appdefaults = (
+            "[appdefaults]\n"
+            "pam = {\n"
+            "debug = false\n"
+            "ticket_lifetime = 36000\n"
+            "renew_lifetime = 36000\n"
+            "forwardable = true\n"
+            "krb4_convert = false\n"
+            "}\n"
+        )
+
+        krb5 = krb5_logging + krb5_libdefaults + krb5_realms + krb5_domain_realm + krb5_appdefaults
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 5)
+
+        f_krb5 = open('/etc/krb5.conf', 'w')
+        f_krb5.write(krb5)
+        f_krb5.close()
+        cp_krb5_stat, cp_krb5_out = commands.getstatusoutput("salt-cp '*' /etc/krb5.conf /etc/krb5.conf")
+        krb5_out = cp_krb5_out.split('\n')
+        for check_krb5 in krb5_out:
+            if not check_krb5.find("True") >= 0:
+                write_log(0, 'AdDomain', 'Failed to Copy /etc/krb5.conf:%s.' % cp_krb5_out)
+                error('033', '/etc/krb5.conf')
+        # UPDATE
+        update_task(con, cur, task_start_time, 12)
+
+        nsswitch_passwd = commands.getoutput("cat /etc/nsswitch.conf | grep -v '#' | grep -w 'passwd:'")
+        nsswitch_shadow = commands.getoutput("cat /etc/nsswitch.conf | grep -v '#' | grep -w 'shadow:'")
+        nsswitch_group = commands.getoutput("cat /etc/nsswitch.conf | grep -v '#' | grep -w 'group:'")
+
+        if 'winbind' not in nsswitch_passwd:
+            commands.getoutput("sed -i 's/%s/%s/' /etc/nsswitch.conf" % (nsswitch_passwd, nsswitch_passwd+' winbind'))
+        if 'winbind' not in nsswitch_shadow:
+            commands.getoutput("sed -i 's/%s/%s/' /etc/nsswitch.conf" % (nsswitch_shadow, nsswitch_shadow+' winbind'))
+        if 'winbind' not in nsswitch_group:
+            commands.getoutput("sed -i 's/%s/%s/' /etc/nsswitch.conf" % (nsswitch_group, nsswitch_group+' winbind'))
+
+        cp_nsswitch_stat, cp_nsswitch_out = commands.getstatusoutput("salt-cp '*' /etc/nsswitch.conf /etc/nsswitch.conf")
+        nsswitch_out = cp_nsswitch_out.split('\n')
+        for check_nsswitch in nsswitch_out:
+            if not check_nsswitch.find("True") >= 0:
+                write_log(0, 'AdDomain', 'Failed to Copy /etc/nsswitch.conf: %s.' % cp_nsswitch_out)
+                error('033', '/etc/nsswitch.conf')
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 18)
+
+        domain_split = domain.upper().split('.')[0]
+        smb_conf_parser = NewConfigParser()
+        smb_conf_parser.add_section("global")
+        smb_conf_parser.set("global", "idmap uid", "25000-90000")
+        smb_conf_parser.set("global", "idmap gid", "25000-90000")
+        smb_conf_parser.set("global", "idmap config %s : backend" % domain_split, "rid")
+        smb_conf_parser.set("global", "idmap config %s : range" % domain_split, "100000-499999")
+        smb_conf_parser.set("global", "workgroup", domain_split)
+        smb_conf_parser.set("global", "password server", dcip)
+        smb_conf_parser.set("global", "realm", domain.upper())
+        smb_conf_parser.set("global", "security", "ads")
+        smb_conf_parser.set("global", "template shell", "/bin/bash")
+        smb_conf_parser.set("global", "winbind use default domain", "true")
+        smb_conf_parser.set("global", "winbind offline logon", "false")
+        smb_conf_parser.set("global", "winbind enum users", "yes")
+        smb_conf_parser.set("global", "winbind enum groups", "yes")
+        smb_conf_parser.set("global", "winbind separator", "/")
+        smb_conf_parser.set("global", "server string", "Samba Server Version %s" % "%v")
+        smb_conf_parser.set("global", "log file", "/var/log/samba/log.%s" % "%m")
+        smb_conf_parser.set("global", "log level", "0")
+        smb_conf_parser.set("global", "max log size", "50000")
+        smb_conf_parser.set("global", "passdb backend", "tdbsam")
+        smb_conf_parser.set("global", "load printers", "yes")
+        smb_conf_parser.set("global", "cups options", "raw")
+        smb_conf_file = open('/etc/samba/smb.conf', 'w')
+        smb_conf_parser.write(smb_conf_file)
+        smb_conf_file.flush()
+        smb_conf_file.close()
+        cp_smb_stat, cp_smb_out = commands.getstatusoutput("salt-cp '*' /etc/samba/smb.conf /etc/samba/smb.conf")
+        smb_out = cp_smb_out.split('\n')
+        for check_smb in smb_out:
+            if not check_smb.find("True") >= 0:
+                write_log(0, 'AdDomain', 'Failed to Copy /etc/samba/smb.conf: %s.' % cp_smb_out)
+                error('033', '/etc/samba/smb.conf')
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 33)
+
+        # filter salt stderror so that output can be parsed correctly
+        commands.getoutput("salt '*' cmd.run 'ntpdate -u %s' 2>/dev/null" % dcip)
+        commands.getoutput("salt '*' cmd.run 'ntpdate -u %s' 2>/dev/null" % dcip)
+        commands.getoutput("echo 'session    required     pam_mkhomedir.so skel=/etc/skel umask=0077' "
+                           ">> /etc/pam.d/system-auth ")
+        commands.getoutput("echo 'session    required     pam_mkhomedir.so skel=/etc/skel umask=0077' "
+                           ">> /etc/pam.d/sshd ")
+        cp_system_auth_stat, cp_system_auth_out = commands.getstatusoutput("salt-cp '*' /etc/pam.d/system-auth "
+                                                                           "/etc/pam.d/system-auth")
+        system_auth_out = cp_system_auth_out.split('\n')
+        for check_auth_out in system_auth_out:
+            if not check_auth_out.find("True") >= 0:
+                write_log(0, 'AdDomain', 'Failed to Copy /etc/pam.d/system-auth:%s.' % cp_system_auth_out)
+                error('033', '/etc/pam.d/system-auth')
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 47)
+
+        cp_sshd_stat, cp_sshd_out = commands.getstatusoutput("salt-cp '*' /etc/pam.d/sshd /etc/pam.d/sshd")
+        sshd_out = cp_sshd_out.split('\n')
+        for check_ssd_out in sshd_out:
+            if not check_ssd_out.find("True") >= 0:
+                write_log(0, 'AdDomain', 'Failed to Copy /etc/pam.d/sshd:%s.' % cp_sshd_out)
+                error('033', '/etc/pam.d/sshd')
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 53)
+
+        # filter salt stderror so that output can be parsed correctly
+        smb_stat, smb_out = commands.getstatusoutput("salt '*' cmd.run 'service smb restart' 2>/dev/null")
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 66)
+
+        # support special characters
+        escaped_password = ""
+        for i in password:
+            escaped_password += "\\" + i
+        one_host_stat, one_host_out = commands.getstatusoutput('net ads join -U %s%s' % (username+'%', escaped_password))
+        if one_host_stat:
+            copy_back()
+            write_log(0, 'AdDomain', 'Failed To join AD Domain:%s.' % one_host_out)
+            error('038')
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 78)
+
+        # support special characters
+        escaped_password = ""
+        for i in password:
+            escaped_password += "\\" + i
+        escaped_password = escaped_password.replace("\\\\", "\\\\\\\\")
+        escaped_password = escaped_password.replace("\\\"", "\\\\\\\"")
+        escaped_password = escaped_password.replace("\\`", "\\\\\\`")
+        escaped_password = escaped_password.replace("\\$", "\\\\\\$")
+        # filter salt stderror so that output can be parsed correctly
+        join_stat, join_out = commands.getstatusoutput("salt '*' cmd.run \"net ads join -U %s%s;echo $?\" 2>/dev/null"
+                                                       % (username+'%', escaped_password))
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 86)
+        # restart winbind must behind join ad ,or winbind will dead
+        commands.getstatusoutput("salt '*' cmd.run 'killall winbindd' 2>/dev/null")
+        commands.getstatusoutput("salt '*' cmd.run 'systemctl restart winbind' 2>/dev/null")
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 97)
+        test_out = commands.getoutput('id %s' % username)
+        if 'No such user' in test_out:
+            copy_back()
+            write_log(0, 'AdDomain', 'Failed To Join AD Domain:%s.' % test_out)
+            error('038')
+        update_task(con, cur, task_start_time, 100)
+
+        write_log(2, 'AdDomain', 'Join AD successfully.')
+    except Exception, e:
+        write_log(0, 'AdDomain', e)
+    finally:
+        dele_table(task_start_time, con, cur)
+
+
+def ad_join_cluster(username, password, domain, dcip, second_domain, netbios_name):
+    task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+    try:
+        con, cur = con_db()
+    except Exception, e:
+        write_log(0, "AdDomain", e)
+        sys.exit(1)
+
+    try:
+        insert_task(con, cur, "ad_join_cluster", 'running', 3, 'root', task_start_time)
+
+        status, output = commands.getstatusoutput("ctdb status")
+        if status != 0:
+            write_log(0, 'AdDomain', 'Failed to join AD domain, need to configurre ctdb service first')
+            print 'Failed to join AD domain, need to configurre ctdb service first'
+            error('038')
+
+        # clear directory '/var/lib/samba/' except subdir 'private' before join AD domain
+        commands.getoutput("salt '*' cmd.run \"cd /var/lib/samba; rm -rf \\`ls | grep -v '^private$'\\`\"")
+
+        commands.getoutput('\cp /etc/krb5.conf /etc/krb5.conf.copy')
+        commands.getoutput('\cp /etc/samba/smb.conf /etc/samba/smb.conf.copy')
+
+        krb5_logging = (
+            "[logging]\n"
+            "default = FILE:/var/log/krb5libs.log\n"
+            "kdc = FILE:/var/log/krb5kdc.log\n"
+            "admin_server = FILE:/var/log/kadmind.log\n"
+            "\n"
+        )
+
+        krb5_libdefaults = (
+            "[libdefaults]\n"
+            "default_realm = %s\n"
+            "dns_lookup_realm = true\n"
+            "dns_lookup_kdc = true\n"
+            "ticket_lifetime = 24h\n"
+            "forwardable = yes\n"
+            "\n" % domain.upper()
+        )
+
+        krb5_realms = (
+            "[realms]\n"
+            "%s = {\n"
+            "kdc = %s:88\n"
+            "admin_server = %s:749\n"
+            "default_domain = %s\n"
+            "}\n"
+            "\n" % (domain.upper(), dcip, dcip, dcip)
+        )
+
+        if second_domain == "":
+            krb5_domain_realm = (
+                "[domain_realm]\n"
+                "%s = %s\n"
+                ".%s = %s\n"
+                "\n" % (domain, domain.upper(), domain, domain.upper())
+            )
+        else:
+            krb5_domain_realm = (
+                "[domain_realm]\n"
+                "%s = %s\n"
+                ".%s = %s\n"
+                "%s = %s\n"
+                ".%s = %s\n"
+                "\n" % (domain, domain.upper(), domain, domain.upper(), second_domain,
+                        second_domain.upper(), second_domain, second_domain.upper())
+            )
+
+        krb5_appdefaults = (
+            "[appdefaults]\n"
+            "pam = {\n"
+            "debug = false\n"
+            "ticket_lifetime = 36000\n"
+            "renew_lifetime = 36000\n"
+            "forwardable = true\n"
+            "krb4_convert = false\n"
+            "}\n"
+        )
+
+        krb5 = krb5_logging + krb5_libdefaults + krb5_realms + krb5_domain_realm + krb5_appdefaults
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 5)
+
+        f_krb5 = open('/etc/krb5.conf', 'w')
+        f_krb5.write(krb5)
+        f_krb5.close()
+        cp_krb5_stat, cp_krb5_out = commands.getstatusoutput("salt-cp '*' /etc/krb5.conf /etc/krb5.conf")
+        krb5_out = cp_krb5_out.split('\n')
+        for check_krb5 in krb5_out:
+            if not check_krb5.find("True") >= 0:
+                write_log(0, 'AdDomain', 'Failed to Copy /etc/krb5.conf:%s.' % cp_krb5_out)
+                error('033', '/etc/krb5.conf')
+        # UPDATE
+        update_task(con, cur, task_start_time, 12)
+
+        nsswitch_passwd = commands.getoutput("cat /etc/nsswitch.conf | grep -v '#' | grep -w 'passwd:'")
+        nsswitch_shadow = commands.getoutput("cat /etc/nsswitch.conf | grep -v '#' | grep -w 'shadow:'")
+        nsswitch_group = commands.getoutput("cat /etc/nsswitch.conf | grep -v '#' | grep -w 'group:'")
+
+        if 'winbind' not in nsswitch_passwd:
+            commands.getoutput("sed -i 's/%s/%s/' /etc/nsswitch.conf" % (nsswitch_passwd, nsswitch_passwd+' winbind'))
+        if 'winbind' not in nsswitch_shadow:
+            commands.getoutput("sed -i 's/%s/%s/' /etc/nsswitch.conf" % (nsswitch_shadow, nsswitch_shadow+' winbind'))
+        if 'winbind' not in nsswitch_group:
+            commands.getoutput("sed -i 's/%s/%s/' /etc/nsswitch.conf" % (nsswitch_group, nsswitch_group+' winbind'))
+
+        cp_nsswitch_stat, cp_nsswitch_out = commands.getstatusoutput("salt-cp '*' /etc/nsswitch.conf /etc/nsswitch.conf")
+        nsswitch_out = cp_nsswitch_out.split('\n')
+        for check_nsswitch in nsswitch_out:
+            if not check_nsswitch.find("True") >= 0:
+                write_log(0, 'AdDomain', 'Failed to Copy /etc/nsswitch.conf: %s.' % cp_nsswitch_out)
+                error('033', '/etc/nsswitch.conf')
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 18)
+
+        domain_split = domain.upper().split('.')[0]
+        smb_conf_parser = NewConfigParser()
+        smb_conf_parser.add_section("global")
+        smb_conf_parser.set("global", "idmap uid", "25000-90000")
+        smb_conf_parser.set("global", "idmap gid", "25000-90000")
+        smb_conf_parser.set("global", "idmap config %s : backend" % domain_split, "rid")
+        smb_conf_parser.set("global", "idmap config %s : range" % domain_split, "100000-499999")
+        smb_conf_parser.set("global", "workgroup", domain_split)
+        smb_conf_parser.set("global", "password server", dcip)
+        smb_conf_parser.set("global", "realm", domain.upper())
+        smb_conf_parser.set("global", "security", "ads")
+        smb_conf_parser.set("global", "template shell", "/bin/bash")
+        smb_conf_parser.set("global", "winbind use default domain", "true")
+        smb_conf_parser.set("global", "winbind offline logon", "false")
+        smb_conf_parser.set("global", "winbind enum users", "yes")
+        smb_conf_parser.set("global", "winbind enum groups", "yes")
+        smb_conf_parser.set("global", "winbind separator", "/")
+        smb_conf_parser.set("global", "server string", "Samba Server Version %s" % "%v")
+        smb_conf_parser.set("global", "log file", "/var/log/samba/log.%s" % "%m")
+        smb_conf_parser.set("global", "log level", "0")
+        smb_conf_parser.set("global", "max log size", "50000")
+        smb_conf_parser.set("global", "passdb backend", "tdbsam")
+        smb_conf_parser.set("global", "load printers", "yes")
+        smb_conf_parser.set("global", "cups options", "raw")
+        # cluster join AD domain
+        smb_conf_parser.set("global", "clustering", "yes")
+        smb_conf_parser.set("global", "netbios name", netbios_name)
+        smb_conf_parser.set("global", "ctdb:registry.tdb", "yes")
+        smb_conf_parser.set("global", "include", "registry")
+        smb_conf_parser.set("global", "winbind refresh tickets", "yes")
+        smb_conf_parser.set("global", "dedicated keytab file", "/etc/krb5.keytab")
+        smb_conf_parser.set("global", "kerberos method", "secrets and keytab")
+        smb_conf_file = open('/etc/samba/smb.conf', 'w')
+        smb_conf_parser.write(smb_conf_file)
+        smb_conf_file.flush()
+        smb_conf_file.close()
+        cp_smb_stat, cp_smb_out = commands.getstatusoutput("salt-cp '*' /etc/samba/smb.conf /etc/samba/smb.conf")
+        smb_out = cp_smb_out.split('\n')
+        for check_smb in smb_out:
+            if not check_smb.find("True") >= 0:
+                write_log(0, 'AdDomain', 'Failed to Copy /etc/samba/smb.conf: %s.' % cp_smb_out)
+                error('033', '/etc/samba/smb.conf')
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 33)
+
+        # filter salt stderror so that output can be parsed correctly
+        commands.getoutput("salt '*' cmd.run 'ntpdate -u %s' 2>/dev/null" % dcip)
+        commands.getoutput("salt '*' cmd.run 'ntpdate -u %s' 2>/dev/null" % dcip)
+        commands.getoutput("echo 'session    required     pam_mkhomedir.so skel=/etc/skel umask=0077' "
+                           ">> /etc/pam.d/system-auth ")
+        commands.getoutput("echo 'session    required     pam_mkhomedir.so skel=/etc/skel umask=0077' "
+                           ">> /etc/pam.d/sshd ")
+        cp_system_auth_stat, cp_system_auth_out = commands.getstatusoutput("salt-cp '*' /etc/pam.d/system-auth "
+                                                                           "/etc/pam.d/system-auth")
+        system_auth_out = cp_system_auth_out.split('\n')
+        for check_auth_out in system_auth_out:
+            if not check_auth_out.find("True") >= 0:
+                write_log(0, 'AdDomain', 'Failed to Copy /etc/pam.d/system-auth:%s.' % cp_system_auth_out)
+                error('033', '/etc/pam.d/system-auth')
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 47)
+
+        cp_sshd_stat, cp_sshd_out = commands.getstatusoutput("salt-cp '*' /etc/pam.d/sshd /etc/pam.d/sshd")
+        sshd_out = cp_sshd_out.split('\n')
+        for check_ssd_out in sshd_out:
+            if not check_ssd_out.find("True") >= 0:
+                write_log(0, 'AdDomain', 'Failed to Copy /etc/pam.d/sshd:%s.' % cp_sshd_out)
+                error('033', '/etc/pam.d/sshd')
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 53)
+
+        # make sure smb and winbind is stopped before "net ads join"
+        commands.getstatusoutput("salt '*' cmd.run 'systemctl stop smb' 2>/dev/null")
+        commands.getstatusoutput("salt '*' cmd.run 'systemctl stop winbind' 2>/dev/null")
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 66)
+
+        # support special characters
+        escaped_password = ""
+        for i in password:
+            escaped_password += "\\" + i
+        one_host_stat, one_host_out = commands.getstatusoutput('net ads join -U %s%s' % (username+'%', escaped_password))
+        if one_host_stat:
+            copy_back()
+            one_host_out = one_host_out.replace("'", "")
+            write_log(0, 'AdDomain', 'Failed To join AD Domain:%s.' % one_host_out)
+            error('038')
+
+        # copy krb5.keytab to all nodes
+        cp_key_stat, cp_key_out = commands.getstatusoutput("salt-cp '*' /etc/krb5.keytab /etc/krb5.keytab")
+        key_out = cp_key_out.split('\n')
+        for check_key_out in key_out:
+            if not check_key_out.find("True") >= 0:
+                write_log(0, 'AdDomain', 'Failed to Copy /etc/krb5.keytab:%s.' % cp_key_out)
+                error('033', '/etc/krb5.keytab')
+
+        # UPDATE
+        update_task(con, cur, task_start_time, 86)
+
+        # restart smb
+        commands.getstatusoutput("salt '*' cmd.run 'systemctl restart smb' 2>/dev/null")
+        # restart winbind
+        commands.getstatusoutput("salt '*' cmd.run 'killall winbindd' 2>/dev/null")
+        commands.getstatusoutput("salt '*' cmd.run 'systemctl restart winbind' 2>/dev/null")
+
+        update_task(con, cur, task_start_time, 100)
+        # record the operation log and delete the record after the task completing
+        write_log(2, 'AdDomain', 'Join AD successfully.')
+    except Exception, e:
+        write_log(0, 'AdDomain', e)
+    finally:
+        dele_table(task_start_time, con, cur)
+
+
+def ad_quit(types, admin, passwd):
+    task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+    try:
+        con, cur = con_db()
+    except Exception, e:
+        write_log(0, "AdDomain", e)
+        sys.exit(1)
+
+    try:
+        insert_task(con, cur, "ad_quit", 'running', 23, 'root', task_start_time)
+
+        # support special characters
+        escaped_password = ""
+        for i in passwd:
+            escaped_password += "\\" + i
+        escaped_password = escaped_password.replace("\\\\", "\\\\\\\\")
+        escaped_password = escaped_password.replace("\\\"", "\\\\\\\"")
+        escaped_password = escaped_password.replace("\\`", "\\\\\\`")
+        escaped_password = escaped_password.replace("\\$", "\\\\\\$")
+        # filter salt stderror so that output can be parsed correctly
+        quit_stat, quit_out = commands.getstatusoutput("salt '*' cmd.run \"net ads leave -U %s%s;echo $?\" 2>/dev/null"
+                                                       % (admin, escaped_password))
+        update_task(con, cur, task_start_time, 84)
+
+        update_task(con, cur, task_start_time, 92)
+        if quit_stat != 0 or quit_out.split('\n')[-1].strip() != '0' or \
+           'are we joined' in quit_out or 'Preauthentication failed' in quit_out:
+            write_log(0, 'AdDomain', 'Failed To Quit AD Domain:%s.' % quit_out)
+            print quit_out
+            error('005', '')
+
+        # CIFS authentication mode change to LOCAL mode after quit AD domain
+        if not os.path.isfile("/etc/samba/smb.conf.example"):
+            write_log(0, 'AdDomain', "/etc/samba/smb.conf.example : No such file")
+            print "/etc/samba/smb.conf.example : No such file"
+            sys.exit(1)
+
+        commands.getoutput("\cp /etc/samba/smb.conf.example /etc/samba/smb.conf")
+        cp_smb_stat, cp_smb_out = commands.getstatusoutput("salt-cp '*' /etc/samba/smb.conf /etc/samba/smb.conf")
+        smb_out = cp_smb_out.split('\n')
+        for check_smb in smb_out:
+            if not check_smb.find("True") >= 0:
+                write_log(0, 'AdDomain', 'Failed to Copy /etc/samba/smb.conf: %s.' % cp_smb_out)
+                error('033', '/etc/samba/smb.conf')
+
+        # restart smb
+        commands.getstatusoutput("salt '*' cmd.run 'systemctl restart smb' 2>/dev/null")
+        # restart winbind
+        commands.getstatusoutput("salt '*' cmd.run 'killall winbindd' 2>/dev/null")
+        commands.getstatusoutput("salt '*' cmd.run 'systemctl restart winbind' 2>/dev/null")
+
+        update_task(con, cur, task_start_time, 100)
+        # delete the record after the task completing
+        write_log(2, 'AdDomain', 'Quit AD successfully')
+    except Exception, e:
+        write_log(0, 'AdDomain', e)
+    finally:
+        dele_table(task_start_time, con, cur)
+
+
+def ad_quit_cluster(admin, passwd):
+    task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+    try:
+        con, cur = con_db()
+    except Exception, e:
+        write_log(0, 'AdDomain', e)
+        sys.exit(1)
+
+    try:
+        insert_task(con, cur, "ad_quit_cluster", 'running', 23, 'root', task_start_time)
+
+        # support special characters
+        escaped_password = ""
+        for i in passwd:
+            escaped_password += "\\" + i
+        quit_stat, quit_out = commands.getstatusoutput("net ads leave -U %s%s" % (admin, escaped_password))
+        if quit_stat != 0 or 'are we joined' in quit_out or 'Preauthentication failed' in quit_out:
+            write_log(0, 'AdDomain', 'Failed To Quit AD Domain:%s.' % quit_out)
+            print quit_out
+            error('005', '')
+
+        update_task(con, cur, task_start_time, 64)
+
+        # remove krb5.keytab from all nodes
+        commands.getoutput("salt '*' cmd.run 'rm -f /etc/krb5.keytab' 2>/dev/null")
+
+        update_task(con, cur, task_start_time, 76)
+
+        # CIFS authentication mode change to LOCAL mode after quit AD domain
+        if not os.path.isfile("/etc/samba/smb.conf.example"):
+            write_log(0, 'AdDomain', "/etc/samba/smb.conf.example : No such file")
+            print "/etc/samba/smb.conf.example : No such file"
+            sys.exit(1)
+
+        commands.getoutput("\cp /etc/samba/smb.conf.example /etc/samba/smb.conf")
+        cp_smb_stat, cp_smb_out = commands.getstatusoutput("salt-cp '*' /etc/samba/smb.conf /etc/samba/smb.conf")
+        smb_out = cp_smb_out.split('\n')
+        for check_smb in smb_out:
+            if not check_smb.find("True") >= 0:
+                write_log(0, 'AdDomain', 'Failed to Copy /etc/samba/smb.conf: %s.' % cp_smb_out)
+                error('033', '/etc/samba/smb.conf')
+
+        update_task(con, cur, task_start_time, 90)
+
+        # restart smb
+        commands.getstatusoutput("salt '*' cmd.run 'systemctl restart smb' 2>/dev/null")
+        # restart winbind
+        commands.getstatusoutput("salt '*' cmd.run 'killall winbindd' 2>/dev/null")
+        commands.getstatusoutput("salt '*' cmd.run 'systemctl restart winbind' 2>/dev/null")
+
+        update_task(con, cur, task_start_time, 100)
+
+        # delete the record after the task completing
+        write_log(2, 'AdDomain', 'Quit AD successfully')
+    except Exception, e:
+        write_log(0, 'AdDomain', e)
+    finally:
+        dele_table(task_start_time, con, cur)
+
+
+def ldap_join(types, base_dn, serverIP, port):
+    try:
+        con, cur = con_db()  # get the name of database、cursor、and existing task
+        task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]  # start time of the task
+        insert_task(con, cur, "ldap_join", 'running', 16, 'root', task_start_time)
+
+        # Check serverIP/port/baseDN's validity
+        chk_status, chk_output = commands.getstatusoutput("ldapsearch -h %s -p %s -x -b '%s'" % (serverIP, port, base_dn))
+        if chk_status != 0:
+            print chk_output
+            dele_table(task_start_time,con,cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"%('LdapDomain','Failed To Join LDAP Domain.'))
+            sys.exit(1)
+
+        update_task(con, cur, task_start_time, 27)
+
+        # filter salt stderror so that output can be parsed correctly
+        mon_stat, mon_out = commands.getstatusoutput("salt '*' cmd.run 'authconfig --enableldap --enableldapauth "
+                                                     "--ldapserver='ldap:\/\/%s:%s' --ldapbasedn=\"%s\"  "
+                                                     "--update' 2>/dev/null" % (serverIP, port, base_dn))
+        if mon_stat != 0:
+            print mon_out
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ('LdapDomain', 'Failed To Join LDAP Domain:%s.' % mon_out))
+            sys.exit(1)
+        update_task(con, cur, task_start_time, 38)
+
+        nsswitch_passwd = commands.getoutput("cat /etc/nsswitch.conf | grep -v '#' | grep -w 'passwd:'")
+        nsswitch_shadow = commands.getoutput("cat /etc/nsswitch.conf | grep -v '#' | grep -w 'shadow:'")
+        nsswitch_group = commands.getoutput("cat /etc/nsswitch.conf | grep -v '#' | grep -w 'group:'")
+        update_task(con, cur, task_start_time, 50)
+
+        if 'ldap' not in nsswitch_passwd:
+            commands.getoutput("sed -i 's/%s/%s/' /etc/nsswitch.conf" % (nsswitch_passwd, nsswitch_passwd+' ldap'))
+        if 'ldap' not in nsswitch_shadow:
+            commands.getoutput("sed -i 's/%s/%s/' /etc/nsswitch.conf" % (nsswitch_shadow, nsswitch_shadow+' ldap'))
+        if 'ldap' not in nsswitch_group:
+            commands.getoutput("sed -i 's/%s/%s/' /etc/nsswitch.conf" % (nsswitch_group, nsswitch_group+' ldap'))
+
+        update_task(con, cur, task_start_time, 72)
+
+        cp_nsswitch_stat, cp_nsswitch_out = commands.getstatusoutput("salt-cp "
+                                                                     "'*' /etc/nsswitch.conf /etc/nsswitch.conf")
+
+        update_task(con, cur, task_start_time, 90)
+
+        nsswitch_out = cp_nsswitch_out.split('\n')
+        for check_nsswitch in nsswitch_out:
+            if not check_nsswitch.find("True") >= 0:
+                dele_table(task_start_time, con, cur)
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ('LdapDomain', 'Failed To Copy /etc/nsswitch.conf:%s.' % cp_nsswitch_out))
+                error('033', '/etc/nsswitch.conf')
+
+        update_task(con, cur, task_start_time, 100)
+        # delete the record after the task completing
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+                           % ('LdapDomain', 'Join ldap successfully'))
+        dele_table(task_start_time, con, cur)
+    except Exception, e:
+        # check whether arguments are avalible
+        if "task_start_time" in dir() and "con" in dir() and "cur" in dir():
+            dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ('LdapDomain', e))
+
+
+def ldap_quit():
+    task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+    try:
+        con, cur = con_db()
+    except Exception, e:
+        write_log(0, 'LdapDomain', e)
+        sys.exit(1)
+
+    try:
+        insert_task(con, cur, "ldap_quit", 'running', 16, 'root', task_start_time)
+
+        # filter salt stderror so that output can be parsed correctly
+        mon_stat, mon_out = commands.getstatusoutput("salt '*' cmd.run 'authconfig --disableldap "
+                                                     "--disableldapauth --update' 2>/dev/null")
+        if mon_stat != 0:
+            print mon_out
+            write_log(0, 'LdapDomain', 'Failed To Quit LDAP Domain:%s.' % mon_out)
+            sys.exit(1)
+        update_task(con, cur, task_start_time, 38)
+
+        # delete ldap server info in /etc/openldap/ldap.conf  /etc/nslcd.conf
+        commands.getoutput("sed -i '/^URI/d' /etc/openldap/ldap.conf")
+        commands.getoutput("sed -i '/^BASE/d' /etc/openldap/ldap.conf")
+        commands.getoutput("sed -i '/^uri/d' /etc/nslcd.conf")
+        commands.getoutput("sed -i '/^base/d' /etc/nslcd.conf")
+
+        update_task(con, cur, task_start_time, 72)
+
+        status, output = commands.getstatusoutput("salt-cp '*' /etc/openldap/ldap.conf"
+                                                  " /etc/openldap/ldap.conf")
+        ldap_out = output.split('\n')
+        for check_ldap in ldap_out:
+            if not check_ldap.find("True") >= 0:
+                write_log(0, 'LdapDomain', 'Failed To Copy /etc/openldap/ldap.conf:%s.' % output)
+                error('033', '/etc/openldap/ldap.conf')
+
+        update_task(con, cur, task_start_time, 90)
+
+        status, output = commands.getstatusoutput("salt-cp '*' /etc/nslcd.conf"
+                                                  " /etc/nslcd.conf")
+        nslcd_out = output.split('\n')
+        for check_nslcd in nslcd_out:
+            if not check_nslcd.find("True") >= 0:
+                write_log(0, 'LdapDomain', 'Failed To Copy /etc/nslcd.conf:%s.' % output)
+                error('033', '/etc/nslcd.conf')
+
+        update_task(con, cur, task_start_time, 100)
+
+        write_log(2, 'LdapDomain', 'Quit ldap successfully')
+    except Exception, e:
+        write_log(0, 'LdapDomain', e)
+    finally:
+        dele_table(task_start_time, con, cur)
+
+
+def nis_join(domain, ip):
+    task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+    try:
+        con, cur = con_db()
+    except Exception, e:
+        write_log(0, 'NisDomain', e)
+        sys.exit(1)
+
+    try:
+        insert_task(con, cur, "nis_join", 'running', 16, 'root', task_start_time)
+
+        # Check serverIP/domainName validity
+        chk_status, chk_output = commands.getstatusoutput("yptest -d %s -h %s" % (domain, ip))
+        if "Can't communicate with portmapper" in chk_output or "Can't bind to server" in chk_output:
+            print chk_output
+            write_log(0, "NisDomain", 'Failed To Join NIS Domain: Invalid NIS server')
+            sys.exit(1)
+
+        update_task(con, cur, task_start_time, 33)
+
+        # filter salt stderror so that output can be parsed correctly
+        mon_stat, mon_out = commands.getstatusoutput("salt '*' cmd.run 'authconfig --enablenis --nisdomain=%s "
+                                                     "--nisserver=%s --update' 2>/dev/null" % (domain, ip))
+        if mon_stat != 0 or "FAILED" in mon_out:
+            write_log(0, 'NisDomain', 'Failed to join NIS domain:%s.' % mon_out)
+            sys.exit(1)
+
+        update_task(con, cur, task_start_time, 78)
+
+        # Check serverIP/domainName validity
+        chk_status, chk_output = commands.getstatusoutput("yptest")
+        if "Can't communicate with ypbind" in chk_output:
+            print chk_output
+            write_log(0, "NisDomain", 'Failed To Join NIS Domain: %s' % chk_output)
+            sys.exit(1)
+
+        update_task(con, cur, task_start_time, 100)
+
+        write_log(2, 'NisDomain', 'Join NIS successfully')
+    except Exception, e:
+        write_log(0, 'NisDomain', e)
+    finally:
+        dele_table(task_start_time, con, cur)
+
+
+def nis_quit():
+    task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+    try:
+        con, cur = con_db()
+    except Exception, e:
+        write_log(0, 'NisDomain', e)
+        sys.exit(1)
+
+    try:
+        insert_task(con, cur, "nis_quit", 'running', 16, 'root', task_start_time)
+
+        # filter salt stderror so that output can be parsed correctly
+        mon_stat, mon_out = commands.getstatusoutput("salt '*' cmd.run 'authconfig --disablenis "
+                                                     "--update' 2>/dev/null")
+        if mon_stat != 0:
+            print mon_out
+            write_log(0, 'NisDomain', 'Failed To Quit NIS Domain:%s.' % mon_out)
+            sys.exit(1)
+        update_task(con, cur, task_start_time, 38)
+
+        # delete nis server info in /etc/sysconfig/network and /etc/yp.conf
+        commands.getoutput("sed -i '/^NISDOMAIN/d' /etc/sysconfig/network")
+        commands.getoutput("sed -i '/^domain/d' /etc/yp.conf")
+
+        update_task(con, cur, task_start_time, 72)
+
+        net_status, net_output = commands.getstatusoutput("salt-cp '*' /etc/sysconfig/network "
+                                                          "/etc/sysconfig/network")
+        net_out = net_output.split('\n')
+        for check_net in net_out:
+            if not check_net.find("True") >= 0:
+                write_log(0, 'NisDomain', 'Failed To Copy /etc/sysconfig/network:%s.' % net_output)
+                error('033', '/etc/sysconfig/network')
+
+        update_task(con, cur, task_start_time, 90)
+
+        yp_status, yp_output = commands.getstatusoutput("salt-cp '*' /etc/yp.conf /etc/yp.conf")
+        yp_out = yp_output.split('\n')
+        for check_yp in yp_out:
+            if not check_yp.find("True") >= 0:
+                write_log(0, 'NisDomain', 'Failed To Copy /etc/yp.conf:%s.' % yp_output)
+                error('033', '/etc/yp.conf')
+
+        update_task(con, cur, task_start_time, 100)
+
+        write_log(2, 'NisDomain', 'Quit nis successfully')
+    except Exception, e:
+        write_log(0, 'NisDomain', e)
+    finally:
+        dele_table(task_start_time, con, cur)
+
+
+def dir_del(path, pool_name):
+    a = None
+    dir_name = None
+    mount_status, mount_out = commands.getstatusoutput("mount|grep -w icfs-fuse|grep -w /mnt/icfs")
+    if mount_status == 0:
+        a = '/mnt/icfs'
+    else:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("DeleteDir("+path+")", 'File system not mount:%s.' % mount_out))
+        del_dir_error(504)
+        del_dir_error(500)
+    if path == '/':
+        path_path = a
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("DeleteDir("+path+")", 'Invalid input.'))
+        del_dir_error(610)
+        del_dir_error(500)
+    else:
+        path_path = a+path
+        dir_name_1 = path.strip('/')
+        dir_name = dir_name_1.replace('/', '_')
+
+    if os.path.isdir(path_path):
+        path_status, path_out = commands.getstatusoutput("ls -rlht %s|grep ^d" % path_path)
+        if path_status == 0:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("DeleteDir("+path+")", 'Directory include subdirectory '+path+'.'))
+            del_dir_error(506)
+            print path
+            del_dir_error(500)
+        if commands.getstatusoutput("icfs-admin-nfs --query|grep -w %s" % path)[1]:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("DeleteDir("+path+")", 'NFS shared directory.'))
+            del_dir_error(507)
+            print path
+            del_dir_error(500)
+        if commands.getstatusoutput("icfs-admin-cifs --query|grep -w %s" % path)[1]:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("DeleteDir("+path+")", 'CIFS shared directory.'))
+            del_dir_error(508)
+            print path
+            del_dir_error(500)
+        rm_status, rm_out = commands.getstatusoutput("rm -rf %s/*" % path_path)
+        if rm_status == 0:
+            if not os.path.exists('/usr/bin/.dir_ctime'):
+                os.system("touch /usr/bin/.dir_ctime")
+            dir_status, dir_out = commands.getstatusoutput("sed -i '/\<%s\>/d' /usr/bin/.dir_ctime" % dir_name)
+            if dir_status == 0:
+                if not commands.getstatusoutput("rados lspools|grep -w %s" % pool_name)[1]:
+                    rm_dir = commands.getoutput("rm -rf %s" % path_path)
+                    print "successfully"
+
+                # delete the record after the task completing
+                remove_status, remove_out = commands.getstatusoutput("icfs mds remove_data_pool %s" % pool_name)
+                if remove_status == 0:
+                    pool_type_check = commands.getoutput("icfs osd dump 2>/dev/null|grep -w %s" % pool_name)
+                    if "erasure" in pool_type_check:
+                        eraspool_delete_stat, eraspool_delete = commands.getstatusoutput\
+                            ("icfs_remove_erasure_pool -p %s -t %s -c yes_i_really_really_mean_it"
+                             % (pool_name, pool_name))
+
+                        if not eraspool_delete_stat:
+                            print "deleteing..."
+                            rm_dir = commands.getoutput("rm -rf %s" % path_path)
+                            print "successfully"
+                        else:
+                            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' "
+                                               "--info '%s'" % ("DeleteDir("+path+")",'The system is cleaning up the data,please try again later.'))
+                            del_dir_error(509)
+                            del_dir_error(500)
+                    elif "replicated" in pool_type_check:
+                        reppool_delete_stat, reppool_delete = commands.getstatusoutput\
+                            ("icfs osd pool delete %s %s --yes-i-really-really-mean-it" % (pool_name, pool_name))
+                        if not reppool_delete_stat:
+                            print "deleteing..."
+                            rm_dir = commands.getoutput("rm -rf %s" % path_path)
+                            print "successfully"
+                        else:
+                            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % ("DeleteDir("+path+")", 'The system is cleaning up the data,please try again later.'))
+                            del_dir_error(509)
+                            del_dir_error(500)
+                else:
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                       % ("DeleteDir("+path+")", 'Failed info:%s.' % remove_out))
+                    del_dir_error(503)
+                    print "remove_data_pool"
+                    del_dir_error(500)
+            else:
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("DeleteDir("+path+")", 'Failed info:%s.' % dir_out))
+                del_dir_error(503)
+                print "del in .dir_ctime"
+                del_dir_error(500)
+        else:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("DeleteDir("+path+")", 'Failedinfo:%s.' % rm_out))
+            del_dir_error(503)
+            print "del", path
+            del_dir_error(500)
+    else:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("DeleteDir("+path+")", 'No exists '+path+'.'))
+        del_dir_error(401)
+        print path
+        del_dir_error(500)
+
+
+def dir_create(types, path, user_name, group_name, mode_value):
+    global create_dir_time, create_dir_con, create_dir_cur
+    try:
+        con, cur = con_db()  # get the name of database、cursor、and existing task
+        task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]  # start time of the task
+        create_dir_time = task_start_time
+        create_dir_con = con
+        create_dir_cur = cur
+        insert_task(con, cur, "Create_directory("+path+")", 'running', 4, 'root', task_start_time)
+
+        if commands.getstatusoutput("mount|grep -w icfs-fuse|grep -w /mnt/icfs")[1]:
+            a = '/mnt/icfs'
+            path_path = a+path
+        else:
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("CreateDir("+path+")", 'File system not mount.'))
+            del_dir_error(504)
+            del_dir_error(500)
+
+        if not os.path.exists('%s' % path_path):
+            update_task(con, cur, task_start_time, 11)
+
+            if commands.getstatusoutput("cat /etc/passwd|cut -d ':' -f1|grep -w %s" % user_name)[1]:
+                if commands.getstatusoutput("cat /etc/group|grep -w ^%s|cut -d ':' -f1" % group_name)[1]:
+                    if len(mode_value) != 9:
+                        dele_table(task_start_time, con, cur)
+                        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' "
+                                           "--info '%s'" % ("CreateDir("+path+")", 'Invalid input.'))
+                        del_dir_error(610)
+                        print mode_value
+                        del_dir_error(500)
+                    ugo = 'rwx-'
+                    for i in mode_value:
+                        if i not in ugo:
+                            dele_table(task_start_time, con, cur)
+                            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' "
+                                               "--info '%s'" % ("CreateDir("+path+")", 'Invalid input.'))
+                            del_dir_error(610)
+                            print mode_value
+                            del_dir_error(500)
+
+                    update_task(con, cur, task_start_time, 23)
+
+                    if not re.match("[r|-][w|-][x|-][r|-][w|-][x|-][r|-][w|-][x|-]", mode_value):
+                        dele_table(task_start_time, con, cur)
+                        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s'"
+                                           " --info '%s'" % ("CreateDir("+path+")", 'Invalid input.'))
+                        del_dir_error(610)
+                        print mode_value
+                        del_dir_error(500)
+                    mode_value_1 = 0
+                    mode_value_2 = 0
+                    mode_value_3 = 0
+                    if 'r' in mode_value[:3]:
+                        mode_value_1 += 4
+                    if 'w' in mode_value[:3]:
+                        mode_value_1 += 2
+                    if 'x' in mode_value[:3]:
+                        mode_value_1 += 1
+                    if 'r' in mode_value[3:-3]:
+                        mode_value_2 += 4
+                    if 'w' in mode_value[3:-3]:
+                        mode_value_2 += 2
+                    if 'x' in mode_value[3:-3]:
+                        mode_value_2 += 1
+                    if 'r' in mode_value[-3:]:
+                        mode_value_3 += 4
+                    if 'w' in mode_value[-3:]:
+                        mode_value_3 += 2
+                    if 'x' in mode_value[-3:]:
+                        mode_value_3 += 1
+
+                    update_task(con, cur, task_start_time, 29)
+
+                    mode_value_int = str(mode_value_1)+str(mode_value_2)+str(mode_value_3)
+                    mkdir_output = commands.getoutput("mkdir %s" % path_path)
+                    if mkdir_output:
+                        dele_table(task_start_time, con, cur)
+                        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' "
+                                           "--info '%s'" % ("CreateDir("+path+")", 'Invalid input.'))
+                        del_dir_error(610)
+                        print path
+                        del_dir_error(500)
+                    if not os.path.exists('/usr/bin/.dir_ctime'):
+                        os.system("touch /usr/bin/.dir_ctime")
+                    path_1 = path.strip('/')
+                    path_2 = path_1.replace('/', '_')
+
+                    update_task(con, cur, task_start_time, 34)
+                    dir_ctime = commands.getstatusoutput("stat %s|sed -n '6p'|awk '{print $2,$3}'|cut -c -19"
+                                                         % path_path)[1]+" "+commands.getstatusoutput("echo %s" % path_2)[1]
+                    # os.system("echo %s >>%s/.dir_ctime"%(dir_ctime,a))
+                    chown_status, chown_out = commands.getstatusoutput("chown %s %s" % (user_name, path_path))
+                    if chown_status == 0:
+                        chgrp_status, chgrp_out = commands.getstatusoutput("chgrp %s %s" % (group_name, path_path))
+                        if chgrp_status == 0:
+                            chmod_status, chmod_out = commands.getstatusoutput("chmod %s %s" % (mode_value_int, path_path))
+                            if chmod_status == 0:
+                                os.system("echo %s >>/usr/bin/.dir_ctime" % dir_ctime)
+                                print "successfully dir create"
+                            else:
+                                dele_table(task_start_time, con, cur)
+                                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module"
+                                                   " '%s' --info '%s'" % ("CreateDir("+path+")", 'Failedinfo:%s.' % chmod_out))
+                                del_dir_error(503)
+                                print mode_value
+                                os.system("rm -rf %s" % path_path)
+                                del_dir_error(500)
+
+                            # cur.execute("UPDATE task SET process='38' WHERE start_time='%s'"%task_start_time)
+                            # con.commit()
+                            # cur.close()
+                            # con.close()
+                        else:
+                            dele_table(task_start_time, con, cur)
+                            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s'"
+                                               " --info '%s'" % ("CreateDir("+path+")", 'Failedinfo:%s.' % chgrp_out))
+                            del_dir_error(503)
+                            print group_name
+                            os.system("rm -rf %s" % path_path)
+                            del_dir_error(500)
+                    else:
+                        dele_table(task_start_time, con, cur)
+                        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' "
+                                           "--info '%s'" % ("CreateDir("+path+")", 'Failedinfo:%s.' % chown_out))
+                        del_dir_error(503)
+                        print user_name
+                        os.system("rm -rf %s" % path_path)
+                        del_dir_error(500)
+                else:
+                    dele_table(task_start_time, con, cur)
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' "
+                                       "--info '%s'" % ("CreateDir("+path+")", 'No exists '+group_name+'.'))
+                    del_dir_error(401)
+                    print group_name
+                    del_dir_error(500)
+            else:
+                dele_table(task_start_time, con, cur)
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("CreateDir("+path+")", 'No exists '+user_name+'.'))
+                del_dir_error(401)
+                print user_name
+                del_dir_error(500)
+        else:
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("CreateDir("+path+")", 'Already exists.'))
+
+            del_dir_error(501)
+            print path
+            del_dir_error(500)
+    except Exception, e:
+        # check whether arguments are avalible
+        if "task_start_time" in dir() and "con" in dir() and "cur" in dir():
+            dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("CreateDir("+path+")", e))
+
+
+def adjust_data_consistency(set_path, value, path):
+    # set strip_unit to 64K(minimum size)
+    ret, rv = commands.getstatusoutput("/usr/bin/setfattr -n icfs.dir.layout.stripe_unit -v %s %s "
+                                       % (str(64 * 1024), set_path))
+    if ret != 0:
+        log_str = "adjust_data_consistency:setfattr stripe_unit error info: %s" % rv
+        print log_str
+        write_log(2, "CreateDir(" + path + ")", log_str)
+        return False
+
+    # set object_size to specific value(value must be divided by 64K with no remainder)
+    ret, rv = commands.getstatusoutput("/usr/bin/setfattr -n icfs.dir.layout.object_size -v %s %s"
+                                       % (str(int(value) * 1024 * 1024), set_path))
+    if ret != 0:
+        log_str = "adjust_data_consistency:setfattr object_size error info: %s" % rv
+        print log_str
+        write_log(2, "CreateDir(" + path + ")", log_str)
+        return False
+
+    # set stipe_unit equal to object_size
+    ret, rv = commands.getstatusoutput("/usr/bin/setfattr -n icfs.dir.layout.stripe_unit -v %s %s "
+                                       % (str(int(value) * 1024 * 1024), set_path))
+    if ret != 0:
+        log_str = "adjust_data_consistency:setfattr stripe_unit error info: %s" % rv
+        print log_str
+        write_log(2, "CreateDir(" + path + ")", log_str)
+        return False
+
+    return True
+
+
+def get_current_data_consistency_value(get_path, path):
+    strip_unit_value = None
+    object_size_value = None
+    ret, rv = commands.getstatusoutput(
+        "/usr/bin/getfattr -n icfs.dir.layout.stripe_unit %s " % get_path)
+    if ret != 0:
+        print "getfattr stripe_unit error"
+        commands.getoutput(
+            "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "CreateDir(" + path + ")", 'get stripe_unit fail:%s.' % rv))
+        return 1, 0, 0
+    else:
+        rv = rv.split("\n")
+        pattern = re.compile("^icfs\.dir\.layout\.stripe_unit=\"(\d{7,})\"")
+        for temp in rv:
+            m = pattern.match(temp)
+            if m is None:
+                continue
+            else:
+                strip_unit_value = m.group(1)
+                break
+        if strip_unit_value is None:
+            return 2, 0, 0
+
+    ret, rv = commands.getstatusoutput(
+        "/usr/bin/getfattr -n icfs.dir.layout.object_size %s" % get_path)
+    if ret != 0:
+        print "getfattr object_size error"
+        commands.getoutput(
+            "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "CreateDir(" + path + ")", 'get object_size fail:%s.' % rv))
+        return 3, 0, 0
+    else:
+        rv = rv.split("\n")
+        pattern = re.compile("^icfs\.dir\.layout\.object_size=\"(\d{7,})\"")
+        for temp in rv:
+            m = pattern.match(temp)
+            if m is None:
+                continue
+            else:
+                object_size_value = m.group(1)
+                break
+        if object_size_value is None:
+            return 4, 0, 0
+    return 0, int(strip_unit_value), int(object_size_value)
+
+
+def dir_eras(types, path, k, m, n, s):
+    # print path
+    try:
+        con, cur = con_db()
+        task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+        # NOTE: in case of path contains chinese words, use buffer() function to convert path, or there will be error as bellows:
+        # You must not use 8-bit bytestrings unless you use a text_factory that can interpret 8-bit bytestrings (like text_factory = str).
+        # It is highly recommended that you instead just switch your application to Unicode strings.
+        insert_task(con, cur, buffer("Create_directory("+path+")"), 'running', 37, 'root', task_start_time)
+
+        # create dir has adjudged if icfs-fuse has been mounted, here no need to adjudge
+        '''
+        if commands.getstatusoutput("mount|grep -w icfs-fuse|grep -w /mnt/icfs")[1]:
+            a='/mnt/icfs'
+            path_path=a+path
+        else:
+            dele_table(task_start_time,con,cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"%("CreateDir("+path+")",'File system not mount.'))
+            del_dir_error(504)
+            del_dir_error(500)
+        '''
+
+        a = '/mnt/icfs'
+        path_path = a + path
+
+        b = commands.getstatusoutput("icfs osd tree 2>/dev/null|grep osd|grep -w up|awk '{print $4}'")[1]
+        c = len(b.split('\n'))
+        # pool_name_1 = path.strip("/")
+        # pool_name=pool_name_1.replace('/','_')
+        pool_name = "pool_eras" + "_" + str(k) + "_" + str(m) + "_" + str(n)
+        ret, rv = commands.getstatusoutput("rados lspools")
+        if ret != 0:
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("CreateDir(" + path + ")", 'rados lspools execute fail:%s.' % rv))
+            sys.exit(1)
+
+        lines = rv.splitlines()
+        pool_exist = (pool_name in lines)
+
+        if int(n) == 0:
+            e = (c * 100)/(int(k)+int(m))
+            i = 0
+            while e > pow(2, i):
+                i += 1
+            else:
+                e = pow(2, i)
+
+            update_task(con, cur, task_start_time, 53)
+            if not pool_exist:
+                pool_status, pool_out = commands.getstatusoutput("icfs_create_erasure_pool -p %s -k %s -m %s -g %s"
+                                                                 % (pool_name, k, m, e))
+                if pool_status == 0:
+                    mds_status, mds_out = commands.getstatusoutput("icfs mds add_data_pool %s" % pool_name)
+                    if mds_status == 0:
+                        update_task(con, cur, task_start_time, 60)
+                        # execute the OSD capcity balance
+                        if osd_capacity_balance_erasure(int(k), int(m), int(n), pool_name, task_start_time, con, cur, path):
+                            # The error has been logged continue the program
+                            pass
+                    else:
+                        dele_table(task_start_time, con, cur)
+                        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' "
+                                           "--info '%s'" % ("CreateDir("+path+")", 'Failed add_data_pool:%s.' % mds_out))
+                        del_dir_error(503)
+                        print "add_data_pool"
+                        dir_del(path, pool_name)
+                        del_dir_error(500)
+                else:
+                    dele_table(task_start_time, con, cur)
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s'"
+                                       " --info '%s'" % ("CreateDir("+path+")", 'Failed icfs_create_erasure_pool:%s.' % pool_out))
+                    del_dir_error(503)
+                    print "icfs_create_erasure_pool"
+                    dir_del(path, pool_name)
+                    del_dir_error(500)
+            fattr_status, fattr_output = commands.getstatusoutput("/usr/bin/setfattr -n icfs.dir.layout.pool -v %s %s"
+                                                                  % (pool_name, path_path))
+            if fattr_status == 0:
+                if s is not None:
+                    ret, object_size, strip_unit_value = get_current_data_consistency_value(path_path, path)
+                    if ret == 0:
+                        if object_size != strip_unit_value:
+                            commands.getoutput(
+                                "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                                    "CreateDir(" + path + ")", 'object_size is not equal to strip_unit.'))
+
+                        # need to adjust
+                        if not adjust_data_consistency(path_path, s, path):
+                            dele_table(task_start_time, con, cur)
+                            del_dir_error(503)
+                            print "adjust data consistency fail"
+                            dir_del(path, pool_name)
+                            del_dir_error(500)
+                    else:
+                        dele_table(task_start_time, con, cur)
+                        del_dir_error(503)
+                        print "get data consistency fail"
+                        dir_del(path, pool_name)
+                        commands.getoutput(
+                            "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                                "CreateDir(" + path + ")", 'get data consistency fail: return value is %d.' % ret))
+                        del_dir_error(500)
+                print "successfully pool create and setfattr"
+
+                update_task(con, cur, task_start_time, 100)
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+                                   % ("CreateDir("+path+")", 'successfully pool create and setfattr.'))
+                dele_table(task_start_time, con, cur)
+            else:
+                dele_table(task_start_time, con, cur)
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("CreateDir("+path+")", 'Failed setfattr pool and directory, try again later:%s.'
+                                      % fattr_output))
+                del_dir_error(505)
+                dir_del(path, pool_name)
+                del_dir_error(500)
+        elif int(n) == 1:
+            update_task(con, cur, task_start_time, 23)
+
+            # m=2
+            e = (c * 100)/(int(k)+int(2))
+            i = 0
+            while e > pow(2, i):
+                i += 1
+            else:
+                e = pow(2, i)
+            if not pool_exist:
+                earsure_status, earsure_out = commands.getstatusoutput("icfs_create_erasure_pool -p %s -k %s -m %s "
+                                                                       "-g %s" % (pool_name, k, m, e))
+                if earsure_status == 0:
+                    node_name1 = commands.getstatusoutput("cat /etc/hosts|grep -E '([0-9]{1,3}[\.]){3}[0-9]{1,3}'"
+                                                          "|sed '1d'|awk '{print $2}'")[1]
+                    node_name1 = node_name1.split('\n')
+                    node_name = ''
+
+                    update_task(con, cur, task_start_time, 32)
+
+                    for i in node_name1:
+                        node_name = node_name+' '+i
+                    k_m = int(k)+int(m)
+                    # 20160223 shizonghua optimize the error info log and correct the judge if k+m bigger than virtual host
+                    if int(commands.getoutput("icfs osd tree 2>/dev/null|grep -E \"_n1 *$\" |wc -l"))*2 < k_m:
+                        status, output = commands.getstatusoutput("icfs_create_diskpool_rule -m %s %s" % (m, node_name))
+                        if status:
+                            dele_table(task_start_time, con, cur)
+                            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                               % ("CreateDir("+path+")", 'Failed icfs_create_disk_pool failinfo: %s.' % output))
+
+                            del_dir_error(503)
+                            print "icfs_create_disk_pool"
+                            dir_del(path, pool_name)
+                            del_dir_error(500)
+
+                    update_task(con, cur, task_start_time, 49)
+                    mds_status, mds_out = commands.getstatusoutput("/usr/bin/icfs mds add_data_pool %s" % pool_name)
+                    if mds_status == 0:
+                        update_task(con, cur, task_start_time, 58)
+                        # execute the OSD capcity balance
+                        if osd_capacity_balance_erasure(int(k), int(m), int(n), pool_name, task_start_time, con, cur, path):
+                            # The error has been logged continue the program
+                            pass
+
+                        update_task(con, cur, task_start_time, 80)
+                    else:
+                        dele_table(task_start_time, con, cur)
+                        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' "
+                                           "--info '%s'" % ("CreateDir("+path+")", 'Failed add_data_pool info:%s.' % mds_out))
+                        del_dir_error(503)
+                        print "mds add_data_pool"
+                        dir_del(path, pool_name)
+                        del_dir_error(500)
+                else:
+                    dele_table(task_start_time, con, cur)
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' "
+                                       "--info '%s'" % ("CreateDir("+path+")", 'Failed icfs_create_pool info:%s.' % earsure_out))
+                    del_dir_error(503)
+                    print "icfs_create_pool"
+                    dir_del(path, pool_name)
+                    del_dir_error(500)
+            setfattr_stat, setfattr_output = commands.getstatusoutput("/usr/bin/setfattr -n icfs.dir.layout.pool "
+                                                                      "-v %s %s" % (pool_name, path_path))
+            update_task(con, cur, task_start_time, 90)
+
+            if not setfattr_stat:
+                if s is not None:
+                    ret, object_size, strip_unit_value = get_current_data_consistency_value(path_path, path)
+                    if ret == 0:
+                        if object_size != strip_unit_value:
+                            commands.getoutput(
+                                "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                                    "CreateDir(" + path + ")", 'object_size is not equal to strip_unit.'))
+
+                        # need to adjust
+                        if not adjust_data_consistency(path_path, s, path):
+                            dele_table(task_start_time, con, cur)
+                            del_dir_error(503)
+                            print "adjust data consistency fail"
+                            dir_del(path, pool_name)
+                            del_dir_error(500)
+                    else:
+                        dele_table(task_start_time, con, cur)
+                        del_dir_error(503)
+                        print "get data consistency fail"
+                        dir_del(path, pool_name)
+                        commands.getoutput(
+                            "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                                "CreateDir(" + path + ")", 'get data consistency fail: return value is %d.' % ret))
+                        del_dir_error(500)
+                print "successfully pool create and setfattr"
+
+                update_task(con, cur, task_start_time, 100)
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+                                   % ("CreateDir("+path+")", 'successfully pool create and setfattr'))
+                dele_table(task_start_time, con, cur)
+            else:
+                dele_table(task_start_time, con, cur)
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("CreateDir("+path+")", 'Failed setfattr pool and directory, try again later:%s.' %
+                                      setfattr_output))
+
+                del_dir_error(505)
+                dir_del(path, pool_name)
+                del_dir_error(500)
+
+            # set "osd crush update on start = false" in icfs.conf
+            cfg_parser = NewConfigParser()
+            ok_files = cfg_parser.read("/etc/icfs/icfs.conf")
+            if "/etc/icfs/icfs.conf" not in ok_files:
+                commands.getoutput(
+                    "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                    % ("CreateDir(" + path + ")", 'fail info: Parse icfs.conf failed'))
+                del_dir_error(503)
+                dir_del(path, pool_name)
+                del_dir_error(500)
+            if not cfg_parser.has_option("global", "osd crush update on start") or \
+                            cfg_parser.get("global", "osd crush update on start") != "false":
+                if not cfg_parser.has_section("global"):
+                    cfg_parser.add_section("global")
+                cfg_parser.set("global", "osd crush update on start", "false")
+                cfg_parser.write(open('/etc/icfs/icfs.conf', 'w'))
+                copy_status, osd_crush_saltcp = commands.getstatusoutput("salt-cp '*' /etc/icfs/icfs.conf"
+                                                                         " /etc/icfs/icfs.conf")
+                if copy_status:
+                    commands.getoutput(
+                        "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                        % ("CreateDir(" + path + ")", 'fail info %s' % osd_crush_saltcp))
+                    del_dir_error(503)
+                    dir_del(path, pool_name)
+                    del_dir_error(500)
+    except Exception, e:
+        # check whether arguments are avalible
+        if "task_start_time" in dir() and "con" in dir() and "cur" in dir():
+            dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("CreateDir("+path+")", e))
+
+
+def if_crush_weight_same(n):
+    # get osd number
+    nodes_osd = {}
+    nodes_weight = []
+    virtual_host_num = []
+    virtual_nodes = []
+    if IcfsVersion.current_version() >= IcfsVersion("3.5.0.0"):
+        status, output = commands.getstatusoutput("icfs node ls -f json 2>/dev/null")
+        if not status:
+            nodes_osd = dict(json.loads(output)['osd'])
+        else:
+            print output
+            return False, False, 0
+    else:
+        status, output = commands.getstatusoutput(
+            "cat /etc/hosts|grep -E '([0-9]{1,3}[\.]){3}[0-9]{1,3}'|sed '1d'|awk '{print $2}'")
+        if not status:
+            nodes = output.split('\n')
+        else:
+            print output
+            return False, False, 0
+        # if the erase model and n==1 then need to add the virtual host name in nodes
+        if 1 == n:
+            for node in nodes:
+                virtual_nodes.append("%s_n1" % node)
+            nodes = nodes + virtual_nodes
+        status, output = commands.getstatusoutput("icfs osd tree -f json 2>/dev/null")
+        if not status:
+            temp_list = json.loads(output)['nodes']
+            for osd in temp_list:
+                dict_osd = dict(osd)
+                if 'host' == dict_osd['type'] and dict_osd['name'] in nodes:
+                    nodes_osd[dict_osd['name']] = dict_osd['children']
+        else:
+            print output
+            return False, False, 0
+
+    # get osd tree
+    status, output = commands.getstatusoutput("icfs osd tree -f json 2>/dev/null")
+    if not status:
+        osd_list = json.loads(output)['nodes']
+        for node in nodes_osd.values():
+            weight_sum = 0
+            for osd_id in node:
+                for osd in osd_list:
+                    dict_osd = dict(osd)
+                    if 'osd.%d' % osd_id == dict_osd['name']:
+                        weight_sum += float(dict_osd['crush_weight'])
+                    elif 'host' == dict_osd['type'] and re.match(".+_n1$", dict_osd['name']) is not None:
+                        virtual_host_num.append(re.match(".+_n1$", dict_osd['name']).group(0))
+            nodes_weight.append(weight_sum)
+        # don't have different osd number
+        if 1 == len(set(nodes_weight)):
+            return True, True, len(virtual_host_num)
+        else:
+            return True, False, len(virtual_host_num)
+    else:
+        print output
+        return False, False, 0
+
+
+def if_cluster_normal():
+    # get cluster status
+    status, output = commands.getstatusoutput("icfs -s 2>/dev/null | grep -w health")
+    if not status:
+        cluster_status = output.split()[1]
+        if "HEALTH_OK" == cluster_status:
+            return True, True
+        else:
+            return True, False
+    else:
+        print output
+        return False, False
+
+
+def if_osd_num_same(n):
+    virtual_nodes = []
+    nodes_osd = {}
+    if IcfsVersion.current_version() >= IcfsVersion("3.5.0.0"):
+        # get osd number
+        status, output = commands.getstatusoutput("icfs node ls -f json 2>/dev/null")
+        if not status:
+            nodes_osd = dict(json.loads(output)['osd'])
+        else:
+            print output
+            return False, False, 0
+    else:
+        status, output = commands.getstatusoutput(
+            "cat /etc/hosts|grep -E '([0-9]{1,3}[\.]){3}[0-9]{1,3}'|sed '1d'|awk '{print $2}'")
+        if not status:
+            nodes = output.split('\n')
+        else:
+            print output
+            return False, False, 0
+        # add the virtual host name in nodes
+        if 1 == n:
+            for node in nodes:
+                virtual_nodes.append("%s_n1" % node)
+            nodes = nodes + virtual_nodes
+        status, output = commands.getstatusoutput("icfs osd tree -f json 2>/dev/null")
+        if not status:
+            temp_list = json.loads(output)['nodes']
+            for osd in temp_list:
+                dict_osd = dict(osd)
+                if 'host' == dict_osd['type'] and dict_osd['name'] in nodes:
+                    nodes_osd[dict_osd['name']] = dict_osd['children']
+        else:
+            print output
+            return False, False, 0
+
+    osd_nums = [len(node_osd) for node_osd in nodes_osd.values()]
+    osd_nums.sort()
+    # don't have different osd number
+    if 1 == len(set(osd_nums)):
+        return True, True, osd_nums[0]
+    else:
+        return True, False, osd_nums[0]
+
+
+def osd_capacity_balance_erasure(k, m, n, pool_name, task_start_time, con, cur, path):
+    # adjudge if the cluster is health
+    count = 0
+    while 1:
+        ret, status = if_cluster_normal()
+        if ret and status:
+            break
+        elif 300 == count:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "Create_Dir:osd_capacity_balance_erasure(" + path + ")", "Error(556): Cluster is not health, can not execute OSD capacity balance"))
+            del_dir_error(556)
+            return 1
+        else:
+            count += 1
+            time.sleep(1)
+    # get osd number
+    ret_osd_same, if_same, osd_num = if_osd_num_same(n)
+    if 1 == n and 4 == k and m == 2:
+        if ret and osd_num < 24:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                'Error(559): In 4+2:1 scenario, the mount of disk should be at least 24'))
+            del_dir_error(559)
+            return 1
+        elif not ret:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                'call if_osd_num_same return fail'))
+            return 1
+    # get PG number
+    pg_number = 0
+    status, output = commands.getstatusoutput("icfs osd dump 2>/dev/null | grep -w %s" % pool_name)
+    if not status:
+        pg_number = int(output.split('pg_num ')[1].split()[0])
+    else:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+            "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+            'icfs osd dump execute fail:%s' % output))
+        print output
+        return 1
+    # get node number
+    node_num = 0
+    # Venus has not icfs node ls so need to do more thing
+    current_ver = IcfsVersion.current_version()
+    if current_ver >= IcfsVersion("3.5.0.0"):
+        status, output = commands.getstatusoutput("icfs node ls -f json 2>/dev/null")
+        if not status:
+            node_num = len(dict(json.loads(output)['osd']))
+        else:
+            commands.getoutput(
+                "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                    "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                    'icfs node ls -f json execute fail:%s' % output))
+            print output
+            return 1
+    else:
+        status, output = commands.getstatusoutput(
+            "cat /etc/hosts|grep -E '([0-9]{1,3}[\.]){3}[0-9]{1,3}'|sed '1d'|awk '{print $2}'")
+        if not status:
+            nodes = output.split('\n')
+            node_num = len(nodes)
+        else:
+            commands.getoutput(
+                "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                    "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                    'execute cat /etc/hosts fail: %s' % output))
+            return 1
+
+    # if node number equal to k+m number and the fault domain is not specified (default:host),
+    # need to adjudge weight and osd number
+    if 0 == n:
+        if k + m == node_num:
+            # adjudge osd num
+            if ret_osd_same and not if_same:
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                    "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                    "Error(557): The number of OSD is not same between different nodes in cluster, can not execute OSD capacity balance"))
+                del_dir_error(557)
+                return 1
+            # adjudge crushmap weight
+            ret, if_weight_same, virtual_host_num = if_crush_weight_same(n)
+            if ret and not if_weight_same:
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                    "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                    "Error(558): The weight in crushmap is not same between different nodes in cluster, can not execute OSD capacity balance"))
+                del_dir_error(558)
+                return 1
+            elif not ret:
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                    "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                    'call if_crush_weight_same return fail'))
+                return 1
+    elif 1 == n:
+        if k + m == node_num * 2:
+            # adjudge osd num
+            if ret and not if_same:
+                commands.getoutput(
+                    "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                        "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                        "Error(557): The number of OSD is not same between different nodes in cluster, can not execute OSD capacity balance"))
+                del_dir_error(557)
+                return 1
+            # adjudge crushmap weight
+            ret, if_weight_same, virtual_host_num = if_crush_weight_same(n)
+            print "call if_crush_weight_same re %d if_weight_same %d virtual_host_num %d" % (
+                ret, if_weight_same, virtual_host_num)
+            if ret and not if_weight_same:
+                commands.getoutput(
+                    "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                        "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                        "Error(558): The weight in crushmap is not same between different nodes in cluster, can not execute OSD capacity balance"))
+                del_dir_error(558)
+                return 1
+            elif not ret:
+                commands.getoutput(
+                    "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                        "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                        'call if_crush_weight_same return fail'))
+                return 1
+
+    # adjudge the version
+    update_task(con, cur, task_start_time, 70)
+
+    if current_ver > IcfsVersion("3.5.2.0"):
+        # use new method
+        status, output = commands.getstatusoutput("reweight_by_crushtool.sh %d %d %s"
+                                                  % (k+m, pg_number, pool_name))
+        if "Reweight SUCCESS" in output:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'" % (
+                "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                'OSD reweight result: Reweight SUCCESS'))
+        else:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                'reweight_by_crushtool.sh execute fail: %s' % output))
+            return 1
+    else:
+        if current_ver < IcfsVersion("3.5.0.0"):
+            # if venus need to execute on command first
+            status, output = commands.getstatusoutput("icfs osd pool set %s canbalance 1" % pool_name)
+            if status:
+                commands.getoutput(
+                    "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                        "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                        "icfs osd pool set %s canbalance 1 execute fail: %s" % (pool_name, output)))
+                return 1
+        # use the old method
+        status, output = commands.getstatusoutput("reweight_pool_osd_by_pg.sh %s" % pool_name)
+        print output
+        if "balance successfully" in output:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'" % (
+                "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                'OSD reweight result: Reweight SUCCESS'))
+        else:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                'reweight_pool_osd_by_pg.sh execute fail: %s' % output))
+            return 1
+    return 0
+
+
+def osd_capacity_balance_replicate(replicate_num, pool_name, task_start_time, con, cur, path):
+    # adjudge if the cluster is health
+    pg_number = 0
+    count = 0
+    while 1:
+        ret, status = if_cluster_normal()
+        if ret and status:
+            break
+        elif 300 == count:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "set_rep_layout:osd_capacity_balance_erasure(" + path + ")", "Error(556): Cluster is not health, can not execute OSD capacity balance"))
+            del_dir_error(556)
+            return 1
+        else:
+            count += 1
+            time.sleep(1)
+    # get PG number
+    status, output = commands.getstatusoutput("icfs osd dump 2>/dev/null | grep %s" % pool_name)
+    if not status:
+        pg_number = int(output.split('pg_num ')[1].split()[0])
+    else:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+            "set_rep_layout:osd_capacity_balance_replicate(" + path + ")", 'icfs osd dump fail:%s' % output))
+        print output
+        return 1
+    # get node number
+    node_num = 0
+    # Venus has not icfs node ls so need to do more thing
+    current_ver = IcfsVersion.current_version()
+    if current_ver >= IcfsVersion("3.5.0.0"):
+        status, output = commands.getstatusoutput("icfs node ls -f json 2>/dev/null")
+        if not status:
+            node_num = len(dict(json.loads(output)['osd']))
+        else:
+            commands.getoutput(
+                "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                    "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                    'icfs node ls -f json execute fail:%s' % output))
+            print output
+            return 1
+    else:
+        status, output = commands.getstatusoutput(
+            "cat /etc/hosts|grep -E '([0-9]{1,3}[\.]){3}[0-9]{1,3}'|sed '1d'|awk '{print $2}'")
+        if not status:
+            nodes = output.split('\n')
+            node_num = len(nodes)
+        else:
+            commands.getoutput(
+                "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                    "Create_Dir:osd_capacity_balance_erasure(" + path + ")",
+                    'execute cat /etc/hosts fail: %s' % output))
+            return 1
+
+    # if node number equal to replicate number and the fault domain is not specified (default:host)
+    if node_num == replicate_num:
+        # adjudge osd num and can treat as erase: k+m:0 model
+        ret, if_num_same, osd_num = if_osd_num_same(0)
+        if ret and not if_num_same:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "set_rep_layout:osd_capacity_balance_replicate(" + path + ")",
+                "Error(557): The number of OSD is not same between different nodes in cluster, can not execute OSD capacity balance"))
+            del_dir_error(557)
+            return 1
+        elif not ret:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "set_rep_layout:osd_capacity_balance_erasure(" + path + ")",
+                'call if_osd_num_same return fail'))
+            return 1
+        # adjudge crushmap weight
+        ret, if_weight_same, virtual_host_num = if_crush_weight_same(0)
+        if ret and not if_weight_same:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "set_rep_layout:osd_capacity_balance_replicate(" + path + ")",
+                "Error(558): The weight in crushmap is not same between different nodes in cluster, can not execute OSD capacity balance"))
+            del_dir_error(558)
+            return 1
+        elif not ret:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "set_rep_layout:osd_capacity_balance_erasure(" + path + ")",
+                'call if_crush_weight_same return fail'))
+            return 1
+    # if the version is newer than 3.5.2.0, then we can use the second method(CRUSH analog)
+    update_task(con, cur, task_start_time, 60)
+    if current_ver > IcfsVersion("3.5.2.0"):
+        # use new method
+        status, output = commands.getstatusoutput("reweight_by_crushtool.sh %d %d %s"
+                                                  % (int(replicate_num), pg_number, pool_name))
+        print output
+        if "Reweight SUCCESS" in output:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'" % (
+                "set_rep_layout:osd_capacity_balance_erasure(" + path + ")",
+                'OSD reweight result: Reweight SUCCESS'))
+        else:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "set_rep_layout:osd_capacity_balance_replicate(" + path + ")",
+                'reweight_by_crushtool.sh execute fail, Info: %s' % output))
+            return 1
+    else:
+        if current_ver < IcfsVersion("3.5.0.0"):
+            # if venus need to execute on command first
+            status, output = commands.getstatusoutput("icfs osd pool set %s canbalance 1" % pool_name)
+            if status:
+                commands.getoutput(
+                    "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                        "set_rep_layout:osd_capacity_balance_erasure(" + path + ")",
+                        "icfs osd pool set %s canbalance 1 execute fail: %s" % (pool_name, output)))
+                return 1
+        # use the old method
+        status, output = commands.getstatusoutput(" reweight_pool_osd_by_pg.sh %s" % pool_name)
+        print output
+        if "balance successfully" in output:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'" % (
+                "set_rep_layout:osd_capacity_balance_erasure(" + path + ")",
+                'OSD reweight result: Reweight SUCCESS'))
+        else:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "set_rep_layout:osd_capacity_balance_replicate(" + path + ")",
+                'reweight_pool_osd_by_pg.sh execute fail, Info: %s' % output))
+            return 1
+    return 0
+
+
+class Pool:
+    def __init__(self, *poolinfo):
+        self.name = poolinfo[0]
+        self.type = poolinfo[1]
+        self.size = poolinfo[2]
+
+    def name(self):
+        return self.name
+
+    def type(self):
+        return self.type
+
+    def size(self):
+        return self.size
+
+
+# create by huper
+def get_rep_pool_bysize(revalue, path, pool_type="replicated"):
+    # 1.get all pool pool_type pool_size
+    pool_list = []
+    code, info = commands.getstatusoutput("icfs osd dump 2>/dev/null | grep pool | awk '{printf $3\"\t\"$4\"\t\"$6; print\"\";}' | "
+                                          "sed s/\"'\"//g | grep %s" % pool_type)
+    if code != 0:
+        print "Error(526): Get pool error ", info
+        return "error"
+    for poolinfo in info.splitlines():
+        poolinfo_ = poolinfo.split("\t")
+        if poolinfo_[2] == revalue:
+            pool_list.append(Pool(poolinfo_[0], poolinfo_[1], poolinfo_[2]))
+    # 2.get icfs fs all data pool
+    code, info = commands.getstatusoutput("icfs fs ls 2>/dev/null | awk -F ',' '{print $3}' | awk -F : '{print $2}' |"
+                                          " sed s/'\[\|\]'/''/g | awk '{ while(NR<=NF){print $NR; NR+=1;} }'")
+    if code != 0:
+        print "Error(526): Get pool error: ", info
+        return "error"
+    fs_pool_list = info.splitlines()
+    # 3.find first available pool in fs_pool_list
+    for pool in pool_list:
+        if pool.size == revalue and pool.name in fs_pool_list:
+            return pool.name
+    # not find return "null"
+    return "null"
+
+
+def dir_rep(path, revalue, task_start_time, con, cur):
+    a = '/mnt/icfs'
+    path_path = a + path
+    b = commands.getstatusoutput("icfs osd tree 2>/dev/null|grep osd|grep -w up|awk '{print $4}'")[1]
+    c = len(b.split('\n'))
+    e = (c * 100)/int(revalue)
+    i = 0
+    while e > pow(2, i):
+        i += 1
+    else:
+        e = pow(2, i)
+    pool_name = "rep_pool_"+str(revalue)
+    if commands.getstatusoutput("rados lspools|grep -w %s" % pool_name)[1]:
+        dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+            "set_rep_layout(" + path + ")", '%s Already exists.' % pool_name))
+        del_dir_error(501)
+        print pool_name
+        sys.exit(1)
+    create_status, create_out = commands.getstatusoutput("/usr/bin/icfs osd pool create %s %s %s" % (pool_name, e, e))
+    if create_status == 0:
+        set_status, set_out = commands.getstatusoutput("/usr/bin/icfs osd pool set %s size %s" % (pool_name, revalue))
+        if set_status == 0:
+            datapool_status, datapool_out = commands.getstatusoutput("/usr/bin/icfs mds add_data_pool %s" % pool_name)
+            if datapool_status == 0:
+                fattr_status, fattr_out = commands.getstatusoutput("/usr/bin/setfattr -n icfs.dir.layout.pool -v %s %s"
+                                                                   % (pool_name, path_path))
+                if fattr_status == 0:
+                # strategy=commands.getstatusoutput("echo %s:"%(pool_name))[1]+" rep "+commands.getstatusoutput("echo %s"%(revalue))[1]
+                # os.system("echo %s >>/usr/bin/.dir_ctime"%strategy)
+                    update_task(con, cur, task_start_time, 40)
+                    if osd_capacity_balance_replicate(revalue, pool_name, task_start_time, con, cur, path):
+                        # delete the dir and pool
+                        pass
+                    update_task(con, cur, task_start_time, 100)
+
+                    # log the execute result and delete the item
+                    commands.getoutput(
+                        "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'" % (
+                            "set_rep_layout(" + path + ")", 'successfully pool create and setfattr.'))
+                    dele_table(task_start_time, con, cur)
+                    sys.exit(0)
+                else:
+                    dele_table(task_start_time, con, cur)
+                    commands.getoutput(
+                        "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                            "set_rep_layout(" + path + ")", 'Failed setfattr pool and directory, try again later:%s.'
+                            % fattr_out))
+                    del_dir_error(505)
+                    dir_del(path, pool_name)
+                    sys.exit(1)
+            else:
+                dele_table(task_start_time, con, cur)
+                commands.getoutput(
+                    "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                        "set_rep_layout(" + path + ")", 'icfs mds add_data_pool failed, Info:%s.' % datapool_out))
+                del_dir_error(503)
+                print "mds add_data_pool"
+                dir_del(path, pool_name)
+                sys.exit(1)
+        else:
+            dele_table(task_start_time, con, cur)
+            commands.getoutput(
+                "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                    "set_rep_layout(" + path + ")", 'icfs osd pool set failed,Info:%s.' % set_out))
+            del_dir_error(503)
+            print "osd pool set"
+            dir_del(path, pool_name)
+            sys.exit(1)
+    else:
+        dele_table(task_start_time, con, cur)
+        commands.getoutput(
+            "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "set_rep_layout(" + path + ")", 'icfs osd pool create failed,Info:%s.' % create_out))
+        del_dir_error(503)
+        print "osd pool create"
+        dir_del(path, pool_name)
+        sys.exit(1)
+
+
+def set_rep_layout(path, revalue):
+    try:
+        con, cur = con_db()
+        task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+        # NOTE: in case of path contains chinese words, use buffer() function to convert path, or there will be error as bellows:
+        # You must not use 8-bit bytestrings unless you use a text_factory that can interpret 8-bit bytestrings (like text_factory = str).
+        # It is highly recommended that you instead just switch your application to Unicode strings.
+        insert_task(con, cur, buffer("set_rep_layout(" + path + ")"), 'running', 8, 'root', task_start_time)
+
+        path_path = "/mnt/icfs" + path
+        used_pool = get_rep_pool_bysize(revalue, path, "replicated")
+        update_task(con, cur, task_start_time, 20)
+        # 1.cluster error , rm the dir create before
+        if used_pool == "error":
+            commands.getstatusoutput("rm -rf %s" % path_path)
+            commands.getstatusoutput("sed -i '/\<%s\>/d' /usr/bin/.dir_ctime" % path.strip('/').replace('/', '_'))
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("set_rep_layout(" + path + ")", 'cluster error , rm the dir create before.'))
+            sys.exit(1)
+        # 2.can't find available pool ,create new pool
+        if used_pool == "null":
+            return dir_rep(path, revalue, task_start_time, con, cur)
+        # 3.find pool , set layout
+        code, info = commands.getstatusoutput(
+            "/usr/bin/setfattr -n icfs.dir.layout.pool -v %s %s" % (used_pool, path_path))
+        if code == 0:
+            print "successfully create dir"
+            update_task(con, cur, task_start_time, 100)
+
+            # delete the record after the task completing
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+                               % ("set_rep_layout(" + path + ")", 'create dir Successfully.'))
+            dele_table(task_start_time, con, cur)
+            sys.exit(0)
+        else:
+            print "create path error: " + info
+            commands.getstatusoutput("rm -rf %s" % path_path)
+            commands.getstatusoutput("sed -i '/\<%s\>/d' /usr/bin/.dir_ctime" % path.strip('/').replace('/', '_'))
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                "set_rep_layout(" + path + ")", 'create path error: %s' % info))
+    except Exception, e:
+        # check whether arguments are available
+        if "task_start_time" in dir() and "con" in dir() and "cur" in dir():
+            dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+            "set_rep_layout(" + path + ")", e))
+
+
+# ###########-------CIFS----######################
+def check_for_sharename(cname):
+    cifs_sh_cfg = NewConfigParser()
+    cifs_sh_cfg.read("/etc/samba/smb.conf")
+    cifs_sh_section = cifs_sh_cfg.sections()
+    if cname in cifs_sh_section:
+        return 1
+    else:
+        return 0
+
+
+# check remote host status
+def check_remote_host_stat(task_start_time, con, cur):
+    host_list = get_remote_host_list()
+    if not host_list:
+        dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("CreateCifs(" + cifs_share_name + ")", "Remote hosts list is empty"))
+        print "Error(056): Remote hosts list is empty"
+        sys.exit(1)
+
+    ret_dict = run_remote_ping("*")
+    fail_list = [name for name, ret in ret_dict.items() if ret["status"] is False]
+    if fail_list:
+        fail_list_str = ",".join(fail_list)
+        dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("CreateCifs(" + cifs_share_name + ")",
+                              "Remote hosts %s is not accessable" % fail_list_str))
+        print "Error(057): Remote hosts %s is not accessable" % fail_list_str
+        sys.exit(1)
+
+
+# check icfs-fuse /mnt/icfs, auto mount if not mount
+def check_mount_point(task_start_time, con, cur):
+    # whether or not nfsd and icfs-fuse exist
+    if not commands.getstatusoutput('mount|grep -w /mnt/icfs')[1]:
+        commands.getstatusoutput('icfs-fuse /mnt/icfs')
+
+    if not commands.getstatusoutput('mount|grep -w /mnt/icfs')[1]:
+        dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("CreateCifs(" + cifs_share_name + ")", "Failed to mount icfs-fuse"))
+        cifs_create_error(110, platform.node())
+
+
+def check_for_shareuser(cfshame, smbuser):
+    user_list_n = []
+    user_list_v = []
+    user_list_i = []
+    user_list_e = []
+    smb_user_list = smbuser.split(',')
+    smb_user_list = list(set(smb_user_list))
+    cifs_usr_cfg = NewConfigParser()
+    cifs_usr_cfg.read("/etc/samba/smb.conf")
+    cifs_usr_option = cifs_usr_cfg.options(cfshame)
+    if "valid users" in cifs_usr_option:
+        cifs_usr_v = cifs_usr_cfg.get(cfshame, "valid users")
+        cifs_usr_v = cifs_usr_v.replace(" ", "")
+        if cifs_usr_v:
+            user_list_v = cifs_usr_v.split(',')
+    if "invalid users" in cifs_usr_option:
+        cifs_usr_i = cifs_usr_cfg.get(cfshame, "invalid users")
+        cifs_usr_i = cifs_usr_i.replace(" ", "")
+        if cifs_usr_i:
+            user_list_i = cifs_usr_i.split(',')
+    for smb_user in smb_user_list:
+        if smb_user in user_list_v or smb_user in user_list_i:
+            user_list_e.append(smb_user)
+        else:
+            user_list_n.append(smb_user)
+    user_list_n = list(set(user_list_n))
+    user_list_v = list(set(user_list_v))
+    user_list_i = list(set(user_list_i))
+    user_list_e = list(set(user_list_e))
+    return user_list_n, user_list_v, user_list_i, user_list_e
+
+
+def check_for_user(module, usertype, user_chk_list, task_start_time, con, cur):
+    user_chk_list = list(set(user_chk_list))
+    if module == "local":
+        if usertype == "u":
+            for user_var in user_chk_list:
+                # modify by shaoning 2016-12-7
+                chk_u_s, chk_u_r = commands.getstatusoutput(
+                    "cat /etc/passwd|grep -P '^%s:'|awk -F: '$1~/%s/{print $1}'" % (user_var, user_var))
+                if chk_u_s or chk_u_r != user_var:
+                    if user_var == "nobody":
+                        user_var = "Everyone"
+
+                    dele_table(task_start_time, con, cur)
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info "
+                                       "'%s'" % ("CreateCifs(" + cifs_share_name + ")", 'Local user ' + user_var + ' not exist.'))
+                    cifs_create_error(210, user_var)
+        elif usertype == "g":
+            for user_var in user_chk_list:
+                # modify by shaoning 2016-12-7
+                chk_g_s, chk_g_r = commands.getstatusoutput(
+                    "cat /etc/group|grep -P '^%s:'|awk -F: '$1~/%s/{print $1}'" % (user_var, user_var))
+                if chk_g_s or chk_g_r != user_var:
+                    dele_table(task_start_time, con, cur)
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info "
+                                       "'%s'" % ("CreateCifs(" + cifs_share_name + ")", 'Local group ' + user_var + ' not exist.'))
+                    cifs_create_error(215, user_var)
+    elif module == "domain":
+        if usertype == "u":
+            for user_var in user_chk_list:
+                wbin_u_s, wbin_u_relt = commands.getstatusoutput("wbinfo -u|grep -w %s" % user_var)
+                if wbin_u_s or wbin_u_relt != user_var:
+                    dele_table(task_start_time, con, cur)
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info "
+                                       "'%s'" % ("CreateCifs(" + cifs_share_name + ")", 'Domain user ' + user_var + ' not exist.'))
+                    cifs_create_error(220, user_var)
+        elif usertype == "g":
+            for user_var in user_chk_list:
+                wbin_u_s, wbin_u_relt = commands.getstatusoutput("wbinfo -g | grep -w %s" % user_var)
+                if wbin_u_s or wbin_u_relt != user_var:
+                    dele_table(task_start_time, con, cur)
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info "
+                                       "'%s'" % ("CreateCifs(" + cifs_share_name + ")", 'Domain group' + user_var + ' not exist.'))
+                    cifs_create_error(225, user_var)
+
+
+# Query sharepath for sharename inputed
+def check_for_shamepath(chkame):
+    chk_path_cfg = NewConfigParser()
+    chk_path_cfg.read("/etc/samba/smb.conf")
+    if "path" in chk_path_cfg.options(chkame):
+        chk_path = chk_path_cfg.get(chkame, "path")
+        return chk_path
+    else:
+        return 0
+
+
+def check_for_path(chk_path, task_start_time, con, cur):
+    chk_path = '/mnt/icfs' + chk_path
+    if chk_path[-1:] == "/":
+        clstpath = chk_path[:-1]
+    elif chk_path[-1:] == ".":
+        if chk_path[-2:-1] == "/":
+            clstpath = chk_path[:-2]
+    else:
+        clstpath = chk_path
+    fuse_stat, fuse_path = commands.getstatusoutput("mount | grep -w icfs-fuse|awk '{print $3}'")
+    host_n = commands.getoutput("echo $HOSTNAME")
+    if not fuse_path or "/mnt/icfs" not in fuse_path:
+        for p_d, p_sd, p_f in os.walk("/mnt/icfs"):
+            if p_sd or p_f:
+                dele_table(task_start_time, con, cur)
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("CreateCifs(" + cifs_share_name + ")", 'Failed to mount icfs-fuse for ' + host_n + '.'))
+                cifs_create_error(110, host_n)
+        icfuse_stat, icfuse_reslt = commands.getstatusoutput('icfs-fuse /mnt/icfs')
+        if "fuse failed to start" in icfuse_reslt:
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("CreateCifs(" + cifs_share_name + ")", 'Failed to mount icfs-fuse for ' + host_n + '.'))
+            cifs_create_error(110, host_n)
+        path_fd_relt = os.path.isdir(clstpath)
+        if not path_fd_relt:
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("CreateCifs(" + cifs_share_name + ")", 'Can not find path in cluster file system.'))
+            cifs_create_error(100)
+    elif "/mnt/icfs" in fuse_path:
+        path_fd_relt = os.path.isdir(clstpath)
+        if not path_fd_relt:
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("CreateCifs(" + cifs_share_name + ")", 'Can not find path in cluster file system.'))
+            cifs_create_error(100)
+
+
+def add_user_acl(ad_name, ad_user_list, ad_a, ad_v, ad_i):
+    ad_user_list = list(set(ad_user_list))
+    ad_v = list(set(ad_v))
+    ad_i = list(set(ad_i))
+    ad_file_cfg = NewConfigParser()
+    ad_file_cfg.read("/etc/samba/smb.conf")
+    if "nobody" in ad_user_list:
+        ad_file_cfg.set(ad_name, "guest ok", "yes")
+    if ad_a in ("rwx", "rw-", "r--", "None"):
+        ad_file_cfg.set(ad_name, "writeable", "yes")
+        ad_v += ad_user_list
+        ad_user_v = ','.join(ad_v)
+        ad_file_cfg.set(ad_name, "valid users", ad_user_v)
+    elif ad_a in "---":
+        ad_i += ad_user_list
+        ad_user_i = ','.join(ad_i)
+        ad_file_cfg.set(ad_name, "invalid users", ad_user_i)
+    ad_file_cfg.write(open("/etc/samba/smb.conf", "w"))
+
+
+def setacl_for_path(setpath, typeuser, set_user_list, setacl, task_start_time, con, cur):
+    if setacl == "None":
+        return
+
+    set_user_list = list(set(set_user_list))
+    # "v"(visual) added in ACL after version 3.5.1.1(included)
+    if IcfsVersion.current_version() >= IcfsVersion("3.5.1.1"):
+        if setacl == "rwx":
+            dir_acl = "rwxdv"
+        elif setacl == "rw-":
+            dir_acl = "rwx-v"
+        elif setacl == "r--":
+            dir_acl = "r-x-v"
+        elif setacl == "---":
+            dir_acl = "-----"
+        else:
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("CreateCifs(" + cifs_share_name + ")", 'acl_value input wrong.'))
+            cifs_create_error(250)
+    else:
+        if setacl == "rwx":
+            dir_acl = "rwxd"
+        elif setacl == "rw-":
+            dir_acl = "rwx-"
+        elif setacl == "r--":
+            dir_acl = "r-x-"
+        elif setacl == "---":
+            dir_acl = "----"
+        else:
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("CreateCifs(" + cifs_share_name + ")", 'acl_value input wrong.'))
+            cifs_create_error(250)
+    fuse_stat, fuse_path = commands.getstatusoutput("mount | grep -w icfs-fuse|awk '{print $3}'")
+    host_n = commands.getoutput("echo $HOSTNAME")
+    if not fuse_path or "/mnt/icfs" not in fuse_path:
+        for path_d, path_sd, path_f in os.walk("/mnt/icfs"):
+            if path_sd or path_f:
+                dele_table(task_start_time, con, cur)
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("CreateCifs(" + cifs_share_name + ")", 'Failed to mount icfs-fuse for ' + host_n + '.'))
+                cifs_create_error(110, host_n)
+        acl_fuse_stat, acl_fuse_relt = commands.getstatusoutput('icfs-fuse /mnt/icfs')
+        if "fuse failed to start" in acl_fuse_relt:
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("CreateCifs(" + cifs_share_name + ")", 'Failed to mount icfs-fuse for ' + host_n + '.'))
+            cifs_create_error(110, host_n)
+        abs_setpath = "/mnt/icfs" + setpath
+    elif "/mnt/icfs" in fuse_path:
+        abs_setpath = "/mnt/icfs" + setpath
+    if typeuser == "u":
+        for user_b in set_user_list:
+            if user_b == "invalid_user_nologin":
+                continue
+            set_status, set_output = commands.getstatusoutput("icfs-admin-acl --set -r -u %s -a %s -d %s"
+                                                              % (user_b, dir_acl, abs_setpath))
+            if set_output or set_status:
+                dele_table(task_start_time, con, cur)
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("CreateCifs(" + cifs_share_name + ")", 'Failed to set acl for user:%s.'
+                                      % set_output))
+                cifs_create_error(255)
+            set_def_status, set_def_output = commands.getstatusoutput("icfs-admin-acl --set -r -e -u %s -a %s -d %s"
+                                                                      % (user_b, dir_acl, abs_setpath))
+            if set_def_output or set_def_status:
+                dele_table(task_start_time, con, cur)
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("CreateCifs(" + cifs_share_name + ")", 'Failed to set acl for user:%s.'
+                                      % set_def_output))
+                cifs_create_error(255)
+    if typeuser == "g":
+        for user_b in set_user_list:
+            set_status, set_output = commands.getstatusoutput("icfs-admin-acl --set -r -g %s -a %s -d %s"
+                                                              % (user_b, dir_acl, abs_setpath))
+            if set_output or set_status:
+                dele_table(task_start_time, con, cur)
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("CreateCifs(" + cifs_share_name + ")", 'Failed to set acl for user:%s.'
+                                      % set_output))
+                cifs_create_error(255)
+            set_def_status, set_def_output = commands.getstatusoutput("icfs-admin-acl --set -r -e -g %s -a %s -d %s"
+                                                                      % (user_b, dir_acl, abs_setpath))
+            if set_def_output or set_def_status:
+                dele_table(task_start_time, con, cur)
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("CreateCifs(" + cifs_share_name + ")", 'Failed to set acl for user:%s.'
+                                      % set_def_output))
+                cifs_create_error(255)
+
+
+def smb_ad_format():
+    strip_s = commands.getoutput("sed -i -E 's/^\s+//g;/^$/d' /etc/samba/smb.conf")
+    conf = NewConfigParser()
+    conf.read("/etc/samba/smb.conf")
+    work = conf.get("global", "security")
+    line_n = commands.getoutput("cat /etc/samba/smb.conf|grep -n 'idmap config'|awk -F: '{print $1}'")
+    if line_n and work in ("ads", "ADS"):
+        wkgp = conf.get("global", "workgroup")
+        line_l = line_n.split("\n")
+        if len(line_l) == 2:
+            idmap_back = commands.getoutput("sed -i '%ss/.*/idmap config %s : backend = rid/g' /etc/samba/smb.conf"
+                                            % (line_l[0], wkgp))
+            idmap_rid = commands.getoutput("sed -i '%ss/.*/idmap config %s : range = 100000-499999/g' /etc/samba/smb.conf"
+                                           % (line_l[1], wkgp))
+        elif len(line_l) == 1:
+            idmap_back = commands.getoutput("sed -i '%ss/.*/idmap config %s : backend = rid/g' /etc/samba/smb.conf"
+                                            % (line_l[0], wkgp))
+            idmap_rid = commands.getoutput("sed -i '%siidmap config %s : range = 100000-499999' /etc/samba/smb.conf"
+                                           % (int(line_l[0]) + 1, wkgp))
+    icfs_format = commands.getoutput("sed -i -E \"s/icfs[[:blank:]]*=[[:blank:]]"
+                                     "*config_file[[:blank:]]*=[[:blank:]]*\/etc\/icfs\/icfs.conf/"
+                                     "icfs:config_file=\/etc\/icfs\/icfs.conf/g\" /etc/samba/smb.conf")
+
+
+# synchronize smb.conf on all clients
+def synchronize_smb_conf(task_start_time, con, cur):
+    ret_dict = run_remote_copy("*", "/etc/samba/smb.conf", "/etc/samba/smb.conf")
+    fail_list = [node_name for node_name, ret in ret_dict.items() if ret["retcode"] not in (0, -1)]
+    if fail_list:
+        dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("CreateCifs(" + cifs_share_name + ")", "Failed to synchronize smb.conf"))
+        cifs_create_error(303, ",".join(fail_list))
+
+
+# reload smb.conf on all clients
+def reload_config(task_start_time, con, cur):
+    ret_dict = run_remote_cmd("*", "smbcontrol all reload-config")
+    fail_list = [node_name for node_name, ret in ret_dict.items() if ret["retcode"] not in (0, -1)]
+    if fail_list:
+        dele_table(task_start_time, con, cur)
+        fail_list_str = ",".join(fail_list)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("CreateCifs(" + cifs_share_name + ")", "Failed to reload smb configuration for " + fail_list_str))
+        cifs_create_error(302, fail_list_str)
+
+
+def cifs_create_share(share_path, share_name, failover):
+    try:
+        # this for file lock
+        f1_open = open("/home/inspur_icfs_create_lock.conf", 'w')
+
+        con, cur = con_db()
+        task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+        insert_task(con, cur, buffer("Cifs_create(" + share_name + ")"), 'running', 3, 'root', task_start_time)
+
+        update_task(con, cur, task_start_time, 33)
+
+        # ######### LOCK ##########
+        fcntl.flock(f1_open, fcntl.LOCK_EX)
+
+        # check_remote_host_stat(task_start_time, con, cur)
+        check_mount_point(task_start_time, con, cur)
+
+        cifs_file = NewConfigParser()
+        cifs_file.read("/etc/samba/smb.conf")
+        cifs_file.add_section(share_name)
+        cifs_file.set(share_name, "public", "no")
+        cifs_file.set(share_name, "valid users", "invalid_user_nologin")
+        cifs_file.set(share_name, "path", share_path)
+        cifs_file.set(share_name, "writeable", "yes")
+        cifs_file.set(share_name, "printable", "no")
+        # cifs_file.set(share_name, "inherit acls", "yes")
+        # cifs_file.set(share_name, "map acl inherit", "yes")
+        # cifs_file.set(share_name, "map readonly", "perms")
+        cifs_file.set(share_name, "directory mask", "0777")
+        cifs_file.set(share_name, "vfs objects", "icfs")
+        cifs_file.set(share_name, "create mask", "0777")
+        cifs_file.set(share_name, "icfs:config_file", "/etc/icfs/icfs.conf")
+
+        # failover
+        if failover == "on":
+            cifs_file.set(share_name, "smbd:announce cluster", "true")
+            cifs_file.set(share_name, "smbd:announce ca", "true")
+        else:
+            cifs_file.remove_option(share_name, "smbd:announce cluster")
+            cifs_file.remove_option(share_name, "smbd:announce ca")
+
+        f_open = open("/etc/samba/smb.conf", "w")
+        cifs_file.write(f_open)
+        f_open.flush()
+        f_open.close()
+
+        # ######### UNLOCK ########
+        f1_open.close()
+
+        smb_ad_format()
+        synchronize_smb_conf(task_start_time, con, cur)
+        reload_config(task_start_time, con, cur)
+        ####################################
+        update_task(con, cur, task_start_time, 100)
+
+        commands.getoutput(
+            "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+            % ("CreateCifs(" + share_name + ")", 'CreateCifs Successfully.'))
+        dele_table(task_start_time, con, cur)
+    except Exception, e:
+        # check whether arguments are avalible
+        if "task_start_time" in dir() and "con" in dir() and "cur" in dir():
+            dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" %
+                           ("CreateCifs("+share_name+")", e))
+
+
+def cifs_create_user(share_name, user_module, user_type, user_name, acl):
+    try:
+        # this for file lock
+        f1_open = open("/home/inspur_icfs_create_lock.conf", 'w')
+
+        con, cur = con_db()
+        task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+        insert_task(con, cur, buffer("Cifs_create(" + share_name + "_" + user_name + ")"), 'running', 3, 'root', task_start_time)
+
+        update_task(con, cur, task_start_time, 10)
+
+        # ######### LOCK ##########
+        fcntl.flock(f1_open, fcntl.LOCK_EX)
+
+        cre_md_cfg = NewConfigParser()
+        cre_md_cfg.read("/etc/samba/smb.conf")
+        update_task(con, cur, task_start_time, 16)
+
+        if user_module in ("local", "domain"):
+            # check_remote_host_stat(task_start_time, con, cur)
+            check_mount_point(task_start_time, con, cur)
+
+            update_task(con, cur, task_start_time, 21)
+
+            if user_type == "g":
+                real_user = "@" + user_name
+            elif user_type == "u":
+                real_user = user_name
+            add_user_n, add_user_v, add_user_i, add_user_e = check_for_shareuser(share_name, real_user)
+            if not add_user_n:
+                add_user_n_st = ','.join(add_user_e).replace('@', '')
+                dele_table(task_start_time, con, cur)
+                commands.getoutput(
+                    "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                    % ("CreateCifs(" + share_name + ")", 'Cifs share user ' + add_user_n_st + ' has existed".'))
+                f1_open.close()
+                cifs_create_error(126, add_user_n_st)
+
+            add_user_ne = add_user_n[:]
+            for user_n in add_user_n:
+                if user_n[:1] == "@":
+                    add_user_n[add_user_n.index(user_n)] = user_n[1:]
+            # check_for_user(user_module, user_type, add_user_n, task_start_time, con, cur)
+
+            update_task(con, cur, task_start_time, 35)
+
+            if not check_for_shamepath(share_name):
+                dele_table(task_start_time, con, cur)
+                commands.getoutput(
+                    "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                    % ("CreateCifs(" + share_name + ")", "Cifs share path not exist."))
+                f1_open.close()
+                cifs_create_error(125)
+
+            chkpath = check_for_shamepath(share_name)
+
+            update_task(con, cur, task_start_time, 57)
+
+            check_for_path(chkpath, task_start_time, con, cur)
+            setacl_for_path(chkpath, user_type, add_user_n, acl, task_start_time, con, cur)
+            add_user_acl(share_name, add_user_ne, acl, add_user_v, add_user_i)
+
+            update_task(con, cur, task_start_time, 64)
+
+            smb_ad_format()
+            synchronize_smb_conf(task_start_time, con, cur)
+            reload_config(task_start_time, con, cur)
+
+            # #################################ok
+            update_task(con, cur, task_start_time, 100)
+            commands.getoutput(
+                    "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'" % (
+                        "CreateCifs(" + share_name + "_" + user_name + ")", 'CreateCifs Successfully.'))
+            dele_table(task_start_time, con, cur)
+
+            if add_user_e:
+                add_user_e_st = ','.join(add_user_e).replace('@', '')
+
+                dele_table(task_start_time, con, cur)
+                commands.getoutput(
+                    "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" % (
+                        "CreateCifs(" + share_name + ")", 'Cifs share user ' + add_user_e_st + ' has existed".'))
+
+                f1_open.close()
+                cifs_create_error(126, add_user_e_st)
+        elif user_module in "--everyone":
+            # check_remote_host_stat(task_start_time, con, cur)
+            check_mount_point(task_start_time, con, cur)
+
+            update_task(con, cur, task_start_time, 32)
+
+            every_user_n, every_user_v, every_user_i, every_user_e = check_for_shareuser(share_name, user_name)
+            if not every_user_n:
+                every_user_str = ','.join(every_user_e)
+                if every_user_str == "nobody":
+                    every_user_str_r = "Everyone"
+                else:
+                    every_user_str_r = every_user_str
+
+                dele_table(task_start_time, con, cur)
+                commands.getoutput(
+                    "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                    % ("CreateCifs(" + share_name + ")", 'Cifs share user ' + every_user_str_r + ' has existed".'))
+
+                f1_open.close()
+                cifs_create_error(126, every_user_str_r)
+
+            update_task(con, cur, task_start_time, 46)
+
+            # check_for_user(user_module, user_type, every_user_n, task_start_time, con, cur)
+            if not check_for_shamepath(share_name):
+                dele_table(task_start_time, con, cur)
+                commands.getoutput(
+                    "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                    % ("CreateCifs(" + share_name + ")", 'Cifs share path not exist.'))
+                f1_open.close()
+                cifs_create_error(125)
+
+            chkpath = check_for_shamepath(share_name)
+            check_for_path(chkpath, task_start_time, con, cur)
+            setacl_for_path(chkpath, user_type, every_user_n, acl, task_start_time, con, cur)
+            add_user_acl(share_name, every_user_n, acl, every_user_v, every_user_i)
+            smb_ad_format()
+            synchronize_smb_conf(task_start_time, con, cur)
+            reload_config(task_start_time, con, cur)
+
+            # ############################### ok
+            update_task(con, cur, task_start_time, 100)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'" % (
+                    "CreateCifs(" + share_name + "_" + user_name + ")", 'CreateCifs Successfully.'))
+            dele_table(task_start_time, con, cur)
+
+            if every_user_e:
+                every_user_str = ','.join(every_user_e)
+                if every_user_str == "nobody":
+                    every_user_str_r = "Everyone"
+                else:
+                    every_user_str_r = every_user_str
+                f1_open.close()
+                dele_table(task_start_time, con, cur)
+                commands.getoutput(
+                    "/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                    % ("CreateCifs(" + share_name + ")", 'Cifs share user ' + every_user_str_r + ' has existed".'))
+                f1_open.close()
+                cifs_create_error(126, every_user_str_r)
+
+        # ######### UNLOCK ########
+        f1_open.close()
+    except Exception, e:
+        # check whether arguments are avalible
+        if "task_start_time" in dir() and "con" in dir() and "cur" in dir():
+            dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'" %
+                           ("CreateCifs(" + share_name + "_" + user_name + ")", e))
+
+
+def get_all_snapshot_path(relative_path, task_start_time, con, cur):
+    path_list = []
+    status, output = commands.getstatusoutput("icfs-query-snaps all")
+    if status != 0:
+        dele_table(task_start_time, con, cur)
+        print "Error(1399): Unknown error icfs-query-snaps failed"
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("DeleteDir(" + relative_path + ")", "icfs-query-snaps failed"))
+        sys.exit(1)
+
+    pattern = re.compile("^\s*\"dir\": \"\\\/share(.*)\",\s*$")
+    lines = output.splitlines()
+    for line in lines:
+        match = pattern.match(line)
+        if match is None:
+            continue
+
+        tmp_path = match.group(1)
+        tmp_path = tmp_path.replace("\\/", "/")
+        if tmp_path == "":
+            tmp_path = "/"
+
+        if tmp_path not in path_list:
+            path_list.append(tmp_path)
+
+    return path_list
+
+
+def clear_snaps(relative_path, task_start_time, con, cur):
+    path_list = get_all_snapshot_path(relative_path, task_start_time, con, cur)
+    for tmp_path in path_list:
+        part_list1 = relative_path.split("/")
+        part_list2 = tmp_path.split("/")
+        part_list1 = [i for i in part_list1 if i != ""]
+        part_list2 = [i for i in part_list2 if i != ""]
+
+        min_len = min(len(part_list1), len(part_list2))
+        same_part_list = []
+        for i in range(min_len):
+            if part_list1[i] != part_list2[i]:
+                break
+
+            same_part_list.append(part_list1[i])
+
+        if len(same_part_list) == len(part_list1):
+            snap_path = "/mnt/icfs" + tmp_path + "/.snap/*"
+            status, output = commands.getstatusoutput("rmdir %s" % snap_path)
+            if status != 0:
+                dele_table(task_start_time, con, cur)
+                print "Remove snap for %s failed" % ("/mnt/icfs" + tmp_path)
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("DeleteDir(" + relative_path + ")", "Remove snap for %s failed" % ("/mnt/icfs" + tmp_path)))
+                sys.exit(1)
+
+
+def task_dir_del(type, path, delete_snap):
+    try:
+        con, cur = con_db()
+        task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+        # NOTE: in case of path contains chinese words, use buffer() function to convert path, or there will be error as bellows:
+        # You must not use 8-bit bytestrings unless you use a text_factory that can interpret 8-bit bytestrings (like text_factory = str). 
+        # It is highly recommended that you instead just switch your application to Unicode strings.
+        insert_task(con, cur, buffer("Remove_directory("+path+")"), 'running', 8, 'root', task_start_time)
+
+        # create dir has adjudged if icfs-fuse has been mounted, here no need to adjudge
+        # check icfs-fuse
+        # if commands.getstatusoutput("mount|grep -w icfs-fuse|grep -w /mnt/icfs")[1] == "":
+        #
+        #     dele_table(task_start_time, con, cur)
+        #     commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+        #                        % ("DeleteDir("+path+")", 'File system not mount.'))
+        #     del_dir_error(504)
+        #     del_dir_error(500)
+
+        # root directory can not be removed
+        if path == "/":
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("DeleteDir("+path+")", 'Invalid input.'))
+            del_dir_error(610)
+            del_dir_error(500)
+
+        update_task(con, cur, task_start_time, 21)
+
+        # check whether directory exists
+        path_path = "/mnt/icfs" + path
+        if not os.path.isdir(path_path):
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("DeleteDir("+path+")", 'No exists '+path+'.'))
+            del_dir_error(401)
+            print path
+            del_dir_error(500)
+
+        # clear snaps
+        if delete_snap == "True":
+            clear_snaps(path, task_start_time, con, cur)
+
+        # clear directory
+        status, output = commands.getstatusoutput("rm -rf %s/*" % path_path)
+        if status != 0:
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("DeleteDir("+path+")", 'Failed del '+path+'.'))
+            del_dir_error(503)
+            print "del", path
+            del_dir_error(500)
+
+        # delete information in .dir_ctime
+        pool_name_1 = path.strip('/')
+        pool_name = pool_name_1.replace('/', '_')
+        if not os.path.exists('/usr/bin/.dir_ctime'):
+            os.system("touch /usr/bin/.dir_ctime")
+        status, output = commands.getstatusoutput("sed -i '/\<%s\>/d' /usr/bin/.dir_ctime" % pool_name)
+        if status != 0:
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("DeleteDir("+path+")", 'Failed del in .dir_ctime:%s.' % output))
+            del_dir_error(503)
+            print "del in .dir_ctime"
+            del_dir_error(500)
+
+        update_task(con, cur, task_start_time, 24)
+
+        # delete directory
+        print "deleting..."
+        status, output = commands.getstatusoutput("rm -rf %s" % path_path)
+        if status != 0:
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("DeleteDir(" + path + ")", 'Failed del ' + path + '.'))
+            del_dir_error(503)
+            print "del", path
+            del_dir_error(500)
+
+        print "successfully"
+        update_task(con, cur, task_start_time, 100)
+
+        # delete the record after the task completing
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+                           % ("DeleteDir("+path+")", 'DeleteDir Successfully.'))
+        dele_table(task_start_time, con, cur)
+        sys.exit(0)
+    except Exception, e:
+        # check whether arguments are avalible
+        if "task_start_time" in dir() and "con" in dir() and "cur" in dir():
+            dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("DeleteDir("+path+")", e))
+
+
+def nfs_path_create(types, path):
+    try:
+        con, cur = con_db()  # get the name of database、cursor、and existing task
+        task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]  # start time of the task
+        insert_task(con, cur, "Nfs_create("+path+")", 'running', 9, 'root', task_start_time)
+
+        # whether or not nfsd and icfs-fuse exist
+        if not commands.getstatusoutput('mount|grep -w /mnt/icfs')[1]:
+            icfuse_status, icfuse_output = commands.getstatusoutput('icfs-fuse /mnt/icfs')
+        if path != '/.':
+            if not os.path.exists('/mnt/icfs%s' % path):
+
+                dele_table(task_start_time, con, cur)
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("CreateNfs("+path+")", 'No such path.'))
+
+                nfs_error(701)
+                sys.exit(1)
+
+        update_task(con, cur, task_start_time, 21)
+
+        # whether or not exist a path
+        aaa, bbb = commands.getstatusoutput("cat /etc/ganesha/ganesha.conf |\
+            grep Path|sed 's/[ |\t|;]//g'|sed 's/Path=//g'")
+        path_split = bbb.split('\n')
+        if path in path_split:
+
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("CreateNfs("+path+")", 'The Path already exists.'))
+
+            nfs_error(705)
+            sys.exit(1)
+
+        update_task(con, cur, task_start_time, 35)
+
+        # bulid new export_id
+        ccc, ddd = commands.getstatusoutput("cat /etc/ganesha/ganesha.conf |\
+            grep Export_Id|sed 's/[\t| |;]//g'|sed 's/Export_Id=//g'|sort -r|sed -n '1p'")
+        if ddd == '':
+            ddd = '77'
+        dd = int(ddd)
+        dd += 1
+
+        update_task(con, cur, task_start_time, 46)
+
+        # write EXPORT
+        new_EXPORT = "EXPORT\n{\n\tExport_Id = %s;\n\t\n\tPath = %s;\n\tPseudo = %s;\t\n\tAccess_Type = RO;\
+        \n\tSquash = no_root_squash;\t\n\tFSAL {\n\t\tName = ICFS;\n\t}\n}\n" % (dd, path, path)
+        ganesha_open = open("/etc/ganesha/ganesha.conf", "r+")
+        ganesha_str = ganesha_open.read()
+        ganesha_open.close()
+        new_conf = open("/etc/ganesha/ganesha.conf", "w")
+        new_conf.write(new_EXPORT+ganesha_str)
+        new_conf.close()
+        update_task(con, cur, task_start_time, 64)
+
+        saltt, saltout = commands.getstatusoutput("salt-cp '*' /etc/ganesha/ganesha.conf /etc/ganesha/ganesha.conf")
+        saltout = saltout.split('\n')
+        for check_salt in saltout:
+            if not check_salt.find("True") >= 0:
+
+                dele_table(task_start_time, con, cur)
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("CreateNfs("+path+")", 'Synchronization configuration file failed:%s.' % saltout))
+
+                nfs_error(703)
+        # filter salt stderror so that output can be parsed correctly
+        saltt_1, saltout_1 = commands.getstatusoutput("salt '*' cmd.run 'service ganesha restart' 2>/dev/null")
+
+        update_task(con, cur, task_start_time, 100)
+        # delete the record after the task completing
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+                           % ("CreateNfs("+path+")", 'CreateNfs Successfully.'))
+        dele_table(task_start_time, con, cur)
+
+    except Exception, e:
+        # check whether arguments are avalible
+        if "task_start_time" in dir() and "con" in dir() and "cur" in dir():
+            dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("CreateNfs("+path+")", e))
+
+
+def nfs_user_create(types, path, aclval, ipval, groupname):
+    try:
+        con, cur = con_db()  # get the name of database、cursor、and existing task
+        task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]  # start time of the task
+        insert_task(con, cur, "Nfs_create("+path+")", 'running', 17, 'root', task_start_time)
+
+        # whether or not nfsd and icfs-fuse exist
+        if not commands.getstatusoutput('mount|grep -w icfs-fuse')[1]:
+            icfuse_status, icfuse_output = commands.getstatusoutput('icfs-fuse /mnt/icfs')
+        if not os.path.exists('/mnt/icfs%s' % path):
+
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("CreateNfs("+path+")", 'No such path.'))
+
+            nfs_error(701)
+            sys.exit(1)
+        update_task(con, cur, task_start_time, 36)
+
+        # whether or not exist a path
+        aaa, bbb = commands.getstatusoutput("cat /etc/ganesha/ganesha.conf |grep Path|sed 's/[ |\t|;]//g'|"
+                                            "sed 's/Path=//g'")
+        path_split = bbb.split('\n')
+        if path not in path_split:
+
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("CreateNfs("+path+")", 'This NFS-Path not exists.'))
+
+            nfs_error(706)
+            sys.exit(1)
+        if ipval != "None":
+            user = ipval
+        if groupname != "None":
+            user = groupname
+        user = user.split(',')
+        user = list(set(user))
+
+        update_task(con, cur, task_start_time, 55)
+
+        # split export
+        user_create_stat, user_create = commands.getstatusoutput("cat /etc/ganesha/ganesha.conf")
+        export_list = re.split('}\s*\n}', user_create)
+        # print export_list
+        new_conf = []
+        newclient_add = ''
+        for export_element in export_list:
+            if export_element.find("%s;" % path) >= 0:
+                for user_check in user:
+                    if export_element.find("%s;" % user_check) >= 0 or export_element.find("%s," % user_check) >= 0:
+
+                        dele_table(task_start_time, con, cur)
+                        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' "
+                                           "--info '%s'" % ("CreateNfs("+path+")", 'User '+user_check+' is exists.'))
+                        print "nfs_error(708): User %s is exists" % user_check
+                        sys.exit(1)
+                for single_user in user:
+                    single_user_add = '\n        CLIENT\n        {\n               Clients = %s;\n               Access_Type = %s;\n        }' % (single_user, aclval)
+                    newclient_add += single_user_add
+                pos = export_element.find("squash;")+7
+                if pos != -1:
+                    export_element = export_element[:pos]+'\n        '+newclient_add+export_element[pos:]
+                    new_conf.append(export_element)
+                else:
+                    new_conf.append(export_element)
+            else:
+                new_conf.append(export_element)
+        # print new_conf
+        str = '}\n}'.join(new_conf)
+
+        update_task(con, cur, task_start_time, 76)
+
+        # print str
+        d = open("/etc/ganesha/ganesha.conf", "w")
+        d.write(str)
+        d.close()
+
+        update_task(con, cur, task_start_time, 87)
+
+        saltt, saltout = commands.getstatusoutput("salt-cp '*' /etc/ganesha/ganesha.conf /etc/ganesha/ganesha.conf")
+        # filter salt stderror so that output can be parsed correctly
+        saltt, saltout = commands.getstatusoutput("salt '*' cmd.run 'service ganesha restart' 2>/dev/null")
+
+        update_task(con, cur, task_start_time, 100)
+        # delete the record after the task completing
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+                           % ("CreateNfs("+path+")", 'CreateNfs Successfully.'))
+        dele_table(task_start_time, con, cur)
+
+    except Exception, e:
+        # check whether arguments are avalible
+        if "task_start_time" in dir() and "con" in dir() and "cur" in dir():
+            dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("CreateNfs("+path+")", e))
+
+
+def nfs_user_path_create_smart(types):
+    try:
+        con, cur = con_db()  # get the name of database、cursor、and existing task
+        task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]  # start time of the task
+        insert_task(con, cur, "Nfs_create", 'running', 84, 'root', task_start_time)
+
+        # filter salt stderror so that output can be parsed correctly
+        saltt, saltout = commands.getstatusoutput("salt '*' cmd.run 'service ganesha restart' 2>/dev/null")
+
+        update_task(con, cur, task_start_time, 100)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+                           % ("CreateNfs", 'CreateNfs Successfully.'))
+        dele_table(task_start_time, con, cur)
+
+    except Exception, e:
+        # check whether arguments are avalible
+        if "task_start_time" in dir() and "con" in dir() and "cur" in dir():
+            dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("CreateNfs", e))
+
+
+def delete_pool(types, name, poolname):
+    try:
+        con, cur = con_db()  # get the name of database、cursor、and existing task
+        task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]  # start time of the task
+        insert_task(con, cur, "Delete_image", 'running', 84, 'root', task_start_time)
+
+        # filter salt stderror so that output can be parsed correctly
+        delete_status, delete_output = commands.getstatusoutput("rbd rm %s --pool %s" % (name, poolname))
+        if delete_status != 0:
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("Delete image(" + name + ")", 'Delete image Failed info:%s' % delete_output))
+            sys.exit(1)
+        update_task(con, cur, task_start_time, 100)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+                           % ("Delete image(" + name + ")", 'Delete image Successfully.'))
+        dele_table(task_start_time, con, cur)
+    except Exception, e:
+        # check whether arguments are avalible
+        if "task_start_time" in dir() and "con" in dir() and "cur" in dir():
+            dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("Delete image(" + name + ")", e))
+
+
+def ftp_parse_commands(cmds):
+    # split commands
+    cmd_list = [] if cmds == "none" else cmds.split(",")
+    # remove dumplicate command
+    cmd_list = list(set(cmd_list))
+    real_cmd_list = ["CWD", "CDUP", "MODE", "PASS", "PORT", "ABOR", "PWD", "QUIT", "TYPE", "USER", "REST",
+                     "PASV", "HELP", "ACCT", "APPE", "NOOP", "REIN", "STAT", "STOU", "STRU", "SYST", "SITE"]
+    for cmd in cmd_list:
+        if cmd == "list":
+            real_cmd_list += ["LIST", "SIZE", "MDTM", "NLST"]
+        elif cmd == "stor":
+            real_cmd_list += ["STOR"]
+        elif cmd == "retr":
+            real_cmd_list += ["RETR"]
+        elif cmd == "dele":
+            real_cmd_list += ["DELE", "RMD"]
+        elif cmd == "rn":
+            real_cmd_list += ["RNFR", "RNTO"]
+        elif cmd == "mkd":
+            real_cmd_list += ["MKD"]
+        else:
+            return None
+
+    return real_cmd_list
+
+
+# check ftp user name
+def ftp_username_check(ftp_username):
+    # check whether user exists
+    if commands.getstatusoutput("id -u %s" % ftp_username)[0] != 0:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("CreateFtpUser(" + ftp_username + ")", "User not exist"))
+        print "Failed to create FTP user %s, user not exist" % ftp_username
+        return False
+
+    # check whether user is already in other share path
+    user_file_name = "/etc/vsftpd/userconfig/%s" % ftp_username
+    if os.path.exists(user_file_name):
+        parser = LinuxConfigParser()
+        parser.read(user_file_name)
+        local_root = parser.get("local_root")
+        local_root = "" if local_root is None else local_root
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("CreateFtpUser(" + ftp_username + ")", "FTP user already exists in path " + local_root))
+        print "Failed to create FTP user %s, User already exists in path %s" % (ftp_username, local_root)
+        return False
+
+    return True
+
+
+# split users and commands
+def ftp_split_user(user_names, user_commands):
+    name_cmd_list = []
+    name_list = user_names.split("/")
+    cmd_list = user_commands.split("/")
+    if len(name_list) == len(cmd_list):
+        name_cmd_list = zip(name_list, cmd_list)
+
+    return name_cmd_list
+
+
+# create ftp user
+def ftp_user_create(path, name_cmd_list):
+    try:
+        con, cur = con_db()  # get the name of database、cursor、and existing task
+        task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]    # start time of the task
+        insert_task(con, cur, "CreateFtpUser", 'running', 0, 'root', task_start_time)
+
+        abs_path = "/mnt/icfs" + path
+        user_list_changed = False
+        user_create_count = 0
+        user_total_count = len(name_cmd_list)
+        for user_name, cmds_allowed in name_cmd_list:
+            # update process
+            user_create_count += 1
+            process = user_create_count * 100 / (user_total_count + 1)
+            update_task(con, cur, task_start_time, process)
+
+            # check user name
+            if not ftp_username_check(user_name):
+                continue
+
+            # check and parse commands
+            commands_list = ftp_parse_commands(cmds_allowed)
+            if commands_list is None:
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("CreateFtpUser(" + user_name + ")", "Invalid FTP command"))
+                print "Failed to create FTP user %s, invalid FTP command" % user_name
+                continue
+
+            # create user's home directory if not exists
+            user_info = pwd.getpwnam(user_name)
+            home_dir = user_info.pw_dir
+            commands.getstatusoutput("salt '*' cmd.run 'mkdir -p %s'" % home_dir)
+
+            # write user config file
+            parser = LinuxConfigParser()
+            parser.set("local_root", abs_path)
+            parser.set("cmds_allowed", ",".join(commands_list))
+            user_file_name = "/etc/vsftpd/userconfig/%s" % user_name
+            if not parser.write(user_file_name):
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("CreateFtpUser(" + user_name + ")", "Failed to create FTP user, "
+                                                                          "Write user config file failed"))
+                print "Failed to create FTP user, Write user config file %s failed" % user_file_name
+                continue
+
+            # copy user config file to other nodes
+            status, output = commands.getstatusoutput("salt-cp '*' %s %s" % (user_file_name, user_file_name))
+            output = output.split('\n')
+            for check_salt in output:
+                if not check_salt.find("True") >= 0:
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info "
+                                       "'%s'" % ("CreateFtpUser(" + user_name + ")", "Failed to create FTP user, "
+                                                                                     "failed to Copy " + user_file_name))
+                    print "Failed to copy %s to other host" % user_file_name
+                    continue
+
+            # put user into user_list_file
+            try:
+                with open("/etc/vsftpd/user_list", "r") as f:
+                    content = f.read()
+                    user_list = content.split("\n")
+                    user_list = [i for i in user_list if i != ""]
+            except IOError, e:
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % ("CreateFtpUser(" + user_name + ")", "Failed to create FTP user, "
+                                                                          "get user list failed"))
+                print "Get user list failed"
+                continue
+
+            if user_name not in user_list:
+                user_list.append(user_name)
+                try:
+                    with open("/etc/vsftpd/user_list", "w") as f:
+                        f.write("\n".join(user_list))
+                    user_list_changed = True
+                except IOError, e:
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info "
+                                       "'%s'" % ("CreateFtpUser(" + user_name + ")", "Failed to create FTP user, "
+                                                                                     "Write user list failed"))
+                    print "Write user list failed"
+                    continue
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+                               % ("CreateFtpUser(" + user_name + ")", "Create FTP user successfully"))
+
+        if user_list_changed:
+            # copy /etc/vsftpd/user_list to other nodes
+            status, output = commands.getstatusoutput("salt-cp '*' /etc/vsftpd/user_list /etc/vsftpd/user_list")
+            output = output.split('\n')
+            for check_salt in output:
+                if not check_salt.find("True") >= 0:
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info "
+                                       "'%s'" % ("CreateFtpUser(" + user_name + ")",
+                                                 "Failed to Copy /etc/vsftpd/user_list :%s" % output))
+
+        dele_table(task_start_time, con, cur)
+    except Exception, e:
+        # check whether arguments are avalible
+        if "task_start_time" in dir() and "con" in dir() and "cur" in dir():
+            dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("CreateFtpUser", e))
+
+
+def snap_rollback(image_name, pool_name, snap_name):
+    try:
+        con, cur = con_db()  # get the name of database、cursor、and existing task
+        task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]  # start time of the task
+        insert_task(con, cur, "Snap rollback", 'running', 84, 'root', task_start_time)
+        snap_status, snap_out = commands.getstatusoutput("rbd snap rollback --image %s --pool %s --snap %s"
+                                                         % (image_name, pool_name, snap_name))
+        if snap_status != 0:
+            dele_table(task_start_time, con, cur)
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % ("Snap roollback (" + snap_name + ")", 'Snap roollback Failed info:%s' % snap_out))
+            sys.exit(1)
+        update_task(con, cur, task_start_time, 100)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+                           % ("Snap roollback (" + snap_name + ")", 'Snap roollback Successfully.'))
+        dele_table(task_start_time, con, cur)
+    except Exception, e:
+        # check whether arguments are avalible
+        if "task_start_time" in dir() and "con" in dir() and "cur" in dir():
+            dele_table(task_start_time, con, cur)
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % ("Snap roollback (" + snap_name + ")", e))
+
+
+# set acl
+def acl_set_recursion(dir_name, has_default, has_user, has_group, has_mask, has_other, set_name, acl_value):
+    if set_name != "":
+        name_in_db = "Set_ACL_%s_%s" % (dir_name, set_name)
+    elif has_user:
+        name_in_db = "Set_ACL_%s_owner" % dir_name
+    elif has_group:
+        name_in_db = "Set_ACL_%s_group" % dir_name
+    elif has_mask:
+        name_in_db = "Set_ACL_%s_mask" % dir_name
+    else:
+        name_in_db = "Set_ACL_%s_other" % dir_name
+
+    task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]  # start time of the task
+    try:
+        con, cur = con_db()
+    except Exception, e:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % (name_in_db, e))
+        sys.exit(1)
+
+    try:
+        insert_task(con, cur, buffer(name_in_db), 'running', 50, 'root', task_start_time)
+
+        # setxacl -r -m u:user/g:group dir
+        # setxacl -r -m m:: dir
+        # setxacl -r -m o:: dir
+        # setxacl -r -d -m u:user/g:group dir
+        # setxacl -r -d -m m:: dir
+        # setxacl -r -d -m o:: dir
+        cmd_line = ""
+        if has_user:
+            cmd_line = "setxacl -R %s-m u:%s:%s %s" % ("-d " if has_default else "", set_name, acl_value, dir_name)
+        elif has_group:
+            cmd_line = "setxacl -R %s-m g:%s:%s %s" % ("-d " if has_default else "", set_name, acl_value, dir_name)
+        elif has_mask:
+            cmd_line = "setxacl -R %s-m m::%s %s" % ("-d " if has_default else "", acl_value, dir_name)
+        elif has_other:
+            cmd_line = "setxacl -R %s-m o::%s %s" % ("-d " if has_default else "", acl_value, dir_name)
+
+        print cmd_line
+        status, output = commands.getstatusoutput(cmd_line)
+        if status != 0:
+            if "Option -m: Invalid argument near character 3" in output:
+                if has_user:
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s'"
+                                       " --info '%s'" % (name_in_db, "User not exist"))
+                    acl_error(1700)
+                elif has_group:
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s'"
+                                       " --info '%s'" % (name_in_db, "Group not exist"))
+                    acl_error(1701)
+                else:
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s'"
+                                       " --info '%s'" % (name_in_db, "Set ACL failed: %s" % output))
+                    acl_error(1705, output)
+            elif "Operation not supported" in output:
+                # add new error code: ACL function not enable
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % (name_in_db, "ACL function not enable in /etc/icfs/icfs.conf"))
+                acl_error(1709)
+            else:
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % (name_in_db, "Set ACL failed: %s" % output))
+                acl_error(1705, output)
+
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+                           % (name_in_db, "Set ACL successfully"))
+    except Exception, e:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % (name_in_db, e))
+    finally:
+        dele_table(task_start_time, con, cur)
+
+
+# delete acl
+def acl_delete_recursion(dir_name, has_default, has_user, has_group, has_mask, set_name):
+    if set_name != "":
+        name_in_db = "Delete_ACL_%s_%s" % (dir_name, set_name)
+    elif has_mask:
+        name_in_db = "Delete_ACL_%s_mask" % dir_name
+    else:
+        name_in_db = "Delete_ACL_%s" % dir_name
+
+    task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]  # start time of the task
+    try:
+        con, cur = con_db()
+    except Exception, e:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % (name_in_db, e))
+        sys.exit(1)
+
+    try:
+        insert_task(con, cur, buffer(name_in_db), 'running', 50, 'root', task_start_time)
+
+        # setxacl -r -b dir
+        # setxacl -r -x u:user/g:group dir
+        # setxacl -r -d -x u:user/g:group dir
+        if has_user:
+            cmd_line = "setxacl -R %s-x u:%s %s" % ("-d " if has_default else "", set_name, dir_name)
+        elif has_group:
+            cmd_line = "setxacl -R %s-x g:%s %s" % ("-d " if has_default else "", set_name, dir_name)
+        elif has_mask:
+            cmd_line = "setxacl -R %s-x m: %s" % ("-d " if has_default else "", dir_name)
+        else:
+            cmd_line = "setxacl -R -b " + dir_name
+
+        print cmd_line
+        status, output = commands.getstatusoutput(cmd_line)
+        if status != 0:
+            if "Option -x: Invalid argument near character 3" in output:
+                if has_user:
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s'"
+                                       " --info '%s'" % (name_in_db, "User not exist"))
+                    acl_error(1700)
+                elif has_group:
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s'"
+                                       " --info '%s'" % (name_in_db, "Group not exist"))
+                    acl_error(1701)
+                else:
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s'"
+                                       " --info '%s'" % (name_in_db, "Delete ACL failed: %s" % output))
+                    acl_error(1707, output)
+            elif "Malformed" in output:
+                if has_mask:
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s'"
+                                       " --info '%s'" % (name_in_db, "Can not delete mask when ACL"
+                                                                     " for other user or group exist"))
+                    acl_error(1708)
+                else:
+                    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s'"
+                                       " --info '%s'" % (name_in_db, "Delete ACL failed: %s" % output))
+                    acl_error(1707, output)
+            else:
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % (name_in_db, "Delete ACL failed: %s" % output))
+                acl_error(1707, output)
+
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+                           % (name_in_db, "Delete ACL successfully"))
+    except Exception, e:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % (name_in_db, e))
+    finally:
+        dele_table(task_start_time, con, cur)
+
+
+# set ip acl
+def acl_set_ip_recursion(dir_name, has_default, set_ip, acl_value):
+    name_in_db = "Set_ACL_%s_%s" % (dir_name, set_ip)
+    task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+    try:
+        con, cur = con_db()
+    except Exception, e:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % (name_in_db, e))
+        sys.exit(1)
+
+    try:
+        insert_task(con, cur, buffer(name_in_db), 'running', 50, 'root', task_start_time)
+
+        # setxacl -r -m i:ip dir
+        cmd_line = "setxacl -R %s-m i:%s:%s %s" % ("-d " if has_default else "", set_ip, acl_value, dir_name)
+        print cmd_line
+        status, output = commands.getstatusoutput(cmd_line)
+        if status != 0:
+            if "Operation not supported" in output:
+                # add new error code: ACL function not enable
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % (name_in_db, "ACL function not enable in /etc/icfs/icfs.conf"))
+                acl_error(1709)
+            else:
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                                   % (name_in_db, "Set ACL failed: %s" % output))
+                acl_error(1705, output)
+
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+                           % (name_in_db, "Set ACL successfully"))
+    except Exception, e:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % (name_in_db, e))
+    finally:
+        dele_table(task_start_time, con, cur)
+
+
+# delete ip acl
+def acl_delete_ip_recursion(dir_name, has_default, set_ip):
+    name_in_db = "Delete_ACL_%s_%s" % (dir_name, set_ip)
+    task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+    try:
+        con, cur = con_db()
+    except Exception, e:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % (name_in_db, e))
+        sys.exit(1)
+
+    try:
+        insert_task(con, cur, buffer(name_in_db), 'running', 50, 'root', task_start_time)
+
+        # setxacl -r -x i:ip dir
+        cmd_line = "setxacl -R %s-x i:%s %s" % ("-d " if has_default else "", set_ip, dir_name)
+        print cmd_line
+        status, output = commands.getstatusoutput(cmd_line)
+        if status != 0:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                               % (name_in_db, "Delete ACL failed: %s" % output))
+            acl_error(1707, output)
+
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 2 --module '%s' --info '%s'"
+                           % (name_in_db, "Delete ACL successfully"))
+    except Exception, e:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"
+                           % (name_in_db, e))
+    finally:
+        dele_table(task_start_time, con, cur)
+
+
+if __name__ == '__main__':
+    opts, argv = getopt.getopt(sys.argv[1:], (), [])
+    global create_dir_time
+    if 'ad_join' in argv:
+        types = argv[0]
+        username = argv[1]
+        passwd = argv[2]
+        domain = argv[3]
+        dcip = argv[4]
+        second_domain = argv[5]
+        ad_join(types, username, passwd, domain, dcip, second_domain)
+    elif 'ad_join_cluster' in argv:
+        username = argv[1]
+        passwd = argv[2]
+        domain = argv[3]
+        dcip = argv[4]
+        second_domain = argv[5]
+        netbios_name = argv[6]
+        ad_join_cluster(username, passwd, domain, dcip, second_domain, netbios_name)
+    elif 'ad_quit' in argv:
+        types = argv[0]
+        admin = argv[1]
+        passwd = argv[2]
+        ad_quit(types, admin, passwd)
+    elif 'ad_quit_cluster' in argv:
+        admin = argv[1]
+        passwd = argv[2]
+        ad_quit_cluster(admin, passwd)
+    elif 'ldap_join' in argv:
+        types = argv[0]
+        base_dn = argv[1]
+        serverIP = argv[2]
+        port = argv[3]
+        ldap_join(types, base_dn, serverIP, port)
+    elif 'ldap_quit' in argv:
+        ldap_quit()
+    elif 'nis_join' in argv:
+        domain = argv[1]
+        ip = argv[2]
+        nis_join(domain, ip)
+    elif 'nis_quit' in argv:
+        nis_quit()
+    elif 'Nfs_create' in argv:
+        types = argv[0]
+        # if len(argv) == 2:
+        #     path = argv[1]
+        #     #nfs_path_create(types,path)
+        #     nfs_path_create_smart(types,path)
+
+        # if len(argv) == 5:
+        #     path = argv[1]
+        #     aclval = argv[2]
+        #     ipval = argv[3]
+        #     groupname = argv[4]
+        #     #nfs_user_create(types,path,aclval,ipval,groupname)
+        nfs_user_path_create_smart(types)
+    elif 'Cifs_create_share' in argv:
+        cifs_share_path = argv[1]
+        cifs_share_name = argv[2]
+        cifs_failover = argv[3]
+        cifs_create_share(cifs_share_path, cifs_share_name, cifs_failover)
+    elif 'Cifs_create_user' in argv:
+        cifs_share_name = argv[1]
+        cifs_user_module = argv[2]
+        cifs_user_type = argv[3]
+        cifs_user_name = argv[4]
+        cifs_acl = argv[5]
+        cifs_create_user(cifs_share_name, cifs_user_module, cifs_user_type, cifs_user_name, cifs_acl)
+    elif 'Create_directory' in argv:
+        types = argv[0]
+        b1 = argv[1]
+        a1 = argv[2]
+        a2 = argv[3]
+        a3 = argv[4]
+        a4 = argv[5]
+        if 'None' == a4:
+            a4 = None
+        # dir_create(types,b1,b2,b3,b4)
+        dir_eras("Create_directory", b1, a1, a2, a3, a4)
+    elif 'set_rep_layout' in argv:
+        types = argv[0]
+        path = argv[1]
+        revalue = argv[2]
+        set_rep_layout(path, revalue)
+    elif 'Remove_directory' in argv:
+        types = argv[0]
+        dirs = argv[1]
+        delete_snap = argv[2]
+        task_dir_del(types, dirs, delete_snap)
+    elif 'Delete_image' in argv:
+        types = argv[0]
+        name = argv[1]
+        poolname = argv[2]
+
+        delete_pool(types, name, poolname)
+    elif 'Ftp_create_user' in argv:
+        ftp_share_path = argv[1]
+        ftp_share_users = ftp_split_user(argv[2], argv[3])
+        ftp_user_create(ftp_share_path, ftp_share_users)
+    elif 'Snap_rollback' in argv:
+        types = argv[0]
+        image_name = argv[1]
+        pool_name = argv[2]
+        snap_name = argv[3]
+        snap_rollback(image_name, pool_name, snap_name)
+    elif 'acl_set_recursion' in argv:
+        acl_dir_name = argv[1]
+        acl_has_default = True if argv[2] == "True" else False
+        acl_has_user = True if argv[3] == "True" else False
+        acl_has_group = True if argv[4] == "True" else False
+        acl_has_mask = True if argv[5] == "True" else False
+        acl_has_other = True if argv[6] == "True" else False
+        acl_set_name = argv[7]
+        acl_acl_value = argv[8]
+        acl_set_recursion(acl_dir_name, acl_has_default, acl_has_user, acl_has_group, acl_has_mask,
+                          acl_has_other, acl_set_name, acl_acl_value)
+    elif 'acl_delete_recursion' in argv:
+        acl_dir_name = argv[1]
+        acl_has_default = True if argv[2] == "True" else False
+        acl_has_user = True if argv[3] == "True" else False
+        acl_has_group = True if argv[4] == "True" else False
+        acl_has_mask = True if argv[5] == "True" else False
+        acl_set_name = argv[6]
+        acl_delete_recursion(acl_dir_name, acl_has_default, acl_has_user, acl_has_group, acl_has_mask, acl_set_name)
+    elif 'acl_set_ip_recursion' in argv:
+        acl_dir_name = argv[1]
+        acl_has_default = True if argv[2] == "True" else False
+        acl_set_ip = argv[3]
+        acl_acl_value = argv[4]
+        acl_set_ip_recursion(acl_dir_name, acl_has_default, acl_set_ip, acl_acl_value)
+    elif 'acl_delete_ip_recursion' in argv:
+        acl_dir_name = argv[1]
+        acl_has_default = True if argv[2] == "True" else False
+        acl_set_ip = argv[3]
+        acl_delete_ip_recursion(acl_dir_name, acl_has_default, acl_set_ip)
+    else:
+        error('002')

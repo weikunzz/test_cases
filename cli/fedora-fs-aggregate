@@ -1,0 +1,98 @@
+#!/usr/bin/python
+# coding:utf-8
+
+import os
+import sys
+import commands
+import OptParser
+
+
+def usage():
+    print '''Help(-h|--help)for icfs-fs-aggregate:
+Usage:
+>> icfs-fs-aggregate ----+ --start +---- --path f_path ---><
+                         + --stop  +
+                         ' --query '
+Functions: Start/Stop/Query the dir aggregate
+Options:
+  --start:               the start command
+  --stop:                the stop command
+  --query:               the query command
+  --path：               specify the dir path
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0)
+
+
+def error(num, *description):
+    if num == 553:
+        print "Error(553):Unknow error %s" % description
+    elif num == 610:
+        print "Error(610): Invalid input!"
+    elif num == 721:
+        print "Error(721): Invalid path:%s" % description
+    sys.exit(1)
+
+
+def smallfile_aggregate(f_path):
+    abs_path = os.path.abspath(f_path)
+    if not abs_path.startswith("/mnt/icfs"):
+        error(721, abs_path)
+
+    if not os.path.isdir(abs_path):
+        print "Error(401): %s No exists" % abs_path
+        sys.exit(1)
+    if has_start:
+        cmd_line = "setfattr -n icfs.aggregate -v 1 %s" % f_path
+        status, output = commands.getstatusoutput(cmd_line)
+        if status != 0:
+            error(553, output)
+    elif has_stop:
+        cmd_line = "setfattr -n icfs.aggregate -v 0 %s" % f_path
+        status, output = commands.getstatusoutput(cmd_line)
+        if status != 0:
+            error(553, output)
+    elif has_query:
+        file_status = "unknown"
+        cmd_line = "getfattr -n icfs.aggregate %s" % f_path
+        status, output = commands.getstatusoutput(cmd_line)
+        print "File Path".ljust(20, ' '), "Aggregate Status"
+        if "aggregate_ino=1" in output.lower():
+            file_status = "On"
+        elif "no such attribute" in output.lower():
+            file_status = "Off"
+        print abs_path.ljust(20, ' '), file_status
+
+
+if __name__ == '__main__':
+    f_path = None
+    has_start = False
+    has_stop = False
+    has_query = False
+    try:
+        parser = OptParser.OptParser()
+        parser.append("help", "{-h|--help}")
+        parser.append("aggregate", "{--start|--stop|--query}--path=")
+        m_name, m_opts = parser.parse(sys.argv[1:])
+    except Exception, err:
+        print err
+        error(610)
+        sys.exit(1)
+
+    for k, v in m_opts:
+        if "--path" == k:
+            f_path = v
+        elif "--start" == k:
+            has_start = True
+        elif "--stop" == k:
+            has_stop = True
+        elif "--query" == k:
+            has_query = True
+
+    if m_name == "help":
+        usage()
+    elif m_name == "aggregate":
+        smallfile_aggregate(f_path)
+    else:
+        error(610)

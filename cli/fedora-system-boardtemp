@@ -1,0 +1,79 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+
+# change log list
+# 20161207 shaoning (board_query) Bug fix: command line to get accepted nodes optimized
+
+#import getopt
+import sys
+# import commands
+from icfs_util import error
+#from icfs_util import run_command, get_remote_host_list
+from icfs_util import run_local_cmd, run_remote_cmd
+import OptParser
+
+
+def board_query():
+    cmd = "icfs-system-boardtemp --query --local"
+    result = run_remote_cmd("*", cmd)
+    for host_name, return_info in result.iteritems():
+        if return_info["retcode"] != 0:
+            tmp = "Boardtemp:--"
+        else:
+            tmp = return_info["stdout"]
+
+        print "Node:" + str(host_name)
+        print tmp + "\n"
+
+
+def board_query_local():
+    cmd = "ipmitool sensor 2>/dev/null|grep Outlet_Temp | awk '{print $3}'"
+
+    board = run_local_cmd(cmd, timeout=20)
+    if board["retcode"] != 0:
+        tmp = "--"
+    else:
+        tmp = board["stdout"][:-1].strip()
+    print "Boardtemp:" + str(tmp)
+
+
+def usage():
+    print '''Help(-h|--help)for icfs-system-boardtemp:
+Usage:
+>> icfs-system-boardtemp ------ --query --------------------------------><
+Functions: Query boardtemp info
+Options:
+  --query:  query boardtemp info
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+    local = False
+    try:
+        opt_parser = OptParser.OptParser()
+        # help information
+        opt_parser.append("help", "{-h|--help}")
+        # query commands
+        opt_parser.append("query", "--query[--local]")
+        # parse arguments
+        m_name, m_opts = opt_parser.parse(sys.argv[1:])
+    except Exception, err:
+        error('002')
+
+    for k, v in m_opts:
+        if k == "--local":
+            local = True
+
+    if m_name == "help":
+        usage()
+        sys.exit(0)
+    elif m_name == "query":
+        if local:
+            board_query_local()
+        else:
+            board_query()
+

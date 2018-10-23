@@ -1,0 +1,682 @@
+#!/usr/bin/python
+# coding:utf-8
+'''
+#change log list
+#modify at 2016-12-14 by huper. add function get_osd_crush_location() to get osd crush location
+#and add function move_osd_crush_location(), to add osd to crush by --weight and --location
+#modify at 2016-12-28 by huper. modify help info
+#modify at 2017-01-10 by huper. add background run
+#modify at 2017-02-14 by huper. when down osd , delete all of the osd data
+'''
+
+import os
+import sys
+import getopt
+import re
+import commands
+import math
+import json
+import platform
+import datetime
+import sqlite3
+import fcntl
+import random
+import subprocess
+import time
+# code:/usr/bin/
+# code:/usr/local/ism/Agent/src/Cli/ClusterCli/
+# export PATH=$PATH:/usr/bin/
+# create by huper 
+
+
+DEBUG = 0
+
+def usage():
+    print """Help(-h|--help) for icfs-disk-change:
+Usage
+before version 3.5.1.1 (included):
+>> icfs-disk-change -----+ --host nodename ----+  --down --- --osd osd.num     ---------------------------------------+---><
+                                               '  --up   --- --disk disk_label +--+---------------------------------+-'
+                                                                                  '--weight weight --location locate'
+                                               
+Functions: change the specified disk by host and osd
+Options:
+  -h|--help:   print help
+  --down:      to prepare for change the disk 
+  --up:        initializes the new disk
+  --host:      the osd's host 
+  --osd:       the osd number
+  --disk:      the disk label
+  --weight     crush weight
+  --location   crush location
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+after version 3.5.1.2 (included):
+>> icfs-disk-change -----+ --node nodename ----+  --down ------ --slot slot  ---------------------------------------+----><
+                                               '  --up   ------ --slot slot  +--+---------------------------------+-'
+                                                                                '--weight weight --location locate'
+                                               
+Functions: change the specified disk by host and osd
+Options:
+  -h|--help:   print help
+  --down:   to prepare for change the disk 
+  --up:     initializes the new disk
+  --node:   the osd's host 
+  --slot:   slot number
+  --weight     crush weight
+  --location   crush location
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully"""
+
+#sqllit3
+#import datetime,sqlite3,fcntl,commands
+def con_db(): #get database conn and cur , when you work is done , close conn and cur .
+    commands.getoutput("mkdir -p /usr/local/db/")
+    connect_db = sqlite3.connect('/usr/local/db/tasks.db') #if not exists so ,create it!
+    cur_db = connect_db.cursor()
+    cur_db.execute('''CREATE TABLE IF NOT EXISTS task(
+        id integer primary key,
+        name varchar,
+        state varchar,
+        process varchar,
+        username varchar,
+        start_time varchar)''')
+    return connect_db,cur_db
+
+# update progress
+def update_progress(con,cur,process,starttime,task_name):
+    cur.execute("UPDATE task SET process='%d' WHERE start_time='%s' and name='%s'" % (process, starttime,task_name))
+    con.commit()
+
+def delete_task(con,cur,starttime,name):
+    cur.execute("DELETE FROM task WHERE start_time='%s' and name='%s'"%(starttime,name))
+    con.commit()
+
+# close conn
+def close_conn(con,cur):
+    try:
+        cur.close()
+    except Exception,e:
+        pass
+    try:
+        con.close()
+    except Exception,e:
+        pass
+
+#recode task log
+def write_log(level,info):
+    try:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level %s --module 'icfs-disk-change' --info '%s'"%(level,info))
+    except Exception,e:
+        pass
+
+# task done
+def task_done(con,cur,starttime,level,info,task_name):
+    #update progress = 100
+    update_progress(con, cur, 100, starttime,task_name)
+    #write log
+    write_log(level,info)
+    # delete task
+    delete_task(con, cur, starttime,task_name)
+    #close db connection
+    close_conn(con, cur)
+
+class Bucket():
+    status = None
+    name = None
+    exists = None
+    type_id = None
+    reweight = None
+    crush_weight = None
+    primary_affinity = None
+    depth = None
+    type = None
+    id = None
+    children = None
+    def __init__(self):
+        self.children = []
+    def set_value(self, key, value):
+        if key == "status":
+            self.status = value
+        if key == "name":
+            self.name = value
+        if key == "exists":
+            self.exists = value
+        if key == "type_id":
+            self.type_id = value
+        if key == "reweight":
+            self.reweight = value
+        if key == "crush_weight":
+            self.crush_weight = value
+        if key == "primary_affinity":
+            self.primary_affinity = value
+        if key == "depth":
+            self.depth = value
+        if key == "type":
+            self.type = value
+        if key == "id":
+            self.id = value
+        if key == "children":
+            self.children = value
+
+class OsInfo():
+    def __init__(self, os_name, os_version, os_edtion):
+        self.os_name = os_name
+        self.os_version = os_version
+        self.os_edtion = os_edtion
+
+def get_os_type():
+    os_info = platform.linux_distribution()
+    return OsInfo(os_info[0], os_info[1], os_info[2])
+
+def Error(num, errinfo=""):
+    if num == 100:
+        print "Error(100): Saltstack anomaly"
+    if num == 610:
+        print "Error(610): Invalid input !",errinfo
+    if num == 611:
+        print errinfo
+
+def c7_check_service_stat(host, service_name):
+# centos7 check service status
+    info = commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'systemctl status %s | grep Active:'" % (host, service_name))
+    if DEBUG == 1:
+        print "c7_check_service_stat: service: " + service_name + " info : " + info
+    if "running" in info:
+        return 1
+    else:
+        return 0
+def check_osd_stat(osd):
+# check osd status
+# osd:osd.0,osd.xx
+# run return 0; dead return 1
+    stat_info = commands.getoutput("icfs osd tree 2>/dev/null | grep -w %s | awk '{print $4}' | head -1" % (osd))
+    if DEBUG:
+        print "check_osd_stat result:",stat_info
+    if stat_info == 'up':
+        return 0
+    else:
+        return 1
+
+def get_all_crush_info():
+    bucket_list = []  # store bucket tree
+    error, infos = commands.getstatusoutput("icfs osd tree -f json 2>/dev/null")
+    if error:
+        print "Error(724): Get osd tree error", infos
+        return 1
+    try:
+        tree_json = json.loads(infos)
+        nodes_list = tree_json["nodes"]
+        for node in nodes_list:
+            bucket = Bucket()
+            for key in node.keys():
+                bucket.set_value(key, node[key])
+            bucket_list.append(bucket)
+        # down state osds
+        stary_list = tree_json["stray"]
+        for node in stary_list:
+            bucket = Bucket()
+            for key in node.keys():
+                bucket.set_value(key, node[key])
+            bucket_list.append(bucket)
+    except Exception, e:
+        print "Error(724): Get osd tree error", e
+        return 1
+    return bucket_list
+
+def rm_disk_usage_file(node):
+    commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'rm -rf /usr/bin/.disk_usage.txt' "%(node))
+    
+
+def get_osd_crush_location(osd):
+    bucket_list = get_all_crush_info()
+    printed=False
+    find=False
+    host_list = []
+    if bucket_list == 1:
+        return 1
+    for bucket in bucket_list:
+        if bucket.name == osd:
+            osd = bucket
+            find=True
+        if bucket.type != "osd":
+            host_list.append(bucket)
+    if find:
+        for host in host_list:
+            if osd.id in host.children:
+                printed = True
+                print "osdname:" + osd.name + "\tweight:" + str(osd.crush_weight) + "\tlocation:" + host.type + "=" + host.name
+        if not printed:
+            print osd.name+" is not in crush tree "
+        return 0
+    else:
+        print "there is no osd named "+osd
+        return 1
+
+def move_osd_crush_location(osd, weight, location):
+    weights = weight.split(",")
+    locations = location.split(",")
+    commands.getoutput("icfs osd crush rm %s" % (osd))
+    for index in range(len(weights)):
+        commands.getoutput("icfs osd crush add %s %s %s"% (osd, weights[index], locations[index])) 
+
+def stop_osd(host, osd):
+# stop osd. success return 0：fail return 1
+    osInfo = get_os_type()
+    osd_id = osd.split(".")[1]
+    if osInfo.os_version.startswith("7."):
+        return commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'systemctl stop icfs-osd@%s'" % (host, osd_id))
+    if osInfo.os_version.startswith("6."):
+        return commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'service icfs stop %s'" % (host, osd))
+def destroy_osd(node, osd):
+    if not check_osd_stat(osd):
+        error,info = stop_osd(node, osd)
+        if DEBUG:
+            print "destroy_osd stop_osd return"
+        if error:
+            return(error,info)
+    osd_path = "icfs-"+osd.split(".")[1]
+    error,info = commands.getstatusoutput("icfs osd crush rm %s" % (osd))
+    if error:
+        print info
+        return (error,info)
+    error,info = commands.getstatusoutput("icfs auth del %s" % (osd))
+    if error:
+        print info
+        return (error,info)
+    error,info = commands.getstatusoutput("icfs osd rm %s" % (osd))
+    if error:
+        print info
+        return (error,info)
+    error,info = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'rm -rf /var/lib/icfs/osd/icfs-%s/fsid'" % (node, osd.split(".")[1]))
+    error,info = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'rm -rf /var/lib/icfs/osd/icfs-%s/whoami'" % (node, osd.split(".")[1]))
+    error,info = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'rm -rf /var/lib/icfs/osd/icfs-%s/magic'" % (node, osd.split(".")[1]))
+    error,info = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'umount /var/lib/icfs/osd/icfs-%s'" % (node, osd.split(".")[1]))
+    if error:
+        print info
+        return (error,info)
+    error,info = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'rm -rf /var/lib/icfs/osd/icfs-%s'" % (node, osd.split(".")[1]))
+    if error:
+        print info
+        return (error,info)
+    osInfo = get_os_type()
+    if osInfo.os_version.startswith("7."):
+        # disable osd
+        error,info = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'systemctl disable icfs-osd@%s' "%(node,osd.split(".")[1]))
+        # rm systemd script
+        error,info = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'rm -rf /etc/systemd/system/icfs-osd.target.wants/icfs-osd@%s.service'" % (node, osd.split(".")[1]))
+    if osInfo.os_version.startswith("6."):
+        pass
+    return (0,"success")
+
+def down(node , slot , bg):
+    con=None
+    cur=None
+    starttime=None
+    task_name="down_osd"
+    if bg:
+        con,cur= con_db() 
+        starttime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+    # bg1. just down one osd at the same time
+    if bg:
+        result = cur.execute("SELECT * FROM task where name=?",(task_name,))
+        tasks = result.fetchall()
+        if len(tasks)!=0 :
+            print "there is one down osd task is running"
+            write_log(0,"there is one down osd task is running")
+            close_conn(con,cur)
+            return 1
+        else:
+            cur.execute("INSERT INTO task (name,state,process,username,start_time) VALUES (?,?,?,?,?)",(task_name,'running','0','root',starttime))
+            con.commit()
+    # 1.check slot osd
+    info = commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' \"icfs-system-disk --disk --checkosd | awk '{if(\\$5==%s)print \\$2,\\$3}'\"" % (node, slot))
+    if DEBUG:
+        print info
+    # bg2. update progress
+    if bg:
+        update_progress(con, cur, random.randint(10,30), starttime,task_name)
+    # 2.if osd exist , rm osd
+    osd_stat = info.split(" ")
+    if "osd" in osd_stat[1]:
+        osd = osd_stat[1]
+        if 'up' == osd_stat[0]:
+            error,info = stop_osd(node, osd)
+            if error:
+                print info 
+                if bg:
+                    task_done(con, cur, starttime, 0, info,task_name)
+                return 1
+        # clear osd info from cluster
+        error=get_osd_crush_location(osd)
+        if error:
+            if bg:
+                task_done(con, cur, starttime, 0, "osd "+osd+" does not exist", task_name)
+            return 1
+        # bg2. update progress
+        if bg:
+            update_progress(con, cur, random.randint(40,65), starttime,task_name)
+        error,info = destroy_osd(node, osd)
+        if error:
+            if bg:
+                task_done(con,cur,starttime,0,info,task_name)
+            print info
+            return 1
+        if bg:
+            task_done(con,cur,starttime,2,"down osd success!",task_name)
+    else:
+        if bg:
+            task_done(con,cur,starttime,0,"osd does not exists",task_name)
+        if DEBUG:
+            print osd_stat
+        print "osd does not exists"
+        return 1
+    print "success!"
+    return 0
+
+def downosd(node,osd,bg):
+    con=None
+    cur=None
+    starttime=None
+    task_name="down_osd"
+    if bg:
+        con,cur= con_db() 
+        starttime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+    # bg1. just down one osd at the same time
+    if bg:
+        result = cur.execute("SELECT * FROM task where name=?",(task_name,))
+        tasks = result.fetchall()
+        if len(tasks)!=0 :
+            print "there is one down osd task is running"
+            write_log(0,"there is one down osd task is running")
+            close_conn(con,cur)
+            return 1
+        else:
+            cur.execute("INSERT INTO task (name,state,process,username,start_time) VALUES (?,?,?,?,?)",(task_name,'running','0','root',starttime))
+            con.commit()
+    error,info = stop_osd(node, osd)
+    if error:
+        if bg:
+            task_done(con, cur, starttime, 0, info,task_name)
+        print info
+        return 1
+    # get osd cursh location if exists
+    error = get_osd_crush_location(osd)
+    if error:
+            if bg:
+                task_done(con, cur, starttime, 0, "osd "+osd+" does not exist", task_name)
+            return 1
+    if bg:
+        update_progress(con, cur, random.randint(30,40), starttime,task_name)
+    #destroy osd
+    error,info = destroy_osd(node, osd)
+    if error:
+        if bg:
+            task_done(con, cur, starttime, 0, info,task_name)
+        print info 
+        return 1
+    if bg:
+        task_done(con, cur, starttime, 2, "down osd success!",task_name)
+    print "success!"
+    return 0
+
+def up(node, slot, weight=None, location=None):
+    con=None
+    cur=None
+    starttime=None
+    task_name="up_osd"
+    bg=True
+    if bg:
+        con,cur= con_db() 
+        starttime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+        cur.execute("INSERT INTO task (name,state,process,username,start_time) VALUES (?,?,?,?,?)",(task_name,'running','0','root',starttime))
+        con.commit()
+    # 1.check disk on the slot
+    slot_info = commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' \"icfs-system-disk --disk --checkosd | awk '{if(\\$5==%s)print}'\" " % (node, slot))
+    info_list = slot_info.split()
+    if "Error(523)" in info_list:
+        if bg:
+            task_done(con, cur, starttime, 0, "slot %s not find"%(slot), task_name)
+        print "Error(525): Slot %s not find" % (slot)
+        return 1
+    if len(info_list) != 5:
+        if bg:
+            task_done(con, cur, starttime, 0, "slot %s not find"%(slot), task_name)
+        print "Error(525): Slot %s not find" % (slot)
+        return 1
+    if info_list[2] != "None" or info_list[3] != "None":
+        if bg:
+            task_done(con, cur, starttime, 0, "slot %s not find"%(slot), task_name)
+        print "Error(525): Slot %s not find" % (slot)
+        return 1
+    disk = info_list[0]
+    if bg:
+        update_progress(con, cur, random.randint(10,20), starttime, task_name)
+    # 2.initialize osd with the disk which on slot
+    ret = 0
+    rv = None
+    os.chdir("/home/inspur")
+    # zap disk
+    ret, info = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'icfs-disk zap %s'" % (node,disk))
+    if ret != 0:
+        if bg:
+            task_done(con, cur, starttime, 0, "disk zap error"+info, task_name)
+        print "disk zap error " + info
+        return 1
+    if bg:
+        update_progress(con, cur, random.randint(21,40), starttime, task_name)
+    time.sleep(2)
+    # prepare osd
+    commands.getstatusoutput("cp /etc/icfs/icfs.conf /home/inspur/icfs.conf")
+    ret, info = commands.getstatusoutput("icfs-deploy --overwrite-conf osd prepare %s:%s" % (node, disk))
+    if ret != 0:
+        if bg:
+            task_done(con, cur, starttime, 0, info, task_name)
+        print "icfs-deploy osd prepare error : " + info
+        return 1
+    if bg:
+        update_progress(con, cur, random.randint(81,95), starttime, task_name)
+    #commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'yes | cp -rf /proc/mounts /etc/icfs/'" % (node))
+    if weight and location:
+        time.sleep(15)
+        slot_info = commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' \"icfs-system-disk --disk --checkosd | awk '{if(\\$5==%s)print}'\"" % (node, slot))
+        osd = slot_info.split()[2]
+        if not re.match("^osd\\.\d*$",osd):
+            if bg:
+                task_done(con, cur, starttime, 0, "osd:%s create success but add to crush location failed"%(osd), task_name)
+            print "osd create success but add to crush location failed ",osd
+            return 1
+        move_osd_crush_location(osd, weight, location)
+    if bg:
+        task_done(con, cur, starttime, 2, "up osd success!", task_name)
+    print "success!"
+
+def updisk(node, disk, weight=None, location=None):
+    con=None 
+    cur=None 
+    starttime=None 
+    task_name = "up_osd"
+    bg = True
+    if bg:
+        con,cur= con_db() 
+        starttime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+        cur.execute("INSERT INTO task (name,state,process,username,start_time) VALUES (?,?,?,?,?)",(task_name,'running','0','root',starttime))
+        con.commit()
+    # initialize osd with disk label 
+    ret = 0
+    rv = None
+    os.chdir("/home/inspur")
+    # check disk mount info , if disk is mounted , should not be prepare for osd
+    error,mountinfo = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'cat /proc/mounts | grep  \"%s[0-9]*\"' " % (node, disk))
+    # when ssh return 1  commands get error = 256
+    if DEBUG:
+        print "updisk get disk mount info:",error,mountinfo
+    if mountinfo != "":
+        if bg:
+            task_done(con, cur, starttime, 0, "disk " + disk + "error info:"+mountinfo, task_name)
+        print "disk " + disk + " is mounted at this time"
+        return 1
+    if bg:
+        update_progress(con, cur, random.randint(10,20), starttime, task_name)
+    # zap disk
+    ret, info = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'icfs-disk zap %s'" % (node,disk))
+    if DEBUG:
+        print "updisk zap disk",ret,info
+    if ret != 0:
+        if bg:
+            task_done(con, cur, starttime, 0, info, task_name)
+        print "disk zap error " + info
+        return 1
+    if bg:
+        update_progress(con, cur, random.randint(20,40), starttime, task_name)
+    time.sleep(2)
+    # prepare osd
+    commands.getstatusoutput("cp /etc/icfs/icfs.conf /home/inspur/icfs.conf")
+    ret, info = commands.getstatusoutput("icfs-deploy --overwrite-conf osd prepare %s:%s" % (node, disk))
+    if DEBUG:
+        print "updisk prepare disk",ret,info
+    if ret != 0:
+        if bg:
+            task_done(con, cur, starttime, 0, info, task_name)
+        print "icfs-deploy osd prepare error : " + info
+        return 1
+    if bg:
+        update_progress(con, cur, random.randint(60,95), starttime, task_name)
+    #commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'yes | cp -rf /proc/mounts /etc/icfs/'" % (node))
+    if weight and location:
+        time.sleep(15)
+        osd_dir = mountinfo = commands.getoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' \"cat /proc/mounts | grep '%s[0-9]*' | awk '{print \\$2}' \" " % (node, disk))
+        try:
+            if len(osd_dir.split("-")) != 2:
+                if bg:
+                    task_done(con, cur, starttime, 0, "osd create success but add to crush location failed ", task_name)
+                print "osd create success but add to crush location failed ",osd_dir
+                return 1
+            osd_id = osd_dir.split("-")[1]
+            osd = "osd."+str(osd_id)
+            move_osd_crush_location(osd, weight, location)
+        except Exception, e:
+            if bg:
+                    task_done(con, cur, starttime, 0, "osd create success but add to crush location failed ", task_name)
+            print "osd create success but add to crush location failed ",e
+            return 1
+    if bg:
+        task_done(con, cur, starttime, 2, "up osd success!", task_name)
+    print "success!"
+
+if __name__ == "__main__":
+    node = None
+    opertion = None
+    slot = None
+    disk = None
+    osd = None
+    location = None
+    weight = None
+    backGround = False
+    try:
+        options, agrs = getopt.getopt(sys.argv[1:], "h", ["help", "down", "up", "node=", "slot=", "host=", "osd=", "disk=", "location=", "weight=","bg"])
+        if options == []:
+            Error(610)
+            sys.exit(1)
+        for opt, arg in options:
+            if opt in ("-h", "--help"):
+                usage()
+                exit(0)
+            elif opt in ("--node"):
+                node = arg
+            elif opt in ("--slot"):
+                slot = arg
+            elif opt in ("--down"):
+                opertion = "down"
+            elif opt in ("--up"):
+                opertion = "up"
+            elif opt in ("--host"):
+                node = arg
+            elif opt in ("--osd"):
+                osd = arg
+            elif opt in ("--disk"):
+                disk = arg
+            elif opt == "--location":
+                location = arg
+            elif opt == "--weight":
+                weight = arg
+            elif opt == "--bg":
+                backGround = True
+    except Exception, err:
+        if DEBUG == 1:
+            print "Error(610): Invalid input! ", err
+        Error(610,err)
+        sys.exit(1)
+    try:
+        if node == None:
+            Error(611, "node is none")
+            sys.exit(1)
+        if opertion == None:
+            Error(611, "opertion is none")
+            sys.exit(1)
+        if location:
+            if not weight:
+                Error(611, "--weight is none")
+                sys.exit(1)
+        if weight:
+            if not location:
+                Error(611, "--location is none")
+                sys.exit(1)
+        if location and weight:
+            if len(location.split(",")) != len(weight.split(",")):
+                Error(611, "location is not match with weight")
+        if weight:
+            for w in weight.split(","):
+                try:
+                    float(w)
+                except Exception, e:
+                    Error(611, "weight must be float or int")
+                    sys.exit(1)
+        
+        if opertion == "up":
+            if slot != None:
+                if backGround:
+                    weight_opt=""
+                    location_opt = ""
+                    if weight:
+                        weight_opt = "--weight "+weight
+                    if location != None:
+                        location_opt = "--location "+location
+                    subprocess.call("icfs-disk-change --up --node %s --slot %s %s %s > /dev/null &"%(node,slot,weight_opt,location_opt),shell=True)
+                else:
+                    sys.exit(up(node, slot,weight,location))
+            elif disk != None:
+                if backGround:
+                    weight_opt=""
+                    location_opt = ""
+                    if weight:
+                        weight_opt = "--weight "+weight
+                    if location != None:
+                        location_opt = "--location "+location
+                    subprocess.call("icfs-disk-change --up --node %s --disk %s %s %s > /dev/null &"%(node,disk,weight_opt,location_opt),shell=True)
+                else:
+                    sys.exit(updisk(node, disk,weight,location))
+            else:
+                print "Error(610): Invalid input! please input --slot"
+                sys.exit(1)
+        if opertion == "down":
+            if slot != None:
+                if backGround:
+                    subprocess.call("icfs-disk-change --down --node %s --slot %s > /dev/null &"%(node,slot),shell=True)
+                else:
+                    sys.exit(down(node, slot,True))
+            elif osd != None:
+                if backGround:
+                    subprocess.call("icfs-disk-change --down --node %s --osd %s > /dev/null &"%(node,osd),shell=True)
+                else:
+                    sys.exit(downosd(node, osd,True))
+            else:
+                print "Error(610): Invalid input! please input --slot"
+                sys.exit(1)
+        sys.exit(0) 
+    except Exception,e:
+        Error(611,e)
+        sys.exit(1)

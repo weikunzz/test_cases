@@ -1,0 +1,131 @@
+#!/usr/bin/env python
+# -*- copyright -*-
+# coding:utf-8
+
+
+import sys
+import re
+import subprocess
+import getopt
+
+
+def _run_shell(cmd):
+    com = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+    stdout, stderr = com.communicate()
+    code = com.wait()
+    return code, stdout, stderr
+
+
+def _check_disk_is_ssd(device):
+    error, stdout, stderr = _run_shell("lsblk %s -n -d -o ROTA" % device)
+    if stdout.strip() == "0":
+        return True
+    else:
+        return False
+
+
+def get_all_ssd():
+    """
+    get disk label
+    :return: hard disk node list . ide: hd*  sas/sast: sd*  virtio: vd*
+    """
+    error, labels, stderr = _run_shell("ls /sys/block")
+    if error:
+        print stderr
+        sys.exit(1)
+    labels = labels.splitlines()
+    labels = ["/dev/"+label for label in labels if re.match("^(sd|hd|vd).*", label)]
+    ssds = [device for device in labels if _check_disk_is_ssd(device)]
+    return ssds
+
+
+def get_ssd_media_wearout_indicator(device):
+    # intel ssd: Media_Wearout_Indicator
+    # samsung ssd: Wear_Leveling_Count
+    error, stdout, stderr = _run_shell("smartctl --attributes %s" % device)
+    if error:
+        print stderr
+        return -1
+    for line in stdout.splitlines():
+        if "Media_Wearout_Indicator" in line or "Wear_Leveling_Count" in line:
+            return line.split()[3]
+
+
+def check_ssd_abrasion(device, low, mid, high):
+    if not device:
+        ssds = get_all_ssd()
+    else:
+        if not _check_disk_is_ssd(device):
+            print device, ' is not a ssd'
+            sys.exit(1)
+        else:
+            ssds = [device]
+    return_list = []
+    return_code = 0
+    for ssd in ssds:
+        indicator = get_ssd_media_wearout_indicator(ssd)
+        indicator = 100 - int(indicator)
+        code = 0
+        if indicator > low:
+            code = 1
+            return_list.append(ssd+":"+str(indicator))
+        return_code = max(return_code, code)
+    return return_code, return_list
+
+
+def usage():
+    print """Usage:
+>>-- check_icfs_ssd_health--- low --- mid --- high --- [device] ----><
+query ssd abrasion.
+positional parameter:
+  low       low abrasion threshold value (integer)
+  mid       middle abrasion threshold value (integer)
+  high      high abrasion threshold value (integer)
+  device    ssd device path
+options:
+  -h|--help   print this information
+"""
+
+
+if __name__ == "__main__":
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], 'h', ["help"])
+    except getopt.GetoptError, err:
+        print "Error(610): Invalid input!"
+        print err
+        usage()
+        sys.exit(1)
+    if not args:
+        usage()
+        sys.exit(1)
+    low = 0
+    mid = 0
+    high = 0
+    device = None
+    for key, value in opts:
+        if key == "-h" or key == "--help":
+            usage()
+            sys.exit(0)
+    try:
+        if len(args) == 4:
+            low = int(args[0])
+            mid = int(args[1])
+            high = int(args[2])
+            device = args[3]
+        elif len(args) == 3:
+            low = int(args[0])
+            mid = int(args[1])
+            high = int(args[2])
+        else:
+            print "Error(610): Invalid input!"
+            usage()
+            sys.exit(1)
+    except Exception, e:
+        print "Error(610): Invalid input!"
+        print e
+        usage()
+        sys.exit(1)
+    code, info = check_ssd_abrasion(device, low, mid, high)
+    for result in info:
+        print result
+    sys.exit(code)

@@ -1,0 +1,121 @@
+#!/usr/bin/python
+# coding:utf-8
+
+import re
+import sys
+import getopt
+import commands
+
+
+def usage():
+    print """Help(-h|--help) for icfs-system:
+Usage:
+>> icfs-system ---- --query ----><
+Functions: query detailed information about cluster system
+Options:
+  --query:  query cluster name, system version, health status, disks, volumes and fsid
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully """
+
+
+def error(num):
+    if num == 500:
+        print "Error(500): can not get cluster version"
+    # elif num==600:
+    #    print "Error(600): can not parser options!"
+    # elif num==605:
+    #    print "Error(605): can not parser arguments"
+    elif num == 610:
+        print "Error(610): Invalid input!"
+    elif num == 620:
+        print "Error(620): Can not get icfs service information"
+
+
+def sys_query():
+    # query cluster version
+    ver_stat, ver_relt = commands.getstatusoutput("icfs -v|awk '$1~/icfs/&&$2~/version/{print $3}'")
+    if not ver_relt:
+        error(500)
+        sys.exit(1)
+    # query health status
+    sys_stat, sys_relt = commands.getstatusoutput("icfs -s 2>/dev/null")
+    pat_health = re.compile(r'health ([A-Z]+_[A-Z]+)')
+    sea_health = pat_health.search(sys_relt)
+    if not sea_health:
+        error(620)
+        sys.exit(1)
+    health_retn = sea_health.group(1)
+    if health_retn == "HEALTH_OK":
+        health_val = "Healthy"
+    elif health_retn == "HEALTH_WARN":
+        health_val = "Warning"
+    else:
+        health_val = "Critical"
+
+    # query disks
+    pat_disk = re.compile(r'osdmap .*: (\d+) osds: (\d+) up,')
+    sea_disk = pat_disk.search(sys_relt)
+    if not sea_disk:
+        error(620)
+        sys.exit(1)
+    disk_total = sea_disk.group(1)
+    disk_up = sea_disk.group(2)
+
+    # query volumes
+    pat_vol = re.compile(r'(\d+ \w+) used, (\d+ \w+) / (\d+ \w+) avail')
+    sea_vol = pat_vol.search(sys_relt)
+    if not sea_vol:
+        error(620)
+        sys.exit(1)
+    vol_total = sea_vol.group(3)
+    vol_used = sea_vol.group(1)
+
+    pat_id = re.compile(r'cluster (\w+-\w+-.*)')
+    sea_id = pat_id.search(sys_relt)
+    if not sea_id:
+        error(620)
+        sys.exit(1)
+    fs_id = sea_id.group(1)
+
+    print "Cluster Name: AS13000"
+    print "Version: V%s" % ver_relt
+    print "Health Status: %s" % health_val
+    print "Disks: % s / % s" % (disk_total, disk_up)
+    print "Volumes: % s / % s" % (vol_total, vol_used)
+    print "Fsid: %s" % fs_id
+
+
+def sys_data_type():
+    osd_dump = commands.getoutput("/usr/bin/icfs osd tree 2>/dev/null|grep _n1")
+    if osd_dump:
+        print 1
+    else:
+        print 0
+
+
+if __name__ == "__main__":
+    opera = None
+    if len(sys.argv[0:]) != 2 or not sys.argv[1] in ("-h", "--help", "--query", "--datatype"):
+        error(610)
+        sys.exit(1)
+
+    try:
+        opts, args = getopt.getopt(sys.argv[1:], 'h', ["query", "help", "datatype"])
+    except getopt.GetoptError, err:
+        error(610)
+        sys.exit(1)
+
+    for a, b in opts:
+        if a in ("-h", "--help"):
+            usage()
+            sys.exit(0)
+        if a in "--query":
+            opera = "query"
+        if a in "--datatype":
+            opera = "data_type"
+
+    if opera == "query":
+        sys_query()
+    if opera == "data_type":
+        sys_data_type()

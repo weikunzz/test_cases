@@ -1,0 +1,1758 @@
+#!/usr/bin/python
+# coding:utf-8
+'''
+#change log list
+modify at 2016-12-13 by huper. modify #print "Error(610): Invalid input! "+err# to #print "Error(610): Invalid input! ",err#
+modify at 2017-01-10 by huper. add romote user quota support
+modify at 2017-02-23 by huper. query all groups or users quota, ad user type error in result
+'''
+import os
+import sys
+import re
+import json
+import commands
+import pwd
+import grp
+from icfs_util import NewConfigParser
+from icfs_util import IcfsVersion
+from icfs_util import run_remote_cmd, run_local_cmd
+import OptParser
+
+
+def unit_convert(size):
+    try:
+        symbols = ('KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
+        prefix = {}
+        for i, s in enumerate(symbols):
+            prefix[s] = 1 << (i + 1) * 10
+        for s in reversed(symbols):
+            if size >= prefix[s]:
+                value = float(size) / prefix[s]
+                return '%.1f%s' % (value, s)
+        return "%sB" % size
+    except (ValueError, TypeError), err:
+        print "Error(553): Unknown error ", "Convert size %s failed: %s" % (size, err)
+        sys.exit(1)
+
+
+# create by huper 
+SETWORNING = 0
+DEBUG = 0
+MOUNT_POINT = "/mnt/icfs"  # icfs default mount point
+SALT_WORK_PATH = "/srv/salt/"
+
+
+def usage():
+    print """Help(-h|--help)for icfs-admin-quota:
+Usage:
+>> icfs-admin-quota --+ --set    +--+ -u user_name  +--+ --hardlimit hardlimit --softlimit softlimit --accurary accurary +--><
+                      ' --modify '  ' -g group_name '  ' --filelimit ----------------------------------------------------'
+Options:
+  --set:       set user quota
+  --modify:    modify user quota
+  -u:          user name
+  -g:          group name
+  --hardlimit: hardlimit must be integer  G|T
+  --softlimit: softlimit must be integer  G|T
+  --accurary:  accurary must be integer   M
+  --filelimit  file limit must be integer
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>> icfs-admin-quota ---- --delete --+ --size +--+ -u user_name  +--><
+                                    ' --file '  + -g group_name +
+                                                + --user        +
+                                                ' --group       '
+Options:
+  --delete:    delete user quota
+  --size:      user size quota
+  --file:      user file quota
+  -u:          user name,two or more user split with ','
+  -g:          group name, two or more group split with ','
+  --user:      all users
+  --group:     all groups
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>> icfs-admin-quota ---- --query --+ --size +--+ -u user_name  -----------------------+----><
+                                   ' --file '  ' -g group_name --+-----------------+--'
+                                                                 ' --type usertype '
+Options:
+  --query:     query user quota
+  --size:      user size quota
+  --file:      user file quota
+  -u:          user name
+  -g:          group name
+  --user:      all users
+  --group:     all groups
+  --type:      user type
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+  
+>> icfs-admin-quota --+-- --start --+--+-- --dir --+--><
+                      '-- --stop   '   +-- --file --+
+                                       '-- --user --'
+Functions: Start/Stop quota
+Options:
+    --start: start command
+    --stop:  stop command
+    --dir: start the dir quota
+    --file: start the file statistics function
+    --user: start the user quota
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+>> icfs-admin-quota --+ --set    +---- --dir ---- --limit limit ---- -p path ----><
+                      ' --modify '
+Options:
+  --set:       set directory quota
+  --modify:    modify directory quota
+  --dir:       directory quota
+  --limit:     limit must be integer  G|T
+  -p:          directory path
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>> icfs-admin-quota ---- --delete ---- --dir ---- -p path ----><
+Options:
+  --delete:    delete directory quota
+  --dir:       directory quota
+  -p:          directory path
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>> icfs-admin-quota ---- --query ---- --dir ---- -p path ----><
+Options:
+  --query:     query directory quota
+  --dir:       directory quota
+  -p:          directory path
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+"""
+
+
+def debug(function_name, info, obj=None):
+    if DEBUG:
+        if obj is None:
+            sys.stderr.write("---------\n")
+            sys.stderr.write("[debug info] function:" + function_name + " info:" + info + "\n")
+            sys.stderr.write("---------\n")
+        else:
+            sys.stderr.write("---------\n")
+            sys.stderr.write("[debug info] function:" + function_name + " info:" + info)
+            sys.stderr.write("---------\n")
+            # parsing obj 
+
+
+def push_file_to_minion(file_need_to_push):
+    # 1、chekc salt
+    if not os.path.exists(SALT_WORK_PATH):
+        os.makedirs(SALT_WORK_PATH)
+    # 2、check file_need_to_push
+    if not os.path.exists(file_need_to_push):
+        print "Error(512): File " + file_need_to_push + " not find"
+    # 3、copy salt workdir sync
+    else:
+        file_name = file_need_to_push.split("/")[-1]
+        if os.path.exists(SALT_WORK_PATH + file_name):
+            commands.getoutput("rm -f %s" % (SALT_WORK_PATH + file_name))
+        commands.getstatusoutput("cp %s %s" % (file_need_to_push, SALT_WORK_PATH))
+        # sync conf
+        commands.getstatusoutput("salt '*' cp.get_file salt://%s %s" % (file_name, file_need_to_push))
+        commands.getoutput("rm -f %s" % (SALT_WORK_PATH + file_name))
+
+
+# validationg data
+def change_quota_value(target_unit, data_name, data_value):
+    if data_value is None:
+        print "Error(610): Invalid input! need option:" + data_name
+        sys.exit(1)
+    data_value = data_value.upper()
+    unit = 1
+    if "limit" in data_name:
+        try:
+            data_value = int(data_value)
+            unit = 1024 * 1024 * 1024
+            data_value = str(data_value) + "G"
+        except (TypeError, ValueError):
+            if data_value[-1] == "T":
+                unit = 1024 * 1024 * 1024 * 1024
+            elif data_value[-1] == "G":
+                unit = 1024 * 1024 * 1024
+            else:
+                print "Error(610): Invalid input! " + data_name + ":" + data_value + "  is error"
+                sys.exit(1)
+    if "accurary" in data_name:
+        # no unit is MB
+        try:
+            data_value = int(data_value)
+            unit = 1024 * 1024
+            data_value = str(data_value) + "M"
+        except (TypeError, ValueError):
+            if data_value[-1] == "G":
+                # unit=1024*1024*1024
+                print "Error(610): Invalid input!  --accurary shoud be Mbytes"
+                sys.exit(1)
+            elif data_value[-1] == "M":
+                unit = 1024 * 1024
+            else:
+                print "Error(610): Invalid input!  " + data_name + ":" + data_value + "  is error"
+                sys.exit(1)
+    try:
+        data_value = int(data_value[0:-1])
+    except (TypeError, ValueError):
+        print "Error(610): Invalid input!  type error"
+        sys.exit(1)
+    data_value *= unit
+    if target_unit == "K":
+        return data_value / 1024
+    if target_unit == "M":
+        return data_value / 1024 / 1024
+    elif target_unit == "G":
+        return data_value / 1024 / 1024 / 1024
+    elif target_unit == "T":
+        return data_value / 1024 / 1024 / 1024 / 1024
+
+
+def check_file_limit(filelimit):
+    try:
+        file_limit_number = long(filelimit)
+        if file_limit_number < 0 or file_limit_number > 4200000000:
+            print "Error(561): File quota must be integer between 0 included and 4200000000 included"
+            sys.exit(1)
+    except (TypeError, ValueError):
+        print "Error(561): File quota must be integer between 0 included and 4200000000 included"
+        sys.exit(1)
+
+
+def get_uid_by_name(user_name):
+    try:
+        user_info = pwd.getpwnam(user_name)
+        return user_info.pw_uid
+    except KeyError:
+        print "Error(513): Can't find user : " + user_name
+        return -1
+
+
+def get_gid_by_name(group_name):
+    try:
+        group_info = grp.getgrnam(group_name)
+        return group_info.gr_gid
+    except KeyError:
+        print "Error(514): Can't find group : " + group_name
+        return -1
+
+
+def get_user_uid_gid(name):
+    # return uid,gid
+    try:
+        user_info = pwd.getpwnam(name)
+        return user_info.pw_uid, user_info.pw_gid
+    except KeyError:
+        return -1, -1
+
+
+def quota_error(quota_stat, quota_out):
+    if 'Unknown error 601' in quota_out :
+        return 'Error(540): Quota already set'
+        # sys.exit(1)
+    elif 'Unknown error 602' in quota_out:
+        return 'Error(541): Quota not set'
+        # sys.exit(1)
+    elif 'Unknown error 603' in quota_out:
+        return 'Error(542): Hardlimit less than softlimit'
+        # sys.exit(1)
+    elif 'Unknown error 604' in quota_out:
+        return 'Error(543): Hardlimit less than used'
+        # sys.exit(1)
+    elif 'Unknown error 605' in quota_out:
+        return 'Error(544): Hardlimit bigger than disk'
+        # sys.exit(1)
+    elif 'Unknown error 606' in quota_out:
+        return 'Error(545): The user or group has some files'
+        # sys.exit(1)
+    elif 'Unknown error 607' in quota_out:
+        return 'Error(546): Accurary less than 200M'
+        # sys.exit(1)
+    elif 'Unknown error 608' in quota_out:
+        return 'Error(547): Mds error'
+        # sys.exit(1)
+    elif 'Unknown error 610' in quota_out:
+        return 'Error(548): User quota or group quota total num max'
+        # sys.exit(1)
+    elif 'Unknown error 611' in quota_out:
+        return 'Error(549): Invalid user'
+        # sys.exit(1)
+    elif 'Unknown error 612' in quota_out:
+        return 'Error(550): Invalid group'
+        # sys.exit(1)
+    elif 'Unknown error 613' in quota_out:
+        return 'Error(551): User quota bigger than group quota'
+        # sys.exit(1)
+    elif 'Unknown error 614' in quota_out:
+        return 'Error(552): Group quota less than all user quota'
+        # sys.exit(1)
+    elif 'Unknown error 617' in quota_out:
+        return 'Error(560): File quota less than existing file number'
+        # sys.exit(1)
+    elif 'Unknown error 618' in quota_out:
+        return "Error(561): File quota must be integer between 0 included and 4200000000 included"
+        # sys.exit(1)
+    elif 'Unknown error 619' in quota_out:
+        return 'Error(560): File quota less than existing file number'
+        # sys.exit(1)
+    elif quota_stat != 0:
+        return "Error(553): Unknown error " + quota_out
+        # sys.exit(1)
+    else:
+        return 0
+
+
+# check directory quota status
+def check_dir_quota_status():
+    socket_file = "/run/icfs/icfs-client.admin.asok"
+    if not os.path.exists(socket_file):
+        print "Error(1600): Directory quota is disabled"
+        sys.exit(1)
+
+    quota_ret = run_local_cmd("icfs daemon %s config get client_dir_quota 2>/dev/null" % socket_file)
+    thin_ret = run_local_cmd("icfs daemon %s config get client_fs_provisioning 2>/dev/null" % socket_file)
+    if quota_ret["retcode"] != 0 or thin_ret["retcode"] != 0:
+        print "Error(1600): Directory quota is disabled"
+        sys.exit(1)
+
+    try:
+        quota_dict = json.loads(quota_ret["stdout"])
+        thin_dict = json.loads(thin_ret["stdout"])
+    except ValueError:
+        print "Error(1600): Directory quota is disabled"
+        sys.exit(1)
+
+    # check directory quota status
+    if quota_dict["client_dir_quota"] != "true":
+        print "Error(1600): Directory quota is disabled"
+        sys.exit(1)
+
+    # check conflict configration: client_fs_provisioning
+    if thin_dict["client_fs_provisioning"] == "true":
+        print "Error(1602): Directory quota is conflict with thin provisioning, please disable thin provisioning first"
+        sys.exit(1)
+
+
+# check user size quota status
+def check_user_size_quota_status():
+    socket_file = "/run/icfs/icfs-client.admin.asok"
+    if not os.path.exists(socket_file):
+        print "Error(1607): User size quota is disabled"
+        sys.exit(1)
+
+    quota_ret = run_local_cmd("icfs daemon %s config get client_user_quota 2>/dev/null" % socket_file)
+    if quota_ret["retcode"] != 0:
+        print "Error(1607): User size quota is disabled"
+        sys.exit(1)
+
+    try:
+        quota_dict = json.loads(quota_ret["stdout"])
+    except ValueError:
+        print "Error(1607): User size quota is disabled"
+        sys.exit(1)
+
+    # check user size quota status
+    if quota_dict["client_user_quota"] != "true":
+        print "Error(1607): User size quota is disabled"
+        sys.exit(1)
+
+
+# check user file quota status
+def check_user_file_quota_status():
+    socket_file = "/run/icfs/icfs-client.admin.asok"
+    if not os.path.exists(socket_file):
+        print "Error(1608): User file quota is disabled"
+        sys.exit(1)
+
+    quota_ret = run_local_cmd("icfs daemon %s config get client_file_quota 2>/dev/null" % socket_file)
+    if quota_ret["retcode"] != 0:
+        print "Error(1608): User file quota is disabled"
+        sys.exit(1)
+
+    try:
+        quota_dict = json.loads(quota_ret["stdout"])
+    except ValueError:
+        print "Error(1608): User file quota is disabled"
+        sys.exit(1)
+
+    # check user file quota status
+    if quota_dict["client_file_quota"] == "false":
+        print "Error(1608): User file quota is disabled"
+        sys.exit(1)
+
+
+# configuration warning module
+def threshold_set(str, name, threshold):
+    # pat = "max_check_attempts[\t|\s]*\d*#"+str
+    pat1 = "check_command[\s|\t]*" + str + ".*"
+    try:
+        with open("/usr/local/nagios/etc/objects/services.cfg") as metric_threshold_open:
+            metric_threshold_read = metric_threshold_open.read()
+        find_check_command = re.findall(pat1, metric_threshold_read)
+        if find_check_command == []:
+            print "Error(1002): Metric information not in configuration file"
+            sys.exit(1)
+        else:
+            find_check_command_split = find_check_command[0].split('!')
+            if len(find_check_command_split) != 3:
+                print "Error(515): Default quota error"
+                sys.exit(1)
+            if str == 'check_dir_quota!' and name in find_check_command_split[1]:
+                print 'Error(540): Quota already set '
+                sys.exit(1)
+            user_group_dir = find_check_command_split[1] + ',' + name
+            user_group_dir_quota = find_check_command_split[2] + ',' + threshold
+            if user_group_dir.startswith('None'):
+                user_group_dir = user_group_dir.strip('None,')
+            if user_group_dir_quota.startswith('0'):
+                user_group_dir_quota = user_group_dir_quota.strip('0,')
+            metric_threshold_str = "check_command\t\t%s%s!%s" % (str, user_group_dir, user_group_dir_quota)
+            metric_threshold_modify = re.sub(pat1, metric_threshold_str, metric_threshold_read)
+        with open("/usr/local/nagios/etc/objects/services.cfg", "w") as metric_threshold_write:
+            metric_threshold_write.write(metric_threshold_modify)
+            commands.getoutput("service nagios reload")
+    except Exception, err:
+        print "Error(1101): Configuration file operation FAILED", err
+        sys.exit(1)
+
+
+def threshold_delete(str, name):
+    pat1 = "check_command[\s|\t]*" + str + ".*"
+    try:
+        with open("/usr/local/nagios/etc/objects/services.cfg") as metric_threshold_open:
+            metric_threshold_read = metric_threshold_open.read()
+        find_check_command = re.findall(pat1, metric_threshold_read)
+        if find_check_command == []:
+            print "Error(1002): Metric information not in configuration file"
+            sys.exit(1)
+        else:
+            find_check_command_split = find_check_command[0].split('!')
+            if len(find_check_command_split) != 3:
+                print "Error(515): Default quota error"
+                sys.exit(1)
+            if name != 'None':
+                user_group_dir = find_check_command_split[1].split(',')
+                user_group_dir_quota = find_check_command_split[2].split(',')
+                if len(user_group_dir) != len(user_group_dir_quota):
+                    print 'Error(516): Error in services.sfg'
+                    sys.exit(1)
+                elif user_group_dir[0] == 'None' or 'None' in user_group_dir :
+                    print 'Error(516): Error in services.sfg'
+                    sys.exit(1)
+                elif name not in user_group_dir:
+                    print 'Error(517): error %s not in services.sfg' % name
+                    sys.exit(1)
+                elif len(user_group_dir) == 1 and user_group_dir[0] == name:
+                    user_group_dir = ['None']
+                    user_group_dir_quota = ['0']
+                elif len(user_group_dir) > 1:
+                    user_group_dir_quota.remove(user_group_dir_quota[user_group_dir.index(name)])
+                    user_group_dir.remove(name)
+                user_group_dir = ','.join(user_group_dir)
+                user_group_dir_quota = ','.join(user_group_dir_quota)
+
+            else:
+                user_group_dir = 'None'
+                user_group_dir_quota = '0'
+
+            metric_threshold_str = "check_command\t\t%s%s!%s" % (str, user_group_dir, user_group_dir_quota)
+            metric_threshold_modify = re.sub(pat1, metric_threshold_str, metric_threshold_read)
+        with open("/usr/local/nagios/etc/objects/services.cfg", "w") as metric_threshold_write:
+            metric_threshold_write.write(metric_threshold_modify)
+            commands.getoutput("service nagios reload")
+    except Exception, err:
+        print "Error(1101): Configuration file operation FAILED"
+        sys.exit(1)
+
+
+def threshold_modify(str, name, quota):
+    pat1 = "check_command[\s|\t]*" + str + ".*"
+    try:
+        with open("/usr/local/nagios/etc/objects/services.cfg") as metric_threshold_open:
+            metric_threshold_read = metric_threshold_open.read()
+        find_check_command = re.findall(pat1, metric_threshold_read)
+        if find_check_command == []:
+            print "Error(1002): Metric information not in configuration file"
+            sys.exit(1)
+        else:
+            find_check_command_split = find_check_command[0].split('!')
+            if len(find_check_command_split) != 3:
+                print "Error(515): Default quota error"
+                sys.exit(1)
+            user_group_dir = find_check_command_split[1].split(',')
+            user_group_dir_quota = find_check_command_split[2].split(',')
+            if len(user_group_dir) != len(user_group_dir_quota):
+                print 'Error(516): Error in services.sfg'
+                sys.exit(1)
+            elif user_group_dir[0] == 'None' or 'None' in user_group_dir :
+                print 'Error(516): Error in services.sfg'
+                sys.exit(1)
+            elif name not in user_group_dir:
+                print 'Error(517): error %s not in services.sfg' % name
+                sys.exit(1)
+            else:
+                user_group_dir_quota[user_group_dir.index(name)] = quota
+            user_group_dir = ','.join(user_group_dir)
+            user_group_dir_quota = ','.join(user_group_dir_quota)
+
+            metric_threshold_str = "check_command\t\t%s%s!%s" % (str, user_group_dir, user_group_dir_quota)
+            metric_threshold_modify = re.sub(pat1, metric_threshold_str, metric_threshold_read)
+        with open("/usr/local/nagios/etc/objects/services.cfg", "w") as metric_threshold_write:
+            metric_threshold_write.write(metric_threshold_modify)
+            commands.getoutput("service nagios reload")
+    except Exception, err:
+        print "Error(1101): Configuration file operation FAILED"
+        sys.exit(1)
+
+
+def set_user_size_quota(username, hardlimit, softlimit, accurary, path):
+    # from 3531   setfattr -n userquota.set -v uid:gid:hard:soft:acc mountpoint
+    # berore 3531 setfattr -n userquota.set -v uid:hard:soft;acc mountpoint
+    # check user is exist or not
+    uid, gid = get_user_uid_gid(username)
+    if uid == -1:
+        sys.exit(1)
+
+    if IcfsVersion.current_version() >= IcfsVersion("3.5.3.1"):
+        quota_stat, quota_out = commands.getstatusoutput("setfattr -n userquota.set -v %s:%s:%s:%s:%s %s"
+                                                         % (uid, gid, hardlimit, softlimit, accurary, path))
+    else:
+        quota_stat, quota_out = commands.getstatusoutput("setfattr -n userquota.set -v %s:%s:%s:%s %s"
+                                                         % (uid, hardlimit, softlimit, accurary, path))
+    debug("user_quota:1", quota_out)
+    flag = quota_error(quota_stat, quota_out)
+    if str(flag) != "0":
+        print flag
+        sys.exit(1)
+    if SETWORNING:
+        threshold_set('check_user_quota!', username, softlimit)
+    print "set success!"
+    return 0
+
+
+def set_group_size_quota(groupname, hardlimit, softlimit, accurary, path):
+    # check group is exist or not
+    gid = get_gid_by_name(groupname)
+    if gid == -1:
+        sys.exit(1)
+
+    quota_stat, quota_out = commands.getstatusoutput("setfattr -n groupquota.set -v %s:%s:%s:%s %s"
+                                                     % (gid, hardlimit, softlimit, accurary, path))
+    debug("group_quota:1", quota_out)
+    flag = quota_error(quota_stat, quota_out)
+    if str(flag) != "0":
+        print flag
+        sys.exit(1)
+    if SETWORNING:
+        threshold_set('check_group_quota!', groupname, softlimit)
+    print "set success!"
+    sys.exit(0)
+
+
+def set_size_quota(username, groupname, hardlimit, softlimit, accurary, path):
+    # check user size quota status
+    check_user_size_quota_status()
+    # validating data
+    hardlimit = change_quota_value("G", "--hardlimit", hardlimit)
+    softlimit = change_quota_value("G", "--softlimit", softlimit)
+    accurary = change_quota_value("M", "--accurary", accurary)
+
+    if username is not None:
+        set_user_size_quota(username, hardlimit, softlimit, accurary, path)
+    elif groupname is not None:
+        set_group_size_quota(groupname, hardlimit, softlimit, accurary, path)
+    else:
+        print "Error(610): Invalid input! need -u or -g"
+        sys.exit(1)
+
+
+def modify_user_size_quota(username, hardlimit, softlimit, accurary, path):
+    # from 3531   setfattr -n userquota.modify -v uid:gid:hard:soft:acc mountpoint
+    # berore 3531 setfattr -n userquota.modify -v uid:hard:soft;acc mountpoint
+    # check user is exist or not
+    uid, gid = get_user_uid_gid(username)
+    if uid == -1:
+        sys.exit(1)
+
+    if IcfsVersion.current_version() >= IcfsVersion("3.5.3.1"):
+        quota_stat, quota_out = commands.getstatusoutput("setfattr -n userquota.modify -v %s:%s:%s:%s:%s %s"
+                                                         % (uid, gid, hardlimit, softlimit, accurary, path))
+    else:
+        quota_stat, quota_out = commands.getstatusoutput("setfattr -n userquota.modify -v %s:%s:%s:%s %s"
+                                                         % (uid, hardlimit, softlimit, accurary, path))
+    debug("user_quota:2", quota_out)
+    flag = quota_error(quota_stat, quota_out)
+    if str(flag) != "0":
+        print flag
+        sys.exit(1)
+    if SETWORNING:
+        threshold_modify('check_user_quota!', username, softlimit)
+    print "modify success!"
+    return 0
+
+
+def modify_group_size_quota(groupname, hardlimit, softlimit, accurary, path):
+    # check group is exist or not
+    gid = get_gid_by_name(groupname)
+    if gid == -1:
+        sys.exit(1)
+
+    quota_stat, quota_out = commands.getstatusoutput("setfattr -n groupquota.modify -v %s:%s:%s:%s %s"
+                                                     % (gid, hardlimit, softlimit, accurary, path))
+    debug("group_quota:2", quota_out)
+    flag = quota_error(quota_stat, quota_out)
+    if str(flag) != "0":
+        print flag
+        sys.exit(1)
+    if SETWORNING:
+        threshold_modify('check_group_quota!', groupname, softlimit)
+    print "modify success!"
+    sys.exit(0)
+
+
+def modify_size_quota(username, groupname, hardlimit, softlimit, accurary, path):
+    # check user size quota status
+    check_user_size_quota_status()
+    # validating data
+    hardlimit = change_quota_value("G", "--hardlimit", hardlimit)
+    softlimit = change_quota_value("G", "--softlimit", softlimit)
+    accurary = change_quota_value("M", "--accurary", accurary)
+
+    if username is not None:
+        modify_user_size_quota(username, hardlimit, softlimit, accurary, path)
+    elif groupname is not None:
+        modify_group_size_quota(groupname, hardlimit, softlimit, accurary, path)
+    else:
+        print "Error(610): Invalid input! need -u or -g"
+        sys.exit(1)
+
+
+def set_user_file_quota(username, filelimit, path):
+    # check user is exist or not
+    uid, gid = get_user_uid_gid(username)
+    if uid == -1:
+        sys.exit(1)
+
+    quota_stat, quota_out = commands.getstatusoutput("setfattr -n icfs.userfile.set -v %s:%s:%s %s"
+                                                     % (uid, gid, filelimit, path))
+    debug("user_quota:1", quota_out)
+    flag = quota_error(quota_stat, quota_out)
+    if str(flag) != "0":
+        print flag
+        sys.exit(1)
+    if SETWORNING:
+        threshold_set('check_user_quota!', username, filelimit)
+    print "set success!"
+    return 0
+
+
+def set_group_file_quota(groupname, filelimit, path):
+    # check group is exist or not
+    gid = get_gid_by_name(groupname)
+    if gid == -1:
+        sys.exit(1)
+
+    quota_stat, quota_out = commands.getstatusoutput("setfattr -n icfs.groupfile.set -v %s:%s %s"
+                                                     % (gid, filelimit, path))
+    debug("group_quota:1", quota_out)
+    flag = quota_error(quota_stat, quota_out)
+    if str(flag) != "0":
+        print flag
+        sys.exit(1)
+    if SETWORNING:
+        threshold_set('check_group_quota!', groupname, filelimit)
+    print "set success!"
+    sys.exit(0)
+
+
+def set_file_quota(username, groupname, filelimit, path):
+    # check user file quota status
+    check_user_file_quota_status()
+    # validating data
+    check_file_limit(filelimit)
+
+    if username is not None:
+        set_user_file_quota(username, filelimit, path)
+    elif groupname is not None:
+        set_group_file_quota(groupname, filelimit, path)
+    else:
+        print "Error(610): Invalid input! need -u or -g"
+        sys.exit(1)
+
+
+def modify_user_file_quota(username, filelimit, path):
+    # check user is exist or not
+    uid, gid = get_user_uid_gid(username)
+    if uid == -1:
+        sys.exit(1)
+
+    quota_stat, quota_out = commands.getstatusoutput("setfattr -n icfs.userfile.modify -v %s:%s:%s %s"
+                                                     % (uid, gid, filelimit, path))
+    debug("user_quota:2", quota_out)
+    flag = quota_error(quota_stat, quota_out)
+    if str(flag) != "0":
+        print flag
+        sys.exit(1)
+    if SETWORNING:
+        threshold_modify('check_user_quota!', username, filelimit)
+    print "modify success!"
+    return 0
+
+
+def modify_group_file_quota(groupname, filelimit, path):
+    # check group is exist or not
+    gid = get_gid_by_name(groupname)
+    if gid == -1:
+        sys.exit(1)
+
+    quota_stat, quota_out = commands.getstatusoutput("setfattr -n icfs.groupfile.modify -v %s:%s %s"
+                                                     % (gid, filelimit, path))
+    debug("group_quota:2", quota_out)
+    flag = quota_error(quota_stat, quota_out)
+    if str(flag) != "0":
+        print flag
+        sys.exit(1)
+    if SETWORNING:
+        threshold_modify('check_group_quota!', groupname, filelimit)
+    print "modify success!"
+    sys.exit(0)
+
+
+def modify_file_quota(username, groupname, filelimit, path):
+    # check user file quota status
+    check_user_file_quota_status()
+    # validating data
+    check_file_limit(filelimit)
+
+    if username is not None:
+        modify_user_file_quota(username, filelimit, path)
+    elif groupname is not None:
+        modify_group_file_quota(groupname, filelimit, path)
+    else:
+        print "Error(610): Invalid input! need -u or -g"
+        sys.exit(1)
+
+
+def dir_quota(path, limit, do_what):
+    # check directory quota status
+    check_dir_quota_status()
+    # 1.validating data
+    limit = change_quota_value("G", "--limit", limit)
+    # 4.do work
+    if do_what == 'set':
+        quota_stat, quota_out = commands.getstatusoutput("icfs-setquota %s %s" % (path, limit))
+        debug("dir_quota:1", quota_out)
+        flag = quota_error(quota_stat, quota_out)
+        if str(flag) != "0":
+            print flag
+            sys.exit(1)
+        if path.startswith("/"):
+            path = path[1:]
+        if SETWORNING:
+            threshold_set('check_dir_quota!', path, limit)
+    elif do_what == 'modify':
+        quota_stat, quota_out = commands.getstatusoutput("icfs-setquota %s %s" % (path, limit))
+        debug("dir_quota:2", quota_out)
+        flag = quota_error(quota_stat, quota_out)
+        if str(flag) != "0":
+            print flag
+            sys.exit(1)
+        if path.startswith("/"):
+            path = path[1:]
+        if SETWORNING:
+            threshold_modify('check_dir_quota!', path, limit)
+    print do_what + " success!"
+    sys.exit(0)
+
+
+def delete_user_size_quota(username, path):
+    error = 0
+    for name in username.split(","):
+        uid = get_uid_by_name(name)
+        if uid == -1:
+            error = 1
+            continue
+        quota_stat, quota_out = commands.getstatusoutput("setfattr -n userquota.del -v %s %s" % (uid, path))
+        debug("delete_quota:1", quota_out)
+        flag = quota_error(quota_stat, quota_out)
+        if str(flag) != "0":
+            error = 1
+            print flag + " : " + name
+        if SETWORNING:
+            threshold_delete('check_user_quota!', name)
+    sys.exit(error)
+
+
+def delete_all_user_size_quota(path):
+    quota_stat, quota_out = commands.getstatusoutput("setfattr -n userquota.clear %s" % path)
+    debug("delete_quota:3", quota_out)
+    flag = quota_error(quota_stat, quota_out)
+    if str(flag) != "0":
+        print flag
+        sys.exit(1)
+    if SETWORNING:
+        threshold_delete('check_user_quota!', 'None')
+
+
+def delete_group_size_quota(groupname, path):
+    error = 0
+    for name in groupname.split(","):
+        gid = get_gid_by_name(name)
+        if gid == -1:
+            error = 1
+            continue
+        quota_stat, quota_out = commands.getstatusoutput("setfattr -n groupquota.del -v %s %s" % (gid, path))
+        debug("delete_quota:2", quota_out)
+        flag = quota_error(quota_stat, quota_out)
+        if str(flag) != "0":
+            error = 1
+            print flag + " : " + name
+        if SETWORNING:
+            threshold_delete('check_group_quota!', name)
+    sys.exit(error)
+
+
+def delete_all_group_size_quota(path):
+    quota_stat, quota_out = commands.getstatusoutput("setfattr -n groupquota.clear %s" % path)
+    debug("delete_quota:4", quota_out)
+    flag = quota_error(quota_stat, quota_out)
+    if str(flag) != "0":
+        print flag
+        sys.exit(1)
+    if SETWORNING:
+        threshold_delete('check_group_quota!', 'None')
+
+
+def delete_size_quota(username, groupname, delete_user, delete_group):
+    # check user size quota status
+    check_user_size_quota_status()
+    if username is not None:
+        delete_user_size_quota(username, MOUNT_POINT)
+    elif groupname is not None:
+        delete_group_size_quota(groupname, MOUNT_POINT)
+    elif delete_user is not None:
+        delete_all_user_size_quota(MOUNT_POINT)
+    elif delete_group is not None:
+        delete_all_group_size_quota(MOUNT_POINT)
+    else:
+        print "Error(610): Invalid input! need -u or -g or --user or --group"
+        sys.exit(1)
+
+
+def delete_user_file_quota(username, path):
+    error = 0
+    for name in username.split(","):
+        uid = get_uid_by_name(name)
+        if uid == -1:
+            error = 1
+            continue
+        quota_stat, quota_out = commands.getstatusoutput("setfattr -n icfs.userfile.del -v %s %s" % (uid, path))
+        debug("delete_quota:1", quota_out)
+        flag = quota_error(quota_stat, quota_out)
+        if str(flag) != "0":
+            error = 1
+            print flag + " : " + name
+        if SETWORNING:
+            threshold_delete('check_user_quota!', name)
+    sys.exit(error)
+
+
+def delete_all_user_file_quota(path):
+    quota_stat, quota_out = commands.getstatusoutput("setfattr -n icfs.userfile.clear %s" % path)
+    debug("delete_quota:3", quota_out)
+    flag = quota_error(quota_stat, quota_out)
+    if str(flag) != "0":
+        print flag
+        sys.exit(1)
+    if SETWORNING:
+        threshold_delete('check_user_quota!', 'None')
+
+
+def delete_group_file_quota(groupname, path):
+    error = 0
+    for name in groupname.split(","):
+        gid = get_gid_by_name(name)
+        if gid == -1:
+            error = 1
+            continue
+        quota_stat, quota_out = commands.getstatusoutput("setfattr -n icfs.groupfile.del -v %s %s" % (gid, path))
+        debug("delete_quota:2", quota_out)
+        flag = quota_error(quota_stat, quota_out)
+        if str(flag) != "0":
+            error = 1
+            print flag + " : " + name
+        if SETWORNING:
+            threshold_delete('check_group_quota!', name)
+    sys.exit(error)
+
+
+def delete_all_group_file_quota(path):
+    quota_stat, quota_out = commands.getstatusoutput("setfattr -n icfs.groupfile.clear %s" % path)
+    debug("delete_quota:4", quota_out)
+    flag = quota_error(quota_stat, quota_out)
+    if str(flag) != "0":
+        print flag
+        sys.exit(1)
+    if SETWORNING:
+        threshold_delete('check_group_quota!', 'None')
+
+
+def delete_file_quota(username, groupname, delete_user, delete_group):
+    # check user file quota status
+    check_user_file_quota_status()
+    if username is not None:
+        delete_user_file_quota(username, MOUNT_POINT)
+    elif groupname is not None:
+        delete_group_file_quota(groupname, MOUNT_POINT)
+    elif delete_user is not None:
+        delete_all_user_file_quota(MOUNT_POINT)
+    elif delete_group is not None:
+        delete_all_group_file_quota(MOUNT_POINT)
+    else:
+        print "Error(610): Invalid input! need -u or -g or --user or --group"
+        sys.exit(1)
+
+
+def delete_dir_quota(path):
+    # check directory quota status
+    check_dir_quota_status()
+    quota_stat, quota_out = commands.getstatusoutput("icfs-setquota %s 0 " % path)
+    debug("delete_quota:5", quota_out)
+    flag = quota_error(quota_stat, quota_out)
+    if str(flag) != "0":
+        print flag + " " + path
+        sys.exit(1)
+    if SETWORNING:
+        if path.startswith("/"):
+            path = path[1:]
+            threshold_delete('check_dir_quota!', path)
+
+
+def print_info_to_stderr(info):
+    stdout = sys.stdout
+    sys.stdout = sys.stderr
+    print info
+    sys.stdout = stdout
+
+
+# search all users quota
+def query_size_quota_user_all(path):
+    # 1、search local users quota
+    result = ""
+    error = 0
+    flag, user_list = commands.getstatusoutput("cat /etc/passwd | awk -F ':' '{print $1}'")
+    for userName in user_list.splitlines():
+        debug("query_size_quota_user_all:0", "userName=" + userName)
+        flag, quota = query_user_size_quota(userName, path)
+        if "Error" not in quota:
+            result = result + "name=" + userName + "," + "type=local," + quota + "\n"
+        else:
+            error = 1
+    # 2、search ldap users quota
+    flag, user_list = commands.getstatusoutput("ldapsearch -LLL -o nettimeout=2 -x 'objectClass=posixAccount' uid")
+    if flag != 0:
+        # print_info_to_stderr("get ldap users faild")
+        pass
+    else:
+        for i in user_list.splitlines():
+            if i.startswith("uid:"):
+                userName = i.split(":")[1].strip()
+                debug("query_size_quota_user_all:1", "userName=" + userName)
+                flag, quota = query_user_size_quota(userName, path)
+                if "Error" not in quota:
+                    result = result + "name=" + userName + "," + "type=ldap," + quota + "\n"
+                else:
+                    error = 1
+    # 3、search all nis users quota
+    flag, user_list = commands.getstatusoutput("ypcat passwd")
+    if 'domainname is not set' in user_list:
+        # print_info_to_stderr("Error(017):Please join NIS first")
+        pass
+    elif 'Can\'t communicate with ypbind' in user_list:
+        # print_info_to_stderr("Error(001):Can not communicate with ypbind")
+        pass
+    elif flag != 0:
+        # print_info_to_stderr("get nis users faild")
+        pass
+    else:
+        for i in user_list.splitlines():
+            userName = i.split(":")[0]
+            debug("query_size_quota_user_all:2", "userName=" + userName)
+            flag, quota = query_user_size_quota(userName, path)
+            if "Error" not in quota:
+                result = result + "name=" + userName + "," + "type=nis," + quota + "\n"
+            else:
+                error = 1
+    # 4、search all ad users quota
+    flag, user_list = commands.getstatusoutput("wbinfo -u")
+    if flag != 0:
+        pass
+    else:
+        for userName in user_list.splitlines():
+            debug("query_size_quota_user_all:1", "userName=" + userName)
+            flag, quota = query_user_size_quota(userName, path)
+            if "Error" not in quota:
+                result = result + "name=" + userName + "," + "type=ad," + quota + "\n"
+            else:
+                error = 1
+    return 0, result[:-1]
+
+
+# search all groups quota
+def query_size_quota_group_all(path):
+    # 1、search all local groups quota
+    result = ""
+    error = 0
+    flag, group_list = commands.getstatusoutput("icfs-admin-user --local --query -g | awk '{print $1}' | sed '1d'")
+    for groupName in group_list.splitlines():
+        debug("query_size_quota_group_all:local", "groupName:" + groupName)
+        flag, quota = query_group_size_quota(groupName, path)
+        if "Error" not in quota:
+            result = result + "name=" + groupName + "," + "type=local," + quota + "\n"
+        else:
+            error = 1
+    # 2、search all ldap groups quota
+    flag, group_list = commands.getstatusoutput("ldapsearch -LLL -o nettimeout=2 -x 'objectClass=posixGroup' cn")
+    if flag != 0:
+        # print_info_to_stderr("get ldap users faild")
+        pass
+    else:
+        for i in group_list.splitlines():
+            if i.startswith("cn:"):
+                groupName = i.split(":")[1].strip()
+                debug("query_size_quota_group_all:ldap", "groupName:" + groupName)
+                flag, quota = query_group_size_quota(groupName, path)
+                if "Error" not in quota:
+                    result = result + "name=" + groupName + "," + "type=ldap," + quota + "\n"
+                else:
+                    error = 1
+    # 3、search all nis groups quota
+    flag, group_list = commands.getstatusoutput("ypcat group")
+    if 'domainname is not set' in group_list :
+        # print_info_to_stderr("Error(017):Please join NIS first")
+        pass
+    elif 'Can\'t communicate with ypbind' in group_list:
+        # print_info_to_stderr("Error(001):Can not communicate with ypbind")
+        pass
+    elif flag != 0:
+        # print_info_to_stderr("get nis users faild")
+        pass
+    else:
+        if DEBUG == 1:
+            print "nis group : " + group_list
+        for i in group_list.splitlines():
+            groupName = i.split(":")[0]
+            debug("query_size_quota_group_all:nis", "groupName:" + groupName)
+            flag, quota = query_group_size_quota(groupName, path)
+            if "Error" not in quota:
+                result = result + "name=" + groupName + "," + "type=nis," + quota + "\n"
+            else:
+                error = 1
+    # 4、search all ad users quota
+    flag, group_list = commands.getstatusoutput("wbinfo -g")
+    if flag != 0:
+        pass
+    else:
+        for groupName in group_list.splitlines():
+            debug("query_size_quota_group_all:ad", "groupName:" + groupName)
+            flag, quota = query_group_size_quota(groupName, path)
+            if "Error" not in quota:
+                result = result + "name=" + groupName + "," + "type=ad," + quota + "\n"
+            else:
+                error = 1
+    return 0, result[:-1]  # remove last '\n'
+
+
+def query_size_quota_user_all_by_group(groupname, path, type):
+    error = 0
+    gid = get_gid_by_name(groupname)
+    if gid == -1:
+        sys.exit(1)
+    userList = []
+    result = ""
+    if type == "local":
+        flag, user_list = commands.getstatusoutput("cat /etc/passwd")
+        debug("query_size_quota_user_all_by_group:local", "groupName:" + user_list)
+        if flag != 0:
+            print "Error(518): Get local user faild"
+            sys.exit(1)
+        else:
+            # user_info like this:  root:x:0:0:root:/root:/bin/bash
+            for user_info in user_list.splitlines():
+                if user_info.split(":")[3] == str(gid):
+                    userList.append(user_info.split(":")[0])
+    elif type == "nis":
+        flag, user_list = commands.getstatusoutput("ypcat passwd")
+        if 'domainname is not set' in user_list:
+            print_info_to_stderr("Error(017):Please join NIS first")
+            sys.exit(1)
+        elif 'Can\'t communicate with ypbind' in user_list:
+            print_info_to_stderr("Error(001):Can not communicate with ypbind")
+            sys.exit(1)
+        elif flag != 0:
+            print_info_to_stderr("Error(519): Get nis user faild")
+            sys.exit(1)
+        else:
+            debug("query_size_quota_user_all_by_group:nis", "nis users:" + user_list)
+            for i in user_list.splitlines():
+                if i.split(":")[3] == str(gid):
+                    userList.append(i.split(":")[0])
+    elif type == "ad":
+        flag, user_list = commands.getstatusoutput("wbinfo -u 2>/dev/null")
+        if flag != 0:
+            print "Error(520): Get ad user faild"
+            sys.exit(1)
+        else:
+            for userName in user_list.splitlines():
+                flag, gid_ad = commands.getstatusoutput("id -g %s 2>/dev/null" % userName)
+                if flag == 0:
+                    if gid_ad == str(gid):
+                        userList.append(userName)
+    elif type == "ldap":
+        debug("query_size_quota_user_all_by_group:ldap",
+              "ldapsearch -LLL -o nettimeout=2 -x '(&(objectClass=posixAccount)"
+              "(gidNumber=%s))' uid  | grep -v 'dn:' | grep -v ^$" % gid)
+        flag, user_list = commands.getstatusoutput("ldapsearch -LLL -o nettimeout=2 -x '(&(objectClass=posixAccount)"
+                                                   "(gidNumber=%s))' uid  | grep -v 'dn:' | grep -v ^$" % gid)
+        if user_list != "":
+            for user_info in user_list.splitlines():
+                debug("query_size_quota_user_all_by_group:ldap", "user_info:" + user_info)
+                userList.append(user_info.split(":")[1].strip())
+    else:
+        print "Error(610): Invalid input! user type error"
+        sys.exit(1)
+    if len(userList) == 0:
+        # print ""
+        sys.exit(0)
+    else:
+        for user_name in userList:
+            flag, quota = query_user_size_quota(user_name, path)
+            if "Error" not in quota:
+                result = result + "name=" + user_name + "," + "type=" + type + "," + quota + "\n"
+            else:
+                error = 1
+    return 0, result[:-1]
+
+
+def query_user_size_quota(user_name, path):
+    error = 0
+    if user_name == "ALL_USER_QUOTA":
+        return query_size_quota_user_all(path)
+    uid = get_uid_by_name(user_name)
+    if uid == -1:
+        sys.exit(1)
+    debug("query_user_size_quota", "comm:" + "getfattr -n userquota.%s %s" % (uid, path))
+    quota_stat, quota_out = commands.getstatusoutput("getfattr -n userquota.%s %s" % (uid, path))
+    debug("query_user_size_quota", "quota_out:" + quota_out)
+    tmp = quota_error(quota_stat, quota_out)
+    if tmp == 0:
+        result = quota_out.split('"')[1].replace("sotflimit", "softlimit")
+    else:
+        result = tmp
+        error = 1
+    debug("query_user_size_quota", "quota:" + result)
+    return error, result
+
+
+def query_group_size_quota(groupname, path):
+    error = 0
+    if groupname == "ALL_GROUP_QUOTA":
+        return query_size_quota_group_all(path)
+    gid = get_gid_by_name(groupname)
+    if gid == -1:
+        sys.exit(1)
+    debug("query_group_size_quota", "comm:" + "getfattr -n groupquota.%s %s" % (gid, path))
+    quota_stat, quota_out = commands.getstatusoutput("getfattr -n groupquota.%s %s" % (gid, path))
+    debug("query_group_size_quota", "result:" + quota_out)
+    tmp = quota_error(quota_stat, quota_out)
+    if tmp == 0:
+        result = quota_out.split('"')[1].replace("sotflimit", "softlimit")
+    else:
+        result = tmp
+        error = 1
+    debug("query_group_size_quota", "quota:" + result)
+    return error, result
+
+
+def query_group_user_size_quota(groupname, path, usertype):
+    if groupname == "ALL_GROUP_QUOTA":
+        return query_size_quota_user_all(path)
+    else:
+        return query_size_quota_user_all_by_group(groupname, path, usertype)
+
+
+def query_size_quota(username, groupname, user_type):
+    # check user size quota status
+    check_user_size_quota_status()
+    if username is not None:
+        flag, info = query_user_size_quota(username, MOUNT_POINT)
+    elif groupname is not None:
+        if user_type is None:  # get user quota
+            flag, info = query_group_size_quota(groupname, MOUNT_POINT)
+        else:  # get all user quota which in group --group
+            flag, info = query_group_user_size_quota(groupname, MOUNT_POINT, user_type)
+    else:
+        print "Error(610): Invalid input! need -u or -g"
+        sys.exit(1)
+    if info != "":
+        print info
+    sys.exit(flag)
+
+
+# search all users quota
+def query_file_quota_user_all(path):
+    # 1、search local users quota
+    result = ""
+    error = 0
+    flag, user_list = commands.getstatusoutput("cat /etc/passwd | awk -F ':' '{print $1}'")
+    for userName in user_list.splitlines():
+        debug("query_quota_user_all:0", "userName=" + userName)
+        flag, quota = query_user_file_quota(userName, path)
+        if "Error" not in quota:
+            result = result + "name=" + userName + "," + "type=local," + quota + "\n"
+        else:
+            error = 1
+    # 2、search ldap users quota
+    flag, user_list = commands.getstatusoutput("ldapsearch -LLL -o nettimeout=2 -x 'objectClass=posixAccount' uid")
+    if flag != 0:
+        # print_info_to_stderr("get ldap users faild")
+        pass
+    else:
+        for i in user_list.splitlines():
+            if i.startswith("uid:"):
+                userName = i.split(":")[1].strip()
+                debug("query_file_quota_user_all:1", "userName=" + userName)
+                flag, quota = query_user_file_quota(userName, path)
+                if "Error" not in quota:
+                    result = result + "name=" + userName + "," + "type=ldap," + quota + "\n"
+                else:
+                    error = 1
+    # 3、search all nis users quota
+    flag, user_list = commands.getstatusoutput("ypcat passwd")
+    if 'domainname is not set' in user_list:
+        # print_info_to_stderr("Error(017):Please join NIS first")
+        pass
+    elif 'Can\'t communicate with ypbind' in user_list:
+        # print_info_to_stderr("Error(001):Can not communicate with ypbind")
+        pass
+    elif flag != 0:
+        # print_info_to_stderr("get nis users faild")
+        pass
+    else:
+        for i in user_list.splitlines():
+            userName = i.split(":")[0]
+            debug("query_file_quota_user_all:2", "userName=" + userName)
+            flag, quota = query_user_file_quota(userName, path)
+            if "Error" not in quota:
+                result = result + "name=" + userName + "," + "type=nis," + quota + "\n"
+            else:
+                error = 1
+    # 4、search all ad users quota
+    flag, user_list = commands.getstatusoutput("wbinfo -u")
+    if flag != 0:
+        pass
+    else:
+        for userName in user_list.splitlines():
+            debug("query_file_quota_user_all:1", "userName=" + userName)
+            flag, quota = query_user_file_quota(userName, path)
+            if "Error" not in quota:
+                result = result + "name=" + userName + "," + "type=ad," + quota + "\n"
+            else:
+                error = 1
+    return 0, result[:-1]
+
+
+# search all groups quota
+def query_file_quota_group_all(path):
+    # 1、search all local groups quota
+    result = ""
+    error = 0
+    flag, group_list = commands.getstatusoutput("icfs-admin-user --local --query -g | awk '{print $1}' | sed '1d'")
+    for groupName in group_list.splitlines():
+        debug("query_file_quota_group_all:local", "groupName:" + groupName)
+        flag, quota = query_group_file_quota(groupName, path)
+        if "Error" not in quota:
+            result = result + "name=" + groupName + "," + "type=local," + quota + "\n"
+        else:
+            error = 1
+    # 2、search all ldap groups quota
+    flag, group_list = commands.getstatusoutput("ldapsearch -LLL -o nettimeout=2 -x 'objectClass=posixGroup' cn")
+    if flag != 0:
+        # print_info_to_stderr("get ldap users faild")
+        pass
+    else:
+        for i in group_list.splitlines():
+            if i.startswith("cn:"):
+                groupName = i.split(":")[1].strip()
+                debug("query_file_quota_group_all:ldap", "groupName:" + groupName)
+                flag, quota = query_group_file_quota(groupName, path)
+                if "Error" not in quota:
+                    result = result + "name=" + groupName + "," + "type=ldap," + quota + "\n"
+                else:
+                    error = 1
+    # 3、search all nis groups quota
+    flag, group_list = commands.getstatusoutput("ypcat group")
+    if 'domainname is not set' in group_list :
+        # print_info_to_stderr("Error(017):Please join NIS first")
+        pass
+    elif 'Can\'t communicate with ypbind' in group_list:
+        # print_info_to_stderr("Error(001):Can not communicate with ypbind")
+        pass
+    elif flag != 0:
+        # print_info_to_stderr("get nis users faild")
+        pass
+    else:
+        if DEBUG == 1:
+            print "nis group : " + group_list
+        for i in group_list.splitlines():
+            groupName = i.split(":")[0]
+            debug("query_file_quota_group_all:nis", "groupName:" + groupName)
+            flag, quota = query_group_file_quota(groupName, path)
+            if "Error" not in quota:
+                result = result + "name=" + groupName + "," + "type=nis," + quota + "\n"
+            else:
+                error = 1
+    # 4、search all ad users quota
+    flag, group_list = commands.getstatusoutput("wbinfo -g")
+    if flag != 0:
+        pass
+    else:
+        for groupName in group_list.splitlines():
+            debug("query_file_quota_group_all:ad", "groupName:" + groupName)
+            flag, quota = query_group_file_quota(groupName, path)
+            if "Error" not in quota:
+                result = result + "name=" + groupName + "," + "type=ad," + quota + "\n"
+            else:
+                error = 1
+    return 0, result[:-1]  # remove last '\n'
+
+
+def query_file_quota_user_all_by_group(groupname, path, type):
+    error = 0
+    gid = get_gid_by_name(groupname)
+    if gid == -1:
+        sys.exit(1)
+    userList = []
+    result = ""
+    if type == "local":
+        flag, user_list = commands.getstatusoutput("cat /etc/passwd")
+        debug("query_file_quota_user_all_by_group:local", "groupName:" + user_list)
+        if flag != 0:
+            print "Error(518): Get local user faild"
+            sys.exit(1)
+        else:
+            # user_info like this:  root:x:0:0:root:/root:/bin/bash
+            for user_info in user_list.splitlines():
+                if user_info.split(":")[3] == str(gid):
+                    userList.append(user_info.split(":")[0])
+    elif type == "nis":
+        flag, user_list = commands.getstatusoutput("ypcat passwd")
+        if 'domainname is not set' in user_list:
+            print_info_to_stderr("Error(017):Please join NIS first")
+            sys.exit(1)
+        elif 'Can\'t communicate with ypbind' in user_list:
+            print_info_to_stderr("Error(001):Can not communicate with ypbind")
+            sys.exit(1)
+        elif flag != 0:
+            print_info_to_stderr("Error(519): Get nis user faild")
+            sys.exit(1)
+        else:
+            debug("query_file_quota_user_all_by_group:nis", "nis users:" + user_list)
+            for i in user_list.splitlines():
+                if i.split(":")[3] == str(gid):
+                    userList.append(i.split(":")[0])
+    elif type == "ad":
+        flag, user_list = commands.getstatusoutput("wbinfo -u 2>/dev/null")
+        if flag != 0:
+            print "Error(520): Get ad user faild"
+            sys.exit(1)
+        else:
+            for userName in user_list.splitlines():
+                flag, gid_ad = commands.getstatusoutput("id -g %s 2>/dev/null" % userName)
+                if flag == 0:
+                    if gid_ad == str(gid):
+                        userList.append(userName)
+    elif type == "ldap":
+        debug("query_file_quota_user_all_by_group:ldap",
+              "ldapsearch -LLL -o nettimeout=2 -x '(&(objectClass=posixAccount)"
+              "(gidNumber=%s))' uid  | grep -v 'dn:' | grep -v ^$" % gid)
+        flag, user_list = commands.getstatusoutput("ldapsearch -LLL -o nettimeout=2 -x '(&(objectClass=posixAccount)"
+                                                   "(gidNumber=%s))' uid  | grep -v 'dn:' | grep -v ^$" % gid)
+        if user_list != "":
+            for user_info in user_list.splitlines():
+                debug("query_file_quota_user_all_by_group:ldap", "user_info:" + user_info)
+                userList.append(user_info.split(":")[1].strip())
+    else:
+        print "Error(610): Invalid input! user type error"
+        sys.exit(1)
+    if len(userList) == 0:
+        # print ""
+        sys.exit(0)
+    else:
+        for user_name in userList:
+            flag, quota = query_user_file_quota(user_name, path)
+            if "Error" not in quota:
+                result = result + "name=" + user_name + "," + "type=" + type + "," + quota + "\n"
+            else:
+                error = 1
+    return 0, result[:-1]
+
+
+def query_user_file_quota(user_name, path):
+    error = 0
+    if user_name == "ALL_USER_QUOTA":
+        return query_file_quota_user_all(path)
+    uid = get_uid_by_name(user_name)
+    if uid == -1:
+        sys.exit(1)
+    debug("query_user_file_quota", "comm:" + "getfattr -n userfile.%s %s" % (uid, path))
+    quota_stat, quota_out = commands.getstatusoutput("getfattr -n userfile.%s %s" % (uid, path))
+    debug("query_user_file_quota", "quota_out:" + quota_out)
+    tmp = quota_error(quota_stat, quota_out)
+    if tmp == 0:
+        result = quota_out.split('"')[1]
+        if "limit" not in result:
+            result = 'Error(541): Quota not set'
+            error = 1
+    else:
+        result = tmp
+        error = 1
+    debug("query_quota:user", "quota:" + result)
+    return error, result
+
+
+def query_group_file_quota(groupname, path):
+    error = 0
+    if groupname == "ALL_GROUP_QUOTA":
+        return query_file_quota_group_all(path)
+    gid = get_gid_by_name(groupname)
+    if gid == -1:
+        sys.exit(1)
+    debug("query_group_file_quota", "comm:" + "getfattr -n groupfile.%s %s" % (gid, path))
+    quota_stat, quota_out = commands.getstatusoutput("getfattr -n groupfile.%s %s" % (gid, path))
+    debug("query_group_file_quota", "result:" + quota_out)
+    tmp = quota_error(quota_stat, quota_out)
+    if tmp == 0:
+        result = quota_out.split('"')[1]
+        if "limit" not in result:
+            result = 'Error(541): Quota not set'
+            error = 1
+    else:
+        result = tmp
+        error = 1
+    debug("query_group_file_quota", "quota:" + result)
+    return error, result
+
+
+def query_group_user_file_quota(groupname, path, usertype):
+    if groupname == "ALL_GROUP_QUOTA":
+        return query_file_quota_user_all(path)
+    else:
+        return query_file_quota_user_all_by_group(groupname, path, usertype)
+
+
+def query_file_quota(username, groupname, user_type):
+    # check user file quota status
+    check_user_file_quota_status()
+    if username is not None:
+        flag, info = query_user_file_quota(username, MOUNT_POINT)
+    elif groupname is not None:
+        if user_type is None:  # get user quota
+            flag, info = query_group_file_quota(groupname, MOUNT_POINT)
+        else:  # get all user quota which in group --group
+            flag, info = query_group_user_file_quota(groupname, MOUNT_POINT, user_type)
+    else:
+        print "Error(610): Invalid input! need -u or -g"
+        sys.exit(1)
+    if info != "":
+        print info
+    sys.exit(flag)
+
+
+def query_dir_quota(path):
+    # check directory quota status
+    check_dir_quota_status()
+    dir_stat, dir_out = commands.getstatusoutput("icfs-getquota  %s" % path)
+    # get quota
+    if dir_stat != 0:
+        if "No such attribute" in dir_out:
+            print "Error(541): Quota not set"
+            sys.exit(1)
+        else:
+            print 'Error(553): Unknown error ; {0},{1}'.format(path, dir_out)
+            sys.exit(1)
+
+    limit = dir_out.split('=')[1].strip()[:-1]
+    value = "max_Gbytes=" + str(limit)
+    # get used_bytes
+    info = os.path.getsize(path)
+    value = value + ",used=" + unit_convert(info)
+    debug("query_quota:dir", "dir_quota:" + value)
+    return 0, value
+
+
+def check_path(path):
+    if path is None:
+        usage()
+        print "Error(610): Invalid input! -p is need"
+        sys.exit(1)
+    if path.startswith("/"):
+        path = MOUNT_POINT + path
+    else:
+        path = MOUNT_POINT + "/" + path
+    return path
+
+
+def quota_start(has_user, has_dir, has_file):
+    congfile_check()
+    key = None
+    value = None
+    cfg_parser = NewConfigParser()
+    cfg_parser.read("/etc/icfs/icfs.conf")
+    if has_user:
+        if not cfg_parser.has_option("global", "client_user_quota") or \
+                'true' != cfg_parser.get('global', 'client_user_quota'):
+            key = 'client_user_quota'
+            value = 'true'
+    elif has_dir:
+        # check confilict config: client_dir_quota
+        if cfg_parser.has_option("global", "client_fs_provisioning") and \
+                        cfg_parser.get('global', 'client_fs_provisioning') == "true":
+            print ("Error(1603): Directory quota is conflict with thin provisioning, "
+                   "please disable thin provisioning first")
+            sys.exit(1)
+
+        if not cfg_parser.has_option("global", "client_dir_quota") or \
+                'true' != cfg_parser.get('global', 'client_dir_quota'):
+            key = 'client_dir_quota'
+            value = 'true'
+    elif has_file:
+        if cfg_parser.has_option("global", "client_file_quota") and \
+                'true' != cfg_parser.get('global', 'client_file_quota'):
+            key = 'client_file_quota'
+            value = 'true'
+
+    if key is not None and value is not None:
+        cfg_parser.set('global', key, value)
+        cfg_parser.write(open('/etc/icfs/icfs.conf', 'w'))
+        push_file_to_minion("/etc/icfs/icfs.conf")
+        # restart_fuse()
+        run_remote_cmd("*", "icfs-client-config --set --key %s --value '%s'" % (key, value))
+
+    print "Start quota successful"
+
+
+def quota_stop(has_user, has_dir, has_file):
+    congfile_check()
+    key = None
+    value = None
+    cfg_parser = NewConfigParser()
+    cfg_parser.read("/etc/icfs/icfs.conf")
+    if has_user:
+        if cfg_parser.has_option("global", "client_user_quota") and \
+                'false' != cfg_parser.get('global', 'client_user_quota'):
+            key = 'client_user_quota'
+            value = 'false'
+    elif has_dir:
+        if cfg_parser.has_option("global", "client_dir_quota") and \
+                'false' != cfg_parser.get('global', 'client_dir_quota'):
+            key = 'client_dir_quota'
+            value = 'false'
+    elif has_file:
+        if not cfg_parser.has_option("global", "client_file_quota") or \
+                'false' != cfg_parser.get('global', 'client_file_quota'):
+            key = 'client_file_quota'
+            value = 'false'
+
+    if key is not None and value is not None:
+        cfg_parser.set('global', key, value)
+        cfg_parser.write(open('/etc/icfs/icfs.conf', 'w'))
+        push_file_to_minion("/etc/icfs/icfs.conf")
+        # restart_fuse()
+        run_remote_cmd("*", "icfs-client-config --set --key %s --value '%s'" % (key, value))
+
+    print "Stop quota successful"
+
+
+def quota_status(has_user, has_dir, has_file):
+    congfile_check()
+    cfg_parser = NewConfigParser()
+    cfg_parser.read("/etc/icfs/icfs.conf")
+
+    if has_file:
+        user_file_quota = "true"
+        if cfg_parser.has_option("global", "client_file_quota"):
+            user_file_quota = cfg_parser.get("global", "client_file_quota")
+        print user_file_quota
+    elif has_user:
+        user_size_quota = "false"
+        if cfg_parser.has_option("global", "client_user_quota"):
+            user_size_quota = cfg_parser.get("global", "client_user_quota")
+        print user_size_quota
+    elif has_dir:
+        dir_size_quota = "false"
+        if cfg_parser.has_option("global", "client_dir_quota"):
+            dir_size_quota = cfg_parser.get("global", "client_dir_quota")
+        print dir_size_quota
+
+
+# check the config file is ok
+def congfile_check():
+    file_path = "/etc/icfs/icfs.conf"
+    cfg_parser = NewConfigParser()
+    read_ok_list = cfg_parser.read(file_path)
+    if file_path not in read_ok_list:
+        print "Error(1710): The config file %s not exist or destroyed" % file_path
+        sys.exit(1)
+    if not cfg_parser.has_section("global"):
+        print "Error(1710): The config file %s not exist or destroyed" % file_path
+        sys.exit(1)
+
+
+def main():
+    username = None
+    groupname = None
+    path = None
+    hardlimit = None
+    softlimit = None
+    accurary = None
+    limit = None
+    delete_user = None
+    delete_group = None
+    user_type = None
+    file_limit = None
+    has_dir = False
+    has_file = False
+    has_user = False
+    try:
+        parser = OptParser.OptParser()
+        # help
+        parser.append("help", "{-h|--help}")
+        # user/group size quota
+        parser.append("SetSizeQuota", "--set{-u=|-g=}--hardlimit=,--softlimit=,--accurary=")
+        parser.append("ModifySizeQuota", "--modify{-u=|-g=}--hardlimit=,--softlimit=,--accurary=")
+        parser.append("DeleteSizeQuota", "--delete[--size]{-u=|-g=|--user|--group}")
+        parser.append("QuerySizeQuota", "--query[--size]{-u=|-g=[--type=]}")
+        # user/group file quota
+        parser.append("SetFileQuota", "--set{-u=|-g=}--filelimit=")
+        parser.append("ModifyFileQuota", "--modify{-u=|-g=}--filelimit=")
+        parser.append("DeleteFileQuota", "--delete,--file{-u=|-g=|--user|--group}")
+        parser.append("QueryFileQuota", "--query,--file{-u=|-g=[--type=]}")
+        # dir quota
+        parser.append("SetDirQuota", "--set,--dir,--limit=,-p=")
+        parser.append("ModifyDirQuota", "--modify,--dir,--limit=,-p=")
+        parser.append("DeleteDirQuota", "--delete,--dir,-p=")
+        parser.append("QueryDirQuota", "--query,--dir,-p=")
+        # start quota
+        parser.append("StartQuota", "--start{--file|--user|--dir}")
+        # stop quota
+        parser.append("StopQuota", "--stop{--file|--user|--dir}")
+        # quota status
+        parser.append("StatusQuota", "--status{--file|--user|--dir}")
+        m_name, m_opts = parser.parse(sys.argv[1:])
+    except Exception, e:
+        print "Error(610): Invalid input!", e
+        sys.exit(1)
+
+    for k, v in m_opts:
+        if k == '-u':
+            username = v
+            if DEBUG:
+                print "-u:" + v
+        elif k == '-g':
+            groupname = v
+            if DEBUG:
+                print "-g:" + v
+        elif '-p' == k:
+            path = v
+            if DEBUG:
+                print "-p:" + v
+        elif '--hardlimit' == k:
+            hardlimit = v
+            if DEBUG:
+                print "--hardlimit:" + v
+        elif '--softlimit' == k:
+            softlimit = v
+            if DEBUG:
+                print "--softlimit:" + v
+        elif '--accurary' == k:
+            accurary = v
+            if DEBUG:
+                print "--accurary:" + v
+        elif '--limit' == k:
+            limit = v
+            if DEBUG:
+                print "--limit:" + v
+        elif '--user' == k:
+            delete_user = 'delete_user'
+            has_user = True
+        elif '--group' == k:
+            delete_group = 'delete_group'
+        elif '--type' == k:
+            user_type = v
+        elif '--filelimit' == k:
+            file_limit = v
+        elif "--dir" == k:
+            has_dir = True
+        elif "--file" == k:
+            has_file = True
+
+    if m_name == "help":
+        usage()
+        sys.exit(0)
+    elif m_name == "SetSizeQuota":
+        set_size_quota(username, groupname, hardlimit, softlimit, accurary, MOUNT_POINT)
+    elif m_name == "ModifySizeQuota":
+        modify_size_quota(username, groupname, hardlimit, softlimit, accurary, MOUNT_POINT)
+    elif m_name == "DeleteSizeQuota":
+        delete_size_quota(username, groupname, delete_user, delete_group)
+    elif m_name == "QuerySizeQuota":
+        query_size_quota(username, groupname, user_type)
+    elif m_name == "SetFileQuota":
+        set_file_quota(username, groupname, file_limit, MOUNT_POINT)
+    elif m_name == "ModifyFileQuota":
+        modify_file_quota(username, groupname, file_limit, MOUNT_POINT)
+    elif m_name == "DeleteFileQuota":
+        delete_file_quota(username, groupname, delete_user, delete_group)
+    elif m_name == "QueryFileQuota":
+        query_file_quota(username, groupname, user_type)
+    elif m_name == "SetDirQuota" or m_name == "ModifyDirQuota":
+        operation = "set" if m_name == "SetDirQuota" else "modify"
+        path = check_path(path)
+        dir_quota(path, limit, operation)
+    elif m_name == "DeleteDirQuota":
+        path = check_path(path)
+        delete_dir_quota(path)
+    elif m_name == "QueryDirQuota":
+        path = check_path(path)
+        flag, info = query_dir_quota(path)
+        if info != "":
+            print info
+        sys.exit(flag)
+    elif m_name == "StartQuota":
+        quota_start(has_user, has_dir, has_file)
+    elif m_name == "StopQuota":
+        quota_stop(has_user, has_dir, has_file)
+    elif m_name == "StatusQuota":
+        quota_status(has_user, has_dir, has_file)
+    else:
+        usage()
+        sys.exit(1)
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,128 @@
+#!/usr/bin/python
+# -*- copyright -*-
+#coding:utf-8
+#changelog
+#replace ":" with "_" on line 73,77,81(This will cause error when host is configured with IPv6 address)    chasen    2017.03.06
+
+import os
+import sys
+import getopt
+import re
+import commands
+import sqlite3
+import json
+
+#code:/usr/bin/
+#code:/usr/local/ism/Agent/src/Cli/ClusterCli/
+#export PATH=$PATH:/usr/bin/  
+def salt_stat_check():
+  salt_ck=commands.getoutput("service salt-master status")
+  if "unrecognized service" in salt_ck:
+    #print line_num()
+    print "Error(299): Invalid salt service"
+    sys.exit(1)
+  elif "stopped" in salt_ck:
+    salt_rst=commands.getoutput("service salt-master start")
+    if not salt_rst or "FAILED" in salt_rst:
+      #print line_num()
+      print "Error(299): Invalid salt service"
+      sys.exit(1)
+  salt_down=commands.getoutput("salt-run manage.down")
+  if "YPBINDPROC_DOMAIN: Domain not bound" in salt_down:
+    salt_YP=salt_down.lstrip("YPBINDPROC_DOMAIN: Domain not bound")
+  else :
+    salt_YP=salt_down
+  if salt_YP:
+    salt_dd=salt_YP.replace("\n",",")
+    salt_dl=salt_dd.lstrip(',')
+    #print line_num()
+#    print "Invalid: ",salt_dl
+    print "Error(307): Salt service down in system"
+    sys.exit(1)
+
+  salt_key=commands.getoutput("salt-key -l acc")
+  salt_key_l=salt_key.split('\n')
+  if "Accepted Keys:" in salt_key_l:
+    salt_key_l.remove("Accepted Keys:")
+  if "YPBINDPROC_DOMAIN: Domain not bound" in salt_key_l:
+    salt_key_l.remove("YPBINDPROC_DOMAIN: Domain not bound")
+  if not salt_key_l:
+    #print line_num()
+    print "Error(308): Invalid salt-key"
+    sys.exit(1)
+
+def ip_check(ipcheck):
+    if not re.match\
+    (r"^([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-4])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])$",ipcheck):
+        print "Error: FAILED to obtain node IP" 
+        sys.exit(1)
+
+if __name__ == '__main__':
+##############################################################
+    if len(sys.argv[0:])!=1:
+        print "Error(610): Invalid input!"
+        sys.exit(1)
+
+    salt_stat_check()
+    # filter salt stderror so that output can be parsed correctly
+    host_list_stat,host_list = commands.getstatusoutput("salt '*' cmd.run 'hostname -I' 2>/dev/null")
+    if host_list_stat:
+        print "Error: Alarm system initialization FAILED"
+        sys.exit(1)
+    pat1 = ":\n\s+"
+    host_list = re.sub(pat1,"_",host_list)
+    host_list = host_list.split()
+    Nodename_ip_list = []
+    for x in host_list:
+        if x.find("_")>=0:
+            Nodename_ip_list.append(x)
+    str = ""
+    for name_ip in Nodename_ip_list:
+        name_ip = name_ip.split("_")
+        ip_check(name_ip[-1])
+        str_s = "define host{\n        use                     linux-server\
+        \n        host_name               %s\
+        \n        alias                   nodetest\
+        \n        address                 %s\
+        \n}\n"%(name_ip[0],name_ip[-1])
+        str = str+str_s
+#    print str
+    try:
+        with open("/usr/local/nagios/etc/objects/hosts.cfg","w") as hostcfg:
+            hostcfg.write(str)
+        #print nagios_reload_stat,nagios_reload
+    except Exception, err:
+        print "Error: Configuration file operation FAILED"
+  #service.cfg
+    try:
+        host_name_service = commands.getoutput("hostname")
+#        host_name_service = "wfl"
+        pat = "host_name[\s|\t]*.*"
+        host_name_ser_init = "host_name\t\t"+host_name_service
+    except Exception, err:
+        print "Error: Configuration file operation FAILED"
+    try:
+        with open("/usr/local/nagios/etc/objects/services.cfg") as hostname_open:
+            hostname_read = hostname_open.read() 
+        hostname_modify = re.sub(pat,host_name_ser_init,hostname_read)
+        with open("/usr/local/nagios/etc/objects/services.cfg","w") as hostname_write:
+            hostname_write.write(hostname_modify)
+        nagios_reload_stat,nagios_reload = commands.getstatusoutput("service nagios reload")
+        #print "Initial success"
+    except Exception, err:
+        print "Error: Configuration file operation FAILED"
+    #rack judge
+    try:
+        verify_rack = commands.getoutput("/usr/bin/icfs-verify-rack")
+        if verify_rack == "0":
+            rack_fan_cp = commands.getoutput\
+            ("\cp /usr/local/nagios/libexec/check_icfs_fan_rack /usr/local/nagios/libexec/check_icfs_fan")
+            rack_fanstat_cp = commands.getoutput\
+            ("\cp /usr/local/nagios/libexec/check_icfs_fanstat_rack /usr/local/nagios/libexec/check_icfs_fanstat")
+            rack_power_cp = commands.getoutput\
+            ("\cp /usr/local/nagios/libexec/check_icfs_power_rack /usr/local/nagios/libexec/check_icfs_power")
+        elif verify_rack == "1":
+            pass
+        print "Initial success"
+    except Exception,err:
+        print "Error: Verify_rack FAILED"

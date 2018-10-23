@@ -1,0 +1,501 @@
+#!/usr/bin/python
+# -*- copyright -*-
+#coding:utf-8
+import os
+import sys
+import getopt
+import re
+import commands
+import sqlite3
+
+#code:/usr/bin/
+#code:/usr/local/ism/Agent/src/Cli/ClusterCli/
+#export PATH=$PATH:/usr/bin/  
+
+def usage():
+    print """Help(-h|--help) for icfs-admin-monitor:
+Usage:
+>> icfs-admin-monitor ---- --set --+     --mds mds_threshold        +-- --time time_interval--><
+                                   +     --df  df_threshold         +
+                                   + --cputotal cputotal_threshold  +
+                                   + --cpusingle cpusingle_threshold+
+                                   +   --cputemp cputemp_threshold  +
+                                   + --boardtemp boardtemp_threshold+
+                                   +       --fan fan_threshold      +
+                                   '   --ssd ssdwearout_threshold   '
+Functions: set alarm threshold 
+Options:
+  --mds      : set threshold of the num of normal mds node
+  --df       : set threshold of the disk utilization
+  --cputotal : set threshold of the overall utilization rate of CPU
+  --cpusingle: set threshold of the single utilization rate of CPU
+  --cputemp  : set threshold of the CPU temperature
+  --boardtemp: set threshold of the board temperature
+  --fan      : set threshold of the fan speed(1000,5000)
+  --ssd      : set threshold of the ssd Wearout(0,100). low,midel,high
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>> icfs-admin-monitor ---- --query -- +-- --threshold --+--><
+                                      '-- --type -------'
+Functions: query the threshold or alarm mode
+Options:
+ --threshold: query the threshold 
+  --type     : query the alarm mode
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>> icfs-admin-monitor ----+ --start +--+ --mail +--><
+                          ' --stop  '  ' --trap '
+Functions: start/stop the alarm mode of mail or snmp trap
+Options:
+  --start: start mail/snmp alarm
+  --stop : stop mail/snmp alarm
+  --mail : start/stop mail alarm
+  --trap : start/stop snmp alarm
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully """
+  
+def Error(num):
+    if num==100:
+        print "Error(100): Saltstack anomaly"
+    if num==610:
+        print "Error(610): Invalid input!"
+    if num==1001:
+        print "Error(1001): Invalid threshold"
+    if num==1002:
+        print "Error(1002): Metric information not in configuration file"
+    if num==1003:
+        print "Error(1003): Database operation FAILED"
+    if num==1004:
+        print "Error(1004): Invalid fan_threshold"
+    if num==1005:
+        print "Error(1005): Invalid ssd_threshold"
+    if num==1100:
+        print "Error(1100): service nagios reload FAILED"
+    if num==1101:
+        print "Error(1101): Configuration file operation FAILED"
+    if num==1102:
+        print "Error(1102): Test operation FAILED"
+
+def sys_mds():
+    threshold_modify("check_icfs_mds!", "mds_threshold")
+
+def sys_df():
+    threshold_modify("check_icfs_df!", "df_threshold")
+  
+def sys_cputotal():
+    threshold_modify("check_icfs_cputotal!", "cputotal_threshold")
+ 
+def sys_cpusingle():
+    threshold_modify("check_icfs_cpusingle!", "cpusingle_threshold")
+ 
+def sys_cputemp():
+    threshold_modify("check_icfs_cputemp!", "cputemp_threshold")
+ 
+def sys_boardtemp():
+    threshold_modify("check_icfs_boardtemp!", "boardtemp_threshold")
+ 
+def sys_fan():
+    threshold_modify("check_icfs_fan!", "fan_threshold")
+
+def sys_ssd_health():
+    threshold_modify("check_icfs_ssd_health!", "ssd_threshold")
+
+def threshold_modify(str,threshold_str):
+#str=check_icfs_...!
+#pat=max_check_attempts[\t|\s]*\d*#check_icfs_mds!
+#pat1=check_command[\s|\t]*check_icfs_mds!\d*
+    pat = "max_check_attempts[\t|\s]*\d*#"+str
+    pat1 = "check_command[\s|\t]*" + str + "[\d|.|,]*([!]*[\d|.|,]*)*"
+#modify config
+    try:
+        with open("/usr/local/nagios/etc/objects/services.cfg") as metric_threshold_open:
+            metric_threshold_read = metric_threshold_open.read()
+        if not re.findall(pat,metric_threshold_read)\
+         or not re.findall(pat1,metric_threshold_read):
+            print "Error(1002): Metric information not in configuration file"
+            sys.exit(1)
+        metric_time_str = "max_check_attempts\t%s#"%time_interval+str
+        metric_threshold_modify1 = re.sub(pat,metric_time_str,metric_threshold_read)
+        metric_threshold_str = "check_command\t\t%s%s"%(str,threshold)
+        metric_threshold_modify = re.sub(pat1,metric_threshold_str,metric_threshold_modify1)
+#        print metric_threshold_modify
+        with open("/usr/local/nagios/etc/objects/services.cfg","w") as metric_threshold_write:
+            metric_threshold_write.write(metric_threshold_modify)
+    except Exception, err:
+        print "Error(1101): Configuration file operation FAILED"
+#        print err
+        sys.exit(1)
+#modify database_list threshold: metric value time
+    try:
+        metric_conn = sqlite3.connect("/usr/local/db/alarm.db")
+        metric_conn_cu = metric_conn.cursor()
+        metric_conn_cu.execute\
+        ("UPDATE threshold SET value='%s' WHERE metric='%s'" % (threshold.replace("!", ","), threshold_str))
+        metric_conn_cu.execute\
+        ("UPDATE threshold SET time=%s WHERE metric='%s'"%(time_interval,threshold_str))
+        metric_conn.commit()
+#        metric_conn_cu.execute("SELECT * FROM threshold")
+#        print metric_conn_cu.fetchall()
+        metric_conn.close()
+    except Exception, err:
+        print "Error(1003): Database operation FAILED"
+#        print err
+        sys.exit(1)  
+
+def nagios_reload():
+    nagios_reload_stat,nagios_reload_out = commands.getstatusoutput("service nagios restart")
+    if nagios_reload_stat:
+        print "Error(1100): service nagios reload FAILED"
+        sys.exit(1)
+
+def proc_space(space_str):
+#processing space in str 
+    proc_space_list=[]
+    proc_str_l=space_str.split('\n')
+    for proc_lstrip_slot_str in proc_str_l:
+        proc_lstrip_slot_str=proc_lstrip_slot_str.lstrip()
+        proc_space_list.append(proc_lstrip_slot_str)    
+    proc_str='\n'.join(proc_space_list)
+    return proc_str	
+
+def salt_check():
+    a=commands.getoutput("service salt-master status")
+    if "unrecognized service" in a:
+        sys.exit(1)
+    elif "stoped" in a:
+        c,d=commands.getstatusoutput("service salt-master restart|grep starting")
+        if c or not d or "FAILED" in d:
+            sys.exit(1)
+
+def sys_query_threshold():
+    try:
+        metric_conn = sqlite3.connect("/usr/local/db/alarm.db")
+        metric_conn_cu = metric_conn.cursor()
+        threshold_list = metric_conn_cu.execute("SELECT metric,value,time FROM threshold")
+        for x in threshold_list:
+            print "%-20s: %-20stime: %s"%(x[0],x[1],x[-1])
+        metric_conn.close()
+    except Exception, err:
+        print "Error(1003): Database operation FAILED"
+#        print err
+        sys.exit(1)
+
+def sys_query_type():
+    try:
+        metric_conn = sqlite3.connect("/usr/local/db/alarm.db")
+        metric_conn_cu = metric_conn.cursor()
+#trap information
+        trap_status = metric_conn_cu.execute("SELECT * FROM TRAP")
+        for row in trap_status:
+            if row[0] == 1:
+                print "Trap:",row[1],"\nPort:",row[2]
+#mail information
+        mail_status = metric_conn_cu.execute("SELECT * FROM MAIL")
+        for row in mail_status:
+            if row[0] == 1:
+                print "SMTP:",row[1],"\nuser:",row[2],"\npasswd:",row[3],\
+                "\nsender:",row[4],"\nrecipient:",row[5]
+        metric_conn.close()
+    except Exception, err:
+        print "Error(1003): Database operation FAILED"
+#        print err
+        sys.exit(1)
+
+def sys_start_mail():
+    try:
+        metric_conn = sqlite3.connect("/usr/local/db/alarm.db")
+        metric_conn_cu = metric_conn.cursor()
+        metric_conn_cu.execute("UPDATE MAIL set status=1")
+        metric_conn.commit()
+        metric_conn.close()
+    except Exception, err:
+        print "Error(1003): Database operation FAILED"
+#        print err
+        sys.exit(1)
+
+def sys_start_trap():
+    try:
+        metric_conn = sqlite3.connect("/usr/local/db/alarm.db")
+        metric_conn_cu = metric_conn.cursor()
+        metric_conn_cu.execute("UPDATE TRAP set status=1")
+        metric_conn.commit()
+        metric_conn.close()
+    except Exception, err:
+        print "Error(1003): Database operation FAILED"
+#        print err
+        sys.exit(1)
+
+def sys_stop_mail():
+    try:
+        metric_conn = sqlite3.connect("/usr/local/db/alarm.db")
+        metric_conn_cu = metric_conn.cursor()
+        metric_conn_cu.execute("UPDATE MAIL set status=0")
+        metric_conn.commit()
+        metric_conn.close()
+    except Exception, err:
+        print "Error(1003): Database operation FAILED"
+#        print err
+        sys.exit(1)
+
+def sys_stop_trap():
+    try:
+        metric_conn = sqlite3.connect("/usr/local/db/alarm.db")
+        metric_conn_cu = metric_conn.cursor()
+        metric_conn_cu.execute("UPDATE TRAP set status=0")
+        metric_conn.commit()
+        metric_conn.close()
+    except Exception, err:
+        print "Error(1003): Database operation FAILED"
+#        print err
+        sys.exit(1)
+
+if __name__ == '__main__':
+##############################################################
+    operation = None
+    time_interval = None
+    threshold = None
+   
+    try:
+        options, args = getopt.getopt(sys.argv[1:],
+          "h",["help","set","mds=","df=","time=","threshold","type","query","mail","trap",
+          "start","stop","cputotal=","cpusingle=","cputemp=","boardtemp=","fan=", "ssd="]
+          )
+    except getopt.GetoptError, err:
+        Error(610)
+        sys.exit(1)
+    if not options:
+
+        Error(610)
+        sys.exit(1)
+    if len(sys.argv[0:]) == 1:
+        Error(610)
+        sys.exit(1)
+    if len(args) != 0:
+        if "-" in args:
+            Error(610)
+            sys.exit(1)
+        else:
+            Error(610)
+            sys.exit(1)
+#    if len(sys.argv[0:])!=6 and len(sys.argv[0:])!=2:
+#        Error(610)
+#        sys.exit(1) 
+    for o, a in options:
+        if o in ("-h", "--help") and len(sys.argv[0:]) == 2:
+            if "-h" == sys.argv[1] or "--help" == sys.argv[1]:
+                usage()
+                sys.exit(0)
+        elif o in ("--time"):
+            try:
+                a_check = int(a)
+                if a_check > 20 or a_check < 1:
+                    Error(1001)
+                    sys.exit(1)
+            except Exception, err:
+                Error(1001)
+                sys.exit(1)
+            time_interval = a
+        elif o in ("--mds"):
+            threshold = a
+            try:
+                threshold_mds_check = int(a)
+                if threshold_mds_check not in range(1, 61):
+                    Error(1001)
+                    sys.exit(1)
+            except Exception,err:
+                Error(1001)
+                sys.exit(1)
+            if threshold_mds_check < 1:
+                Error(1001)
+                sys.exit(1)                
+        elif o in ("--df"):
+            threshold = a
+            try:
+                threshold_df_check = float(a)
+                if '.' in a:
+                    if len(a.split('.')[1]) != 1:
+                        Error(1001)
+                        sys.exit(1)
+            except Exception,err:
+               # print("--q")
+                Error(1001)
+                sys.exit(1)
+            if threshold_df_check > 100 or threshold_df_check < 1:
+                Error(1001)
+                sys.exit(1)
+
+        elif o in ("--cputotal"):
+            try:
+                threshold_cputotal_check = float(a)
+                if '.' in a:
+                    if len(a.split('.')[1]) != 1:
+                        Error(1001)
+                        sys.exit(1)
+                if threshold_cputotal_check > 100 or threshold_cputotal_check < 1:
+                    Error(1001)
+                    sys.exit(1)
+            except Exception, err:
+                Error(1001)
+                sys.exit(1)
+            threshold = a
+        elif o in ("--cpusingle"):
+            try:
+                threshold_cpusingle_check = float(a)
+                if '.' in a:
+                    if len(a.split('.')[1]) != 1:
+                        Error(1001)
+                        sys.exit(1)
+                if threshold_cpusingle_check > 100 or threshold_cpusingle_check < 1:
+                    Error(1001)
+                    sys.exit(1)
+            except Exception, err:
+                Error(1001)
+                sys.exit(1)
+            threshold = a
+        elif o in ("--cputemp"):
+            try:
+                threshold_cputemp_check = float(a)
+                if '.' in a:
+                    if len(a.split('.')[1]) != 1:
+                        Error(1001)
+                        sys.exit(1)
+            except Exception, err:
+                Error(1001)
+                sys.exit(1)
+            if threshold_cputemp_check > 100 or threshold_cputemp_check < 1:
+                Error(1001)
+                sys.exit(1)
+            threshold = a
+        elif o in ("--boardtemp"):
+            try:
+                threshold_boardtemp_check = float(a)
+                if '.' in a:
+                    if len(a.split('.')[1]) != 1:
+                        Error(1001)
+                        sys.exit(1)
+            except Exception, err:
+                Error(1001)
+                sys.exit(1)
+            if threshold_boardtemp_check < 1 or threshold_boardtemp_check > 60:
+                Error(1001)
+                sys.exit(1)                
+            threshold = a
+        elif o in ("--fan"):
+            fan_threshold_check = a
+            try:
+                if '.' in a:
+                    Error(1001)
+                    sys.exit(1)
+                fan_list = fan_threshold_check.split(",")
+                fan_lower = float(fan_list[0])
+                fan_high = float(fan_list[-1])
+                if len(fan_list) != 2 or fan_lower >= fan_high or fan_lower < 1 or fan_high > 99999:
+                    print "Error(1004): Invalid fan_threshold"
+                    sys.exit(1)
+            except Exception, err:
+                print "Error(1004): Invalid fan_threshold"
+                sys.exit(1)
+            threshold = a
+        elif o in ("--ssd"):
+            ssd_threshold_check = a
+            try:
+                if '.' in a:
+                    Error(1001)
+                    sys.exit(1)
+                ssd_list = ssd_threshold_check.split(",")
+                ssd_lower = int(ssd_list[0])
+                ssd_mid = int(ssd_list[1])
+                ssd_high = int(ssd_list[2])
+                if len(ssd_list) != 3 or ssd_lower >= ssd_mid or ssd_mid >= ssd_high or ssd_lower < 1 or ssd_high > 100:
+                    print "Error(1005): Invalid ssd_threshold"
+                    sys.exit(1)
+            except Exception, err:
+                print "Error(1005): Invalid ssd_threshold"
+                sys.exit(1)
+            threshold = a.replace(",", "!")
+        elif o in ("--set"):
+            if len(sys.argv[0:]) == 6:
+                if "--set" in sys.argv[1] and "--mds" in sys.argv[2] and "--time" in sys.argv[4]:
+                    operation = "sys_mds"
+                elif "--set" in sys.argv[1] and "--df" in sys.argv[2] and "--time" in sys.argv[4]:
+                    operation = "sys_df" 
+                elif "--set" in sys.argv[1] and "--cputotal" in sys.argv[2] and "--time" in sys.argv[4]:
+                    operation = "sys_cputotal"
+                elif "--set" in sys.argv[1] and "--cpusingle" in sys.argv[2] and "--time" in sys.argv[4]:
+                    operation = "sys_cpusingle"  
+                elif "--set" in sys.argv[1] and "--cputemp" in sys.argv[2] and "--time" in sys.argv[4]:
+                    operation = "sys_cputemp" 
+                elif "--set" in sys.argv[1] and "--boardtemp" in sys.argv[2] and "--time" in sys.argv[4]:
+                    operation = "sys_boardtemp" 
+                elif "--set" in sys.argv[1] and "--fan" in sys.argv[2] and "--time" in sys.argv[4]:
+                    operation = "sys_fan"
+                elif "--set" in sys.argv[1] and "--ssd" in sys.argv[2] and "--time" in sys.argv[4]:
+                    operation = "sys_ssd"
+                else:
+
+                    Error(610)
+                    sys.exit(1)
+            else:
+                Error(610)
+                sys.exit(1)
+        elif o in ("--query"):
+            if len(sys.argv[0:])==3 and "--query" in sys.argv[1] and "--threshold" in sys.argv[2] :
+                operation = "sys_query_threshold"
+            elif len(sys.argv[0:])==3 and "--query" in sys.argv[1] and "--type" in sys.argv[2] :
+                operation = "sys_query_type"            
+            else:
+                Error(610)
+                sys.exit(1)
+        elif o in ("--start"):
+            if len(sys.argv[0:])==3 and "--mail" in sys.argv[2]:
+                operation = "sys_start_mail"
+            elif len(sys.argv[0:])==3 and "--trap" in sys.argv[2]:
+                operation = "sys_start_trap"
+            else:
+                Error(610)
+                sys.exit(1)
+        elif o in ("--stop"):
+            if len(sys.argv[0:])==3 and "--mail" in sys.argv[2]:
+                operation = "sys_stop_mail"
+            elif len(sys.argv[0:])==3 and "--trap" in sys.argv[2]:
+                operation = "sys_stop_trap"
+            else:
+                Error(610)
+                sys.exit(1)
+
+    if operation == "sys_mds":
+        sys_mds()
+    if operation == "sys_df":
+        sys_df()
+    if operation == "sys_cputotal":
+        sys_cputotal()
+    if operation == "sys_cpusingle":
+        sys_cpusingle()
+    if operation == "sys_cputemp":
+        sys_cputemp()
+    if operation == "sys_boardtemp":
+        sys_boardtemp()
+    if operation == "sys_fan":
+        sys_fan()        
+    if operation == "sys_query_threshold":
+        sys_query_threshold()
+    if operation == "sys_query_type":
+        sys_query_type()
+    if operation == "sys_start_mail":
+        sys_start_mail()
+    if operation == "sys_start_trap":
+        sys_start_trap()
+    if operation == "sys_stop_mail":
+        sys_stop_mail()
+    if operation == "sys_stop_trap":
+        sys_stop_trap()
+    if operation == "sys_ssd":
+        sys_ssd_health()
+    if operation is None:
+        Error(610)
+        sys.exit(1)

@@ -1,0 +1,129 @@
+#!/usr/bin/python
+# -*- copyright -*-
+#coding:utf-8
+
+import os
+import re
+import sys
+import getopt
+import commands
+
+# Help information
+def usage():
+  print """Help(-h|--help) for icfs-admin-license:
+Usage:
+>> icfs-admin-license ----+  --query                 +----><
+                          '  --register -- licence --'
+Functions: query license information about cluster system
+Options:
+  --query:    query cluster ID, the validity of license, capacity and nodes of cluster system
+  --register: register licence key to cluster system
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully """
+
+# Error code information function  
+def Error(num):
+  if num==1201:
+    print "Error(1201): can not get license information"
+  if num==1202:
+    print "Error(1202): grant key is invalid"
+  if num==1203:
+    print "Error(1203): register license failed"
+  if num==1204:
+    print "Error(1204): grant key is repeated"
+  if num==610:
+    print "Error(610): Invalid input"
+
+# String handling function    
+def str_split(str, chr1, chr2):
+  l = list()
+  b = str.split(chr1)
+  for c in b:
+    if chr2 not in c:
+      continue
+    c = c.strip()
+    d = c.split(chr2)
+    l.append(d)
+  return dict(l)
+
+# Query licence information   
+def lic_query():
+  lic_stat,lic_relt = commands.getstatusoutput("/usr/bin/icfs grant show")
+  if lic_stat:
+    Error(1201)
+    sys.exit(1)
+  lic = str_split(lic_relt, '\n', '=')
+
+  sys_stat,sys_relt=commands.getstatusoutput("/usr/bin/icfs -s 2>/dev/null|grep 'grant_status'")  
+  if sys_stat:
+    Error(1201)
+    sys.exit(1)
+  lic_ex = str_split(sys_relt.strip(), ',', ':')
+  id_stat,id_relt=commands.getstatusoutput("/usr/bin/icfs -s 2>/dev/null|grep '^\( *cluster\)'")   
+  if id_stat:
+    Error(1201)
+    sys.exit(1)
+  id_relt = id_relt.strip()
+  sys_id = id_relt.split(' ')
+  if lic_ex['grant_status'] == 'official' or lic_ex['grant_status'] == 'exceeded':
+    print "ID: %s\nState: %s\nDays: %s\nVolumes: %sTB\nNodes: %s" % (sys_id[1], lic_ex['grant_status'], '-1', lic['official_capacity'], lic['official_hosts'])
+  elif lic_ex['grant_status'] == 'trial' or lic_ex['grant_status'] == 'expired':
+    print "ID: %s\nState: %s\nDays: %s\nVolumes: %s\nNodes: %s" % (sys_id[1], lic_ex['grant_status'], lic_ex['left_days'], '-1', '-1')
+  else:
+    Error(1201)
+    sys.exit(1)
+    
+# Register licence
+def lic_register(lic_num):
+  if not re.match(r'^[0-9a-zA-Z]+$', lic_num):
+    Error(610)
+    sys.exit(1)
+  reg_stat, reg_relt = commands.getstatusoutput('/usr/bin/icfs grant import %s' % (lic_num))
+  if reg_stat:
+    if 'grant key is bad' in reg_relt:
+      Error(1202)
+      sys.exit(1)
+    elif 'grant key is repeated' in reg_relt:
+      Error(1204)
+      sys.exit(1)
+    else:
+      Error(1203)
+      sys.exit(1)
+
+if __name__ == '__main__':
+##############################################################
+  if len(sys.argv[0:])==2 and sys.argv[1] in ("-h","--help"):
+    usage()
+    sys.exit(0)
+  if len(sys.argv) < 2 or sys.argv[1] not in ("-h", '--help', '--register', '--query'): 
+    Error(610)
+    sys.exit(1)
+  if sys.argv[1] in ("-h","--help") and len(sys.argv[0:])!=2:
+    Error(610)
+    sys.exit(1)
+  try:
+    opts, args = getopt.getopt(sys.argv[1:], "h", ["help","query","register="])
+  except getopt.GetoptError:
+    Error(610)
+    sys.exit(1)
+    
+  for o, a in opts:
+    if o in ("--query"):
+      if len(sys.argv) != 2:
+        Error(610)
+        sys.exit(1)
+      lic_query()
+      sys.exit(0)
+    if o in ("--register"):
+      if len(sys.argv) != 3:
+        Error(610)
+        sys.exit(1)
+      lic_register(a)
+      sys.exit(0)
+    
+    
+  
+  
+  
+ 

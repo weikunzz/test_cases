@@ -1,0 +1,1110 @@
+#!/usr/bin/python
+# coding:utf-8
+import os
+import sqlite3
+import commands
+import datetime
+import sys
+import re
+from icfs_util import run_local_cmd
+# import icfs_log
+from multiprocessing import Process
+import json
+import time
+import threading
+import icfs_log
+import psutil
+time_format = "%Y-%m-%d %H:%M:%S"
+time_tolerance = 8
+time_out = 15
+DEBUG = 0
+
+log = icfs_log.get_log("node_performance_handler")
+
+def connect_db(db_name):
+    # check if the dir is exit
+    con = None
+    if not os.path.exists("/dev/shm/cli/"):
+        ret = run_local_cmd("mkdir -p /dev/shm/cli/")
+        if ret["retcode"]:
+            print "Error(3511): make dir /dev/shm/cli/ to store db fail, fail info %s!" % (ret['stdout']+ret["stderr"])
+            sys.exit(1)
+    try:
+        con = sqlite3.connect("/dev/shm/cli/%s" % db_name)
+    except Exception, err:
+        print err
+        sys.exit(1)
+    return con
+
+
+def error(num, *args):
+    if num == 610:
+        print "Error(610): Invalid input!"
+    elif num == 3504:
+        print "Error(3504): get IO state fail, info: %s" % args[0]
+    elif num == 3500:
+        print "Error(3500): the object type %s not in query level %s" % (args[0], args[1])
+    elif num == 3501:
+        print "Error(3501): the input object code %s is invalid!" % args[0]
+    elif num == 3502:
+        print"Error(3502): the input node %s is not in cluster!" % args[0]
+    elif num == 3503:
+        print("Error(3503): only node level need level_value!")
+    elif num == 3506:
+        print("Error(3506): only support query history performance data in 1 hour!")
+    elif num == 3507:
+        print("Error(3507): invalid json format value %s!" % args[0])
+    elif num == 3508:
+        print("Error(3508): get data from remote %s fail, fail info: %s!" % (args[0], args[1]))
+    elif num == 3509:
+        print("Error(3509): execute cmd %s fail, fail info: %s!" % (args[0], args[1]))
+    sys.exit(1)
+
+# table list:
+"""
+iostat inof:
+                    0       1        2       3      4       5         6        7       8       9       10     11     12
+Device:         rrqm/s   wrqm/s     r/s     w/s   rkB/s    wkB/s avgrq-sz avgqu-sz   await r_await w_await  svctm  %util
+vda               0.00     0.00    1.00    0.00    8.00     0.00    16.00     0.01    5.00    5.00    0.00   5.00   0.50
+vdb               0.00     0.00    0.00    0.00    0.00     0.00     0.00     0.00    0.00    0.00    0.00   0.00   0.00
+vdc               0.00     0.00    0.00    0.00    0.00     0.00     0.00     0.00    0.00    0.00    0.00   0.00   0.00
+vdd               0.00     0.00    0.00    0.00    0.00     0.00     0.00     0.00    0.00    0.00    0.00   0.00   0.00
+vde               0.00     0.00    0.00    0.00    0.00     0.00     0.00     0.00    0.00    0.00    0.00   0.00   0.00
+vdf               0.00     0.00    0.00    0.00    0.00     0.00     0.00     0.00    0.00    0.00    0.00   0.00   0.00
+ total            0.00     0.00    1.00    0.00    8.00     0.00    16.00     0.01    5.00    5.00    0.00   5.00   0.08
+"""
+
+
+def _check_table(cur, table_name):
+    try:
+        if table_name == "disk_info":
+            crete_table_sql = "CREATE TABLE IF NOT EXISTS %s(id integer primary key," \
+                              "record_time DATETIME NOT NULL," \
+                              "device TEXT NOT NULL," \
+                              "Disk_Data_Throughput TEXT NOT NULL," \
+                              "Disk_Data_ReadThroughput TEXT NOT NULL," \
+                              "Disk_Data_WriteThroughput TEXT NOT NULL," \
+                              "Disk_Busy_Ratio TEXT NOT NULL," \
+                              "Disk_QueueSize TEXT NOT NULL," \
+                              "Disk_AverageIOResponseTime TEXT NOT NULL," \
+                              "Disk_Read_AverageIOResponseTime TEXT NOT NULL," \
+                              "Disk_Write_AverageIOResponseTime TEXT NOT NULL," \
+                              "Disk_Average_IO_Size TEXT NOT NULL," \
+                              "Disk_AverageReadIO TEXT NOT NULL," \
+                              "Disk_AverageWriteIO TEXT NOT NULL," \
+                              "Disk_Throughput TEXT NOT NULL," \
+                              "Disk_ReadThroughput TEXT NOT NULL," \
+                              "Disk_WriteThroughput TEXT NOT NULL)" \
+                              % table_name
+            cur.execute(crete_table_sql)
+        else:
+            crete_table_sql = '''CREATE TABLE IF NOT EXISTS %s(id integer primary key,
+                                                                        record_time DATETIME NOT NULL,
+                                                                        device TEXT NOT NULL,
+                                                                        device_throughput TEXT NOT NULL)''' % table_name
+            cur.execute(crete_table_sql)
+    except Exception, err:
+        print err
+        sys.exit(1)
+
+
+def save_perf_data(cur, device, data_time, value, table_name):
+    try:
+        # delete the data before 1 hour
+        cur.execute("delete from %s where record_time < datetime('now', 'localtime', '-1 hours');" % table_name)
+        # _check_table(cur, table_name)
+        cur.execute("INSERT INTO %s (record_time, device, device_throughput) VALUES (?, ?, ?)" % table_name,
+                    (data_time, device, str(value)))
+    except Exception, err:
+        if "no such table" in str(err):
+            _check_table(cur, table_name)
+            cur.execute("INSERT INTO %s (record_time, device, device_throughput) VALUES (?, ?, ?)" % table_name,
+                        (data_time, device, str(value)))
+        else:
+            print err
+
+
+def _get_time():
+    return datetime.datetime.now().strftime(time_format)
+
+
+def unit_convert(n):
+    # >>> unit_convert(10000)
+    # '9.76 KB'
+    # >>> unit_convert(100001221)
+    # '95.36 MB'
+    try:
+        symbols = (' KB', ' MB', ' GB', ' TB', ' PB', ' EB', ' ZB', ' YB')
+        prefix = {}
+        for i, s in enumerate(symbols):
+            prefix[s] = 1 << (i + 1) * 10
+        for s in reversed(symbols):
+            if n >= prefix[s]:
+                value = float(n) / prefix[s]
+                return '%.1f%s' % (value, s)
+        return "%s B" % n
+    except (ValueError, TypeError), err:
+        print err
+        sys.exit(1)
+
+
+def Disk_perf_record():
+    # get all block device
+    blocks = os.listdir("/sys/block")
+    # get hdd device
+    disks = [i for i in blocks if re.match("^(sd|hd|vd).*$", i)]
+    # filtering the system disk
+    system_disk = None
+    for disk in disks:
+        ret = run_local_cmd("lsblk -P -p -o name,mountpoint /dev/%s | awk -F '[= ]' '/MOUNTPOINT=\"\/\"/{print $2}' "
+                            % disk, True, 5)
+        if not ret["retcode"]:
+            # if stdout is not none can be considered as this is system disk
+            if ret["stdout"]:
+                system_disk = disk
+                break
+        else:
+            print "lsblk fail, fail info %s" % (ret['stdout']+ret['stderr'])
+
+    # remove the disk from the disks list
+    disks.remove(system_disk)
+    # print system_disk
+    disks_num = len(disks)
+    disks_str = "{" + ",".join(disks)+"}"
+    groupname = "total"
+    # get preformance info
+    result = run_local_cmd("iostat -x -g %s %s 1 2" % (groupname, disks_str))
+    current_time = _get_time()
+    retcode = result["retcode"]
+    stdout = result["stdout"]
+    stderr = result["stderr"]
+    if retcode:
+        # log.error("get disk performance error: %s" % stderr)
+        print ("get disk performance error: %s" % stderr)
+        sys.exit(1)
+
+    infos = stdout.splitlines()
+    infos.reverse()
+    infos = infos[0:disks_num+1]
+    # record per data
+    per_dict = {}
+    for line in infos:
+        device_per = line.strip().split()
+        per_dict[device_per[0]] = [float(value) for value in device_per[1:]]
+    disks.append(groupname)
+    # get db con
+    con = None
+    cur = None
+
+    table_name = "disk_info"
+    try:
+        # threads = []
+        # lock = threading.Lock()
+        # for device in disks:
+        #     dr = DiskRecord(per_dict, device, current_time, lock)
+        #     dr.start()
+        #     threads.append(dr)
+        # for thread in threads:
+        #     thread.join()
+        con = connect_db("Disk_Data_Throughput.db")
+        cur = con.cursor()
+        many_vars = []
+        for line in infos:
+            device_per = line.strip().split()
+            device = device_per[0]
+            perdir = [float(value) for value in device_per[1:]]
+
+            data_throughput = unit_convert((perdir[4] + perdir[5]) * 1024)
+            read_data_throughput = unit_convert(perdir[4] * 1024)
+            write_data_throughput = unit_convert(perdir[5] * 1024)
+            busy_ratio = str(round(perdir[12], 1)) + ' %'
+            queue_size = str(round(perdir[7], 1)) + ' ms'
+            average_io_response_time = str(round(perdir[8], 1)) + ' ms'
+            read_average_io_response_time = str(round(perdir[9], 1)) + ' ms'
+            write_average_io_response_time = str(round(perdir[10], 1)) + ' ms'
+            if (perdir[2] + perdir[3]) == 0:
+                average_io_size = '0.0 KB'
+            else:
+                average_io_size = str(round((perdir[4] + perdir[5]) / (perdir[2] + perdir[3]), 1)) + ' KB'
+            if perdir[2] == 0:
+                average_read_io_size = '0.0 KB'
+            else:
+                average_read_io_size = str(round(perdir[4] / perdir[2], 1)) + ' KB'
+            if perdir[3] == 0:
+                average_write_io_size = '0.0 KB'
+            else:
+                average_write_io_size = str(round(perdir[5] / perdir[3], 1)) + ' KB'
+            throughput = str(round(perdir[2] + perdir[3], 1)) + ' times'
+            read_throughput = str(round(perdir[2], 1)) + ' times'
+            write_throughput = str(round(perdir[3], 1)) + ' times'
+
+            vars = list()
+            vars.append(current_time)
+            vars.append(device)
+            vars.append(data_throughput)
+            vars.append(read_data_throughput)
+            vars.append(write_data_throughput)
+            vars.append(busy_ratio)
+            vars.append(queue_size)
+            vars.append(average_io_response_time)
+            vars.append(read_average_io_response_time)
+            vars.append(write_average_io_response_time)
+            vars.append(average_io_size)
+            vars.append(average_read_io_size)
+            vars.append(average_write_io_size)
+            vars.append(throughput)
+            vars.append(read_throughput)
+            vars.append(write_throughput)
+            many_vars.append(vars)
+
+            # insert new record
+            # cur.execute("INSERT INTO %s (record_time, device, Disk_Data_Throughput, Disk_Data_ReadThroughput, "
+            #             "Disk_Data_WriteThroughput, Disk_Busy_Ratio, Disk_QueueSize, "
+            #             "Disk_AverageIOResponseTime, Disk_Read_AverageIOResponseTime, "
+            #             "Disk_Write_AverageIOResponseTime, Disk_Average_IO_Size, Disk_AverageReadIO, "
+            #             "Disk_AverageWriteIO, Disk_Throughput, Disk_ReadThroughput, Disk_WriteThroughput) "
+            #             "VALUES (?, ?, ?, ?, ?, ?, ? , ?, ?, ?, ?, ?, ?, ?, ?, ?)" % table_name,
+            #             (current_time, device, data_throughput, read_data_throughput, write_data_throughput,
+            #              busy_ratio, queue_size, average_io_response_time, read_average_io_response_time,
+            #              write_average_io_response_time, average_io_size, average_read_io_size,
+            #              average_write_io_size, throughput, read_throughput, write_throughput))
+
+        # insert new record
+        cur.executemany("INSERT INTO %s (record_time, device, Disk_Data_Throughput, Disk_Data_ReadThroughput, "
+                        "Disk_Data_WriteThroughput, Disk_Busy_Ratio, Disk_QueueSize, "
+                        "Disk_AverageIOResponseTime, Disk_Read_AverageIOResponseTime, "
+                        "Disk_Write_AverageIOResponseTime, Disk_Average_IO_Size, Disk_AverageReadIO, "
+                        "Disk_AverageWriteIO, Disk_Throughput, Disk_ReadThroughput, Disk_WriteThroughput) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ? , ?, ?, ?, ?, ?, ?, ?, ?, ?)" % table_name, many_vars)
+        # delete old record
+        cur.execute("delete from %s where record_time < datetime('now', 'localtime', '-1 hours');" % table_name)
+    except Exception, err:
+        if "no such table" in str(err):
+            _check_table(cur, table_name)
+            cur.executemany("INSERT INTO %s (record_time, device, Disk_Data_Throughput, Disk_Data_ReadThroughput, "
+                            "Disk_Data_WriteThroughput, Disk_Busy_Ratio, Disk_QueueSize, "
+                            "Disk_AverageIOResponseTime, Disk_Read_AverageIOResponseTime, "
+                            "Disk_Write_AverageIOResponseTime, Disk_Average_IO_Size, Disk_AverageReadIO, "
+                            "Disk_AverageWriteIO, Disk_Throughput, Disk_ReadThroughput, Disk_WriteThroughput) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ? , ?, ?, ?, ?, ?, ?, ?, ?, ?)" % table_name, many_vars)
+        else:
+            print err
+            sys.exit(1)
+    finally:
+        if con:
+            con.commit()
+            con.close()
+
+
+def Ethernet_perf_record():
+    result = run_local_cmd("sar -n DEV 1 1 | grep Aver | awk -F ':' NR!=1'{print $2}'")
+    current_time = _get_time()
+    retcode = result["retcode"]
+    stdout = result["stdout"]
+    stderr = result["stderr"]
+    if retcode:
+        print ("get disk performance error: %s" % stderr)
+        sys.exit(1)
+    else:
+        infos = stdout.split('\n')
+        # record per data
+        per_dict = {}
+        for line in infos:
+            device_per = line.strip().split()
+            per_dict[device_per[0]] = [float(value) for value in device_per[1:]]
+        # get db con
+        con = None
+        try:
+            # connect db
+            con = connect_db("Eth_Data_Throughput.db")
+            cur = con.cursor()
+            for device in per_dict.keys():
+                band_width = run_local_cmd("ethtool %s | grep Speed| awk '{print $2}'" % device)
+                save_perf_data(cur, device, current_time, str(per_dict[device][0]+per_dict[device][1])+' pck/s',
+                               "Network_Packet_Rate")
+                save_perf_data(cur, device, current_time, str(per_dict[device][1])+' pck/s',
+                               "Network_Outbound_Packet_Rate")
+                save_perf_data(cur, device, current_time, str(per_dict[device][0])+' pck/s',
+                               "Network_Inbound_Packet_Rate")
+                save_perf_data(cur, device, current_time, str(per_dict[device][2]+per_dict[device][3])+' KB/s',
+                               "BandWidth")
+                save_perf_data(cur, device, current_time, str(per_dict[device][2])+' KB/s', "Read_Bandwidth")
+                save_perf_data(cur, device, current_time, str(per_dict[device][3])+' KB/s', "Write_Bandwidth")
+                if band_width["stdout"] == '' or 'Unknown!' in band_width["stdout"]:
+                    save_perf_data(cur, device, current_time, 'None', "ReadBandWidthUsage")
+                else:
+                    output = re.findall("\d+", band_width["stdout"])
+                    output = float(output[0])
+                    usage = round((per_dict[device][2]/(output*1024))*100, 4)
+                    save_perf_data(cur, device, current_time, str(usage)+' %',
+                                   "ReadBandWidthUsage")
+        except Exception, err:
+            print err
+            sys.exit(1)
+        finally:
+            if con:
+                con.commit()
+                con.close()
+
+
+def Cpu_perf_record():
+    # ret = run_local_cmd("top -b -n 2|grep Cpu|awk NR==2'{print $2, $4}'")
+    # if ret["retcode"]:
+    #     print (ret["stdout"])
+    #     print (ret["stderr"])
+    #     sys.exit(1)
+    # else:
+    #     cpu_user_usage = ret["stdout"].split()[0]
+    #     cpu_sys_usage = ret["stdout"].split()[1]
+    #     cpu_total_usage = float(cpu_user_usage) + float(cpu_sys_usage)
+    cpu_total_usage = psutil.cpu_percent(0.5)
+    cpu_usage = str(cpu_total_usage) + ' %'
+    current_time = _get_time()
+    # get db handle
+    con = None
+    try:
+        con = connect_db("CPUUsage.db")
+        cur = con.cursor()
+        save_perf_data(cur, 'cpu', current_time, cpu_usage, "CPUUsage")
+    except Exception, err:
+        print err
+        sys.exit(1)
+    finally:
+        if con:
+            con.commit()
+            con.close()
+
+
+def Memory_perf_record():
+    mem_total = commands.getoutput("free -m -b |grep Mem|awk '{print $2}'")
+    mem_free = commands.getoutput("free -m -b |grep Mem|awk '{print $4}'")
+    mem_usage = round(((float(mem_total) - float(mem_free)) / (float(mem_total)))*100, 1)
+    mem_usage = str(mem_usage) + ' %'
+    current_time = _get_time()
+    # get db handle
+    con = None
+    try:
+        con = connect_db("MemoryUsage.db")
+        cur = con.cursor()
+        save_perf_data(cur, 'memery', current_time, mem_usage, "MemoryUsage")
+    except Exception, err:
+        print err
+        sys.exit(1)
+    finally:
+        if con:
+            con.commit()
+            con.close()
+
+
+def nfs_perf_record():
+    if not is_ganesha_start():
+        return None
+    node_write_bandwidth = None
+    node_read_bandwidth = None
+    node_total_bandwidth = None
+    nfs_write_avg_latency = None
+    nfs_write_max_latency = None
+    nfs_read_avg_latency = None
+    nfs_read_max_latency = None
+    nfs_node_op_avg_latency = None
+    nfs_node_op_max_latency = None
+    nfs_write_bandwidth_dic = {}
+    nfs_read_bandwidth_dic = {}
+    nfs_total_bandwidth_dic = {}
+    nfs_write_max_latency_dic = {}
+    nfs_write_avg_latency_dic = {}
+    nfs_read_avg_latency_dic = {}
+    nfs_read_max_latency_dic = {}
+
+    # for count the online client number
+    client_count = 0
+
+    # node NFS band
+    ret_nfs_node = run_local_cmd("ganesha_qos_stats show_nfs_bd")
+    if ret_nfs_node["retcode"]:
+        print >> sys.stderr, ret_nfs_node["stderr"]
+    else:
+        output = ret_nfs_node["stdout"].split("\n")
+        for item in output:
+            temp = re.match("^write bandwidth\(KB\):\s*(\d+)", item)
+            if temp:
+                node_write_bandwidth = temp.group(1)
+                continue
+            temp = re.match("^read bandwidth\(KB\):\s*(\d+)", item)
+            if temp:
+                node_read_bandwidth = temp.group(1)
+                continue
+            temp = re.match("^total bandwidth\(KB\):\s*(\d+)", item)
+            if temp:
+                node_total_bandwidth = temp.group(1)
+                continue
+
+    # client NFS bandwidth
+    ret_bandwidth = run_local_cmd("ganesha_qos_stats show_client_bd")
+    if ret_bandwidth["retcode"]:
+        print >> sys.stderr, ret_bandwidth["stderr"]
+    else:
+        output = ret_bandwidth["stdout"].strip().split("\n")
+        for item in output[3:]:
+            client_count += 1
+            nfs_write_bandwidth_dic[item.split()[0]] = item.split()[1]
+            nfs_read_bandwidth_dic[item.split()[0]] = item.split()[2]
+            nfs_total_bandwidth_dic[item.split()[0]] = item.split()[3]
+
+    # get write and read latency
+    read_ret = run_local_cmd("ganesha_stat_tool show_nfs_ops | awk -F '  *' '/^  *READ  */{print $5,$6}'")
+    if read_ret["retcode"]:
+        print >> sys.stderr, read_ret["stderr"]
+    else:
+        if not read_ret["stdout"]:
+            print >> sys.stderr, "Error: Can't talk to ganesha service on d-bus. Looks like Ganesha is down"
+        else:
+            nfs_read_avg_latency = read_ret["stdout"].split()[0]
+            nfs_read_max_latency = read_ret["stdout"].split()[1]
+    write_ret = run_local_cmd("ganesha_stat_tool show_nfs_ops | awk -F '  *' '/^  *WRITE  */{print $5,$6}'")
+    if write_ret["retcode"]:
+        print >> sys.stderr, write_ret["stderr"]
+    else:
+        if not read_ret["stdout"]:
+            print >> sys.stderr, "Error: Can't talk to ganesha service on d-bus. Looks like Ganesha is down"
+        else:
+            nfs_write_avg_latency = write_ret["stdout"].split()[0]
+            nfs_write_max_latency = write_ret["stdout"].split()[1]
+
+    # get client latency
+    clinet_latency_ret = run_local_cmd("ganesha_stat_tool show_client_ops"
+                                       " | awk '/client ip/ || /WRITE/ || /READ/ "
+                                       "{if($1==\"client\")print $3;else print $4,$5}'")
+    if clinet_latency_ret["retcode"]:
+        print >> sys.stderr, ret_bandwidth["stderr"]
+    else:
+        output = clinet_latency_ret["stdout"].strip().split("\n")
+        if not output:
+            print >> sys.stderr, "ganesha_stat_tool show_client_ops execute not well"
+        else:
+            clients = [item for item in output if re.match("(\d{1,3}\.){3}\d{1,3}", item)]
+            for client in clients:
+                key = output.index(client)
+                # following is this client write data
+                nfs_write_avg_latency_dic[client] = output[key + 1].split()[0]
+                nfs_write_max_latency_dic[client] = output[key + 1].split()[1]
+                # next line is client read data
+                nfs_read_avg_latency_dic[client] = output[key + 2].split()[0]
+                nfs_read_max_latency_dic[client] = output[key + 2].split()[1]
+
+    # get NFS node OPS
+    ret_node_op_latency = run_local_cmd("ganesha_stat_tool show_nfs_ops | grep TOTAL")
+    if ret_node_op_latency["retcode"]:
+        print >> sys.stderr, ret_bandwidth["stderr"]
+    else:
+        output = ret_node_op_latency["stdout"].strip().split()
+        if not output:
+            print >> sys.stderr, "ganesha_stat_tool show_nfs_ops | grep TOTAL get nothing"
+        else:
+            nfs_node_op_avg_latency = output[3]
+            nfs_node_op_max_latency = output[4]
+
+    # clear the history data
+    # clear_ret = run_local_cmd("ganesha_stat_tool reset_nfs_ops")
+    # if clear_ret["retcode"]:
+    #     print >> sys.stderr, clear_ret["stderr"] + clear_ret["stdout"]
+    # else:
+    #     if "reset ok" not in clear_ret["stdout"]:
+    #         print >> sys.stderr, clear_ret["stderr"] + clear_ret["stdout"]
+    # clear_ret = run_local_cmd("ganesha_stat_tool reset_client_ops")
+    # if clear_ret["retcode"]:
+    #     print >> sys.stderr, clear_ret["stderr"] + clear_ret["stdout"]
+    # else:
+    #     if "reset ok" not in clear_ret["stdout"]:
+    #         print >> sys.stderr, clear_ret["stderr"] + clear_ret["stdout"]
+
+    # write data to db
+    con = None
+    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        con = connect_db("Nfs.db")
+        cur = con.cursor()
+        if nfs_write_bandwidth_dic and nfs_read_bandwidth_dic and nfs_total_bandwidth_dic:
+            # save client NFS bandwidth
+            for item in nfs_write_bandwidth_dic.keys():
+                save_perf_data(cur, item, current_time, unit_convert(float(nfs_write_bandwidth_dic[item])*1024),
+                               "NFS_In_Bandwidth")
+                save_perf_data(cur, item, current_time, unit_convert(float(nfs_read_bandwidth_dic[item])*1024),
+                               "NFS_Out_Bandwidth")
+                save_perf_data(cur, item, current_time, unit_convert(float(nfs_total_bandwidth_dic[item])*1024),
+                               "NFS_Bandwidth")
+        # save NFS client count
+        save_perf_data(cur, 'total', current_time, str(client_count) + ' num',
+                       "Connected_NFS_Client_Count")
+        if node_write_bandwidth and node_read_bandwidth and node_total_bandwidth:
+            # save node NFS bandwidth
+            save_perf_data(cur, 'total', current_time, unit_convert(float(node_write_bandwidth)*1024), "NFS_In_Bandwidth")
+            save_perf_data(cur, 'total', current_time, unit_convert(float(node_read_bandwidth)*1024), "NFS_Out_Bandwidth")
+            save_perf_data(cur, 'total', current_time, unit_convert(float(node_total_bandwidth)*1024), "NFS_Bandwidth")
+        if nfs_write_avg_latency and nfs_write_max_latency:
+            # save latency
+            save_perf_data(cur, 'total', current_time, nfs_write_avg_latency+" ms", "NFS_write_latency_avg")
+            save_perf_data(cur, 'total', current_time, nfs_write_max_latency+" ms", "NFS_write_latency_max")
+        if nfs_read_avg_latency and nfs_read_max_latency:
+            save_perf_data(cur, 'total', current_time, nfs_read_avg_latency+" ms", "NFS_read_latency_avg")
+            save_perf_data(cur, 'total', current_time, nfs_read_max_latency+" ms", "NFS_read_latency_max")
+        if nfs_read_max_latency_dic and nfs_read_avg_latency_dic and nfs_write_avg_latency_dic \
+                and nfs_write_max_latency_dic:
+            for item in nfs_read_max_latency_dic.keys():
+                save_perf_data(cur, item, current_time, nfs_read_max_latency_dic[item] + " ms",
+                               "NFS_read_latency_max")
+                save_perf_data(cur, item, current_time, nfs_read_avg_latency_dic[item] + " ms",
+                               "NFS_read_latency_avg")
+                save_perf_data(cur, item, current_time, nfs_write_avg_latency_dic[item] + " ms",
+                               "NFS_write_latency_avg")
+                save_perf_data(cur, item, current_time, nfs_write_max_latency_dic[item] + " ms",
+                               "NFS_write_latency_max")
+        # save the node nfs ops
+        if nfs_node_op_avg_latency and nfs_node_op_max_latency:
+            save_perf_data(cur, 'total', current_time, nfs_node_op_avg_latency + " times", "NFS_node_Read_OPS")
+            save_perf_data(cur, 'total', current_time, nfs_node_op_max_latency + " times", "NFS_node_Write_OPS")
+            total = str(int(nfs_node_op_max_latency)+int(nfs_node_op_max_latency))
+            save_perf_data(cur, 'total', current_time,  total + " times", "NFS_node_OPS")
+
+    except Exception, err:
+        print err
+        sys.exit(1)
+    finally:
+        if con:
+            con.commit()
+            con.close()
+
+
+def is_smb_start():
+    status, output = commands.getstatusoutput("systemctl status smb")
+    if "active (running)" in output:
+        return True
+    else:
+        return False
+
+def is_ganesha_start():
+    status, output = commands.getstatusoutput("systemctl status ganesha")
+    if "active (running)" in output:
+        return True
+    else:
+        return False
+
+def is_ftp_start():
+    status, output = commands.getstatusoutput("systemctl status vsftpd")
+    if "active (running)" in output:
+        return True
+    else:
+        return False
+
+
+def cifs_perf_record():
+    if not is_smb_start():
+        return None
+    # command: icfs-smbd qos get info
+    result = run_local_cmd("icfs-smbd qos get info")
+    current_time = _get_time()
+    retcode = result["retcode"]
+    # stderr = result["stderr"]
+    stdout = result["stdout"]
+    if retcode:
+        print >> sys.stderr, stdout
+        return 0
+        # log.error(stdout)
+    qos_infos = stdout.splitlines()
+    if len(qos_infos) <= 3:
+        # log.info(stdou)
+        print >> sys.stderr, stdout
+        qos_infos = []
+    else:
+        qos_infos = qos_infos[3:]
+        qos_infos = [qos_info.split() for qos_info in qos_infos]
+    #    0              1                   2                 3          4            5
+    # conn-id		remoteip		    localip			    write		read		total
+    # 933755		100.7.16.37     	100.7.43.66     	1492832		26552		1519384
+    total_read = 0
+    total_write = 0
+    total_io = 0
+    con = None
+    try:
+        con = connect_db("Cifs_Perf.db")
+        cur = con.cursor()
+        try:
+            for qos_info in qos_infos:
+                save_perf_data(cur, qos_info[1], current_time, unit_convert(int(qos_info[3])), "CIFS_In_Bandwidth")
+                save_perf_data(cur, qos_info[1], current_time, unit_convert(int(qos_info[4])), "CIFS_Out_Bandwidth")
+                save_perf_data(cur, qos_info[1], current_time, unit_convert(int(qos_info[5])), "CIFS_Bandwidth")
+                total_write += int(qos_info[3])
+                total_read += int(qos_info[4])
+                total_io += int(qos_info[5])
+            # save node info
+            save_perf_data(cur, "total", current_time, unit_convert(total_write), "CIFS_In_Bandwidth")
+            save_perf_data(cur, "total", current_time, unit_convert(total_read), "CIFS_Out_Bandwidth")
+            save_perf_data(cur, "total", current_time, unit_convert(total_io), "CIFS_Bandwidth")
+        except Exception, e:
+            # log.error(e)
+            print e
+            pass
+    except Exception, e:
+        # log.error(e)
+        print e
+    finally:
+        if con:
+            con.commit()
+            con.close()
+
+
+def cifs_latency_record():
+    # 1、icfs-smbd refresh
+    # 2、icfs-smbd
+    # 3、icfs-smbd [id] profile set
+    # 4、icfs-smbd [id] profile print
+    if not is_smb_start():
+        return None
+
+    # 1. refresh
+    run_local_cmd("icfs-smbd")
+    # 2. get all clients
+    result = run_local_cmd("icfs-smbd | awk '/SMBD INFO/,/USAGE/{print}' | grep -v SMBD | grep -v USAGE | grep -v '^id'")
+    stdout = result["stdout"]
+    clients = [client.split() for client in stdout.splitlines()]
+    #  0                1               2         4
+    # id             process_id     client        Server
+    # 1              3534380        100.7.16.37   100.7.16.38
+    # 2              88806          100.7.16.37   100.7.16.38
+    # 3              933755         100.7.16.37   100.7.16.38
+    # 4              1698492        100.7.16.37   100.7.16.38
+    # # sleep 5s
+    # if clients:
+    #     time.sleep(5)
+
+    # to resolve the father process wait long time issue, change the latency get way as following:
+    # As the 15s is timeout, get the latency firstly, then clear the latency.
+    client_latency = dict()
+    #      0                         1               2               3               4
+    # opcode_call                    opcode_count    opcode_sum_time opcode_avg_time opcode_max_time
+    # Op_SMB2_OP_READ                0               0               0               0
+    # Op_SMB2_OP_WRITE               0               0               0               0
+    for client in clients:
+        # 3. get profile
+        client_latency[client[2]] = run_local_cmd("icfs-smbd %s profile print | grep 'Op_SMB2_OP_READ\|Op_SMB2_OP_WRITE' " % client[2])["stdout"]
+        # 4. set profile
+        run_local_cmd("icfs-smbd %s profile start" % client[2])
+
+    current_time = _get_time()
+    # count node info
+    read_latency = 0
+    read_times = 0
+    write_latency = 0
+    write_times = 0
+    node_max_read_latency = 0
+    node_max_write_latency = 0
+    # get db handler
+    con = None
+    try:
+        con = connect_db("Cifs_Perf.db")
+        cur = con.cursor()
+        for key, value in client_latency.items():
+            for line in value.splitlines():
+                infos = line.split()
+                if infos[0] == "Op_SMB2_OP_READ":
+                    read_latency += float(infos[2])
+                    read_times += float(infos[1])
+                    node_max_read_latency = max(node_max_read_latency, float(infos[4]))
+                    save_perf_data(cur, key, current_time, infos[3]+" us", "CIFS_read_latency_avg")
+                    save_perf_data(cur, key, current_time, infos[4] + " us", "CIFS_read_latency_max")
+                elif infos[0] == "Op_SMB2_OP_WRITE":
+                    write_latency += float(infos[2])
+                    write_times += float(infos[1])
+                    node_max_write_latency = max(node_max_write_latency, float(infos[4]))
+                    save_perf_data(cur, key, current_time, infos[3] + " us", "CIFS_write_latency_avg")
+                    save_perf_data(cur, key, current_time, infos[4] + " us", "CIFS_write_latency_max")
+        # save node info
+        save_perf_data(cur, "total", current_time, str(int(node_max_read_latency))+" us", "CIFS_read_latency_max")
+        save_perf_data(cur, "total", current_time, str(int(node_max_write_latency)) + " us", "CIFS_write_latency_max")
+        if read_times != 0:
+            read_ave = read_latency / read_times
+            read_ave = int(read_ave)
+            save_perf_data(cur, "total", current_time, str(read_ave) + " us", "CIFS_read_latency_avg")
+        else:
+            save_perf_data(cur, "total", current_time, "0 us", "CIFS_read_latency_avg")
+        if write_times != 0:
+            write_ave = write_latency / write_times
+            write_ave = int(write_ave)
+            save_perf_data(cur, "total", current_time, str(write_ave) + " us", "CIFS_write_latency_avg")
+        else:
+            save_perf_data(cur, "total", current_time, "0 us", "CIFS_write_latency_avg")
+        save_perf_data(cur, "total", current_time, str(len(client_latency))+' num',
+                       "Connected_CIFS_Client_Count")
+    except Exception, e:
+        print e
+        # log.error(e)
+    finally:
+        if con:
+            con.commit()
+            con.close()
+
+
+def query_node_perf(perftype, period, database, start_time, if_json=False):
+    table_name = perftype[5:]    # remove 'node_'
+    time_midle = time.mktime(time.strptime(start_time, time_format))
+    start = time_midle - time_tolerance
+    end = time_midle + time_tolerance
+    device_name = "total"
+    start_time = time.strftime(time_format, time.localtime(start))
+    end_time = time.strftime(time_format, time.localtime(end))
+
+    select_current_total = "select record_time,device,device_throughput from '{table_name}' " \
+                           "where device == '{device_name}' " \
+                           "and record_time >= strftime('{time_format}','{start_time}') " \
+                           "and record_time <= strftime('{time_format}', '{end_time}') "\
+                           "order by record_time asc limit 1; ".format(table_name=table_name, device_name=device_name,
+                                                                        time_format=time_format, start_time=start_time,
+                                                                        end_time=end_time)
+    # log = icfs_log.get_log("node_performance_hander")
+    # log.info("get the info %s" % select_current_total)
+    return_list = query_perf_data(table_name, period, database, total=True, if_json=if_json, sql=select_current_total)
+    if if_json:
+        print json.dumps(return_list)
+    else:
+        print "Data_name: {0}".format(table_name)
+        print "{:<30}{:<30}".format("time_stamp", "Data_value")
+        for item in return_list:
+            print "{:<30}{}: {}".format(item[0], table_name, item[2])
+
+
+def query_perf_data(query_perftype, query_period, database_name, total=False, if_json=False, sql=None):
+    select_current = "select record_time,device,device_throughput from %s " \
+                     "where device != 'total' " \
+                     "and record_time = (select record_time from %s where device != 'total' " \
+                     "order by record_time desc limit 1) " \
+                     "order by record_time, device;" % (query_perftype, query_perftype)
+
+    select_current_total = "select record_time,device,device_throughput from %s " \
+                           "where device = 'total' " \
+                           "and record_time = (select record_time from %s where device == 'total' " \
+                           "order by record_time desc limit 1) " \
+                           "order by record_time, device;" % (query_perftype, query_perftype)
+
+    select_period = "select record_time,device,device_throughput from %s " \
+                    "where device != 'total' " \
+                    "and record_time > datetime('now', 'localtime', '-%s seconds') " \
+                    "order by record_time, device;" % (query_perftype, query_period)
+
+    select_period_total = "select record_time,device,device_throughput from %s " \
+                          "where device = 'total' " \
+                          "and record_time > datetime('now', 'localtime', '-%s seconds') " \
+                          "order by record_time, device;" % (query_perftype, query_period)
+    con = None
+    cur = None
+    return_list = []
+    if DEBUG:
+        print query_period, total
+    try:
+        con = connect_db(database_name)
+        cur = con.cursor()
+        query_list = None
+        if sql:
+            query_list = cur.execute(sql)
+        elif int(query_period) == 0 and total:
+            if DEBUG:
+                print select_current_total
+            query_list = cur.execute(select_current_total)
+        elif int(query_period) != 0 and total:
+            if DEBUG:
+                print select_period_total
+            query_list = cur.execute(select_period_total)
+        elif int(query_period) == 0 and not total:
+            if DEBUG:
+                print select_current
+            query_list = cur.execute(select_current)
+        elif int(query_period) != 0 and not total:
+            if DEBUG:
+                print select_period
+            query_list = cur.execute(select_period)
+        if query_list:
+            return_list = query_list.fetchall()
+        if total:
+            return return_list
+        else:
+            if if_json:
+                print json.dumps(return_list)
+                pass
+            else:
+                print "Data_name: {0}".format(query_perftype)
+                print "{:<30}{:<30}".format("time_stamp", "Data_value")
+                for item in return_list:
+                    print "{:<30}{}: {}".format(item[0], item[1], item[2])
+    except Exception, err:
+        if "no such table" in str(err):
+            _check_table(cur, query_perftype)
+            con.commit()
+        print >> sys.stdout, err
+        sys.exit(1)
+    finally:
+        if con:
+            con.close()
+
+
+def query_disk_perf_data(query_perftype, query_period, database_name, total=False, if_json=False, sql=None):
+    table_name = "disk_info"
+    select_current = "select record_time,device,%s from %s " \
+                     "where device != 'total' " \
+                     "and record_time = (select record_time from %s where device != 'total' " \
+                     "order by record_time desc limit 1) " \
+                     "order by record_time, device;" % (query_perftype, table_name, table_name)
+
+    select_current_total = "select record_time,device,%s from %s " \
+                           "where device = 'total' " \
+                           "and record_time = (select record_time from %s where device == 'total' " \
+                           "order by record_time desc limit 1) " \
+                           "order by record_time, device;" % (query_perftype, table_name, table_name)
+
+    select_period = "select record_time,device,%s from %s " \
+                    "where device != 'total' " \
+                    "and record_time > datetime('now', 'localtime', '-%s seconds') " \
+                    "order by record_time, device;" % (query_perftype, table_name, query_period)
+
+    select_period_total = "select record_time,device,%s from %s " \
+                          "where device = 'total' " \
+                          "and record_time > datetime('now', 'localtime', '-%s seconds') " \
+                          "order by record_time, device;" % (query_perftype, table_name, query_period)
+    con = None
+    cur = None
+    return_list = []
+    if DEBUG:
+        print query_period, total
+    try:
+        con = connect_db(database_name)
+        cur = con.cursor()
+        query_list = None
+        if sql:
+            query_list = cur.execute(sql)
+        elif int(query_period) == 0 and total:
+            if DEBUG:
+                print select_current_total
+            query_list = cur.execute(select_current_total)
+        elif int(query_period) != 0 and total:
+            if DEBUG:
+                print select_period_total
+            query_list = cur.execute(select_period_total)
+        elif int(query_period) == 0 and not total:
+            if DEBUG:
+                print select_current
+            query_list = cur.execute(select_current)
+        elif int(query_period) != 0 and not total:
+            if DEBUG:
+                print select_period
+            query_list = cur.execute(select_period)
+        if query_list:
+            return_list = query_list.fetchall()
+        if total:
+            return return_list
+        else:
+            if if_json:
+                print json.dumps(return_list)
+                pass
+            else:
+                print "Data_name: {0}".format(query_perftype)
+                print "{:<30}{:<30}".format("time_stamp", "Data_value")
+                for item in return_list:
+                    print "{:<30}{}: {}".format(item[0], item[1], item[2])
+    except Exception, err:
+        if "no such table" in str(err):
+            _check_table(cur, query_perftype)
+            con.commit()
+        print >> sys.stdout, err
+        sys.exit(1)
+    finally:
+        if con:
+            con.close()
+
+
+def BandWidth_KB(query_period, if_json):
+    query_list = query_disk_perf_data("Disk_Data_Throughput", query_period, "Disk_Data_Throughput.db", total=True,
+                                      if_json=if_json)
+    print "Data_name: {0}".format("BandWidth_KB")
+    print "{:<30}{:<30}".format("time_stamp", "Data_value")
+    for item in query_list:
+        print "{:<30}{}: {}".format(item[0], "bandwidth", item[2])
+    return 0
+
+
+def Write_Bandwidth_KB(query_period, if_json):
+    query_list = query_disk_perf_data("Disk_Data_WriteThroughput", query_period, "Disk_Data_Throughput.db", total=True,
+                                      if_json=if_json)
+    print "Data_name: {0}".format("BandWidth_KB")
+    print "{:<30}{:<30}".format("time_stamp", "Data_value")
+    for item in query_list:
+        print "{:<30}{}: {}".format(item[0], "bandwidth", item[2])
+    return 0
+
+
+def Read_Bandwidth_KB(query_period, if_json):
+    query_list = query_disk_perf_data("Disk_Data_ReadThroughput", query_period, "Disk_Data_Throughput.db", total=True,
+                                      if_json=if_json)
+    print "Data_name: {0}".format("BandWidth_KB")
+    print "{:<30}{:<30}".format("time_stamp", "Data_value")
+    for item in query_list:
+        print "{:<30}{}: {}".format(item[0], "bandwidth", item[2])
+    return 0
+
+
+def latencty_query(query_perftype, query_period, database_name, if_json):
+    query_list = query_perf_data(query_perftype, query_period, database_name, total=True,
+                                 if_json=if_json)
+    print "Data_name: {0}".format(query_perftype)
+    print "{:<30}{:<30}".format("time_stamp", "Data_value")
+    for item in query_list:
+        print "{:<30}{}: {}".format(item[0], "total", item[2])
+
+
+def node_collect_and_write_data():
+    threads = []
+    if not os.path.exists("/var/lib/cli"):
+        os.mkdir("/var/lib/cli")
+    # Disk_perf_record()
+    # print "1"
+    # Cpu_perf_record()
+    # print "2"
+    # Memory_perf_record()
+    # print "3"
+    # Ethernet_perf_record()
+    # print "4"
+    # cifs_perf_record()
+    # print "5"
+    # cifs_latency_record()
+    # print "6"
+    # nfs_perf_record()
+    # print "7"
+    threads.append(Process(target=Disk_perf_record))
+    threads.append(Process(target=Cpu_perf_record))
+    threads.append(Process(target=Memory_perf_record))
+    threads.append(Process(target=Ethernet_perf_record))
+    threads.append(Process(target=cifs_perf_record))
+    threads.append(Process(target=cifs_latency_record))
+    threads.append(Process(target=nfs_perf_record))
+    for t in threads:
+        t.start()
+    time_waited = 0
+    then = time.time()
+    is_alive = True
+    while is_alive:
+        for p in threads:
+            if time_waited >= time_out:
+                p.terminate()
+            else:
+                p.join(time_out - time_waited)
+            time_waited = time.time() - then
+        is_alive = False
+        for p in threads:
+            if p.is_alive():
+                is_alive = True
+
+if __name__ == '__main__':
+    period = 0
+    # log = icfs_log.get_log("node_performance_handler")
+    node_options = ["Disk_Data_Throughput", "Disk_Data_ReadThroughput", "Disk_Data_WriteThroughput",
+                    "Disk_Busy_Ratio", "Disk_QueueSize", "Disk_AverageIOResponseTime",
+                    "Disk_Read_AverageIOResponseTime", "Disk_Write_AverageIOResponseTime",
+                    "Disk_Average_IO_Size", "Disk_AverageReadIO", "Disk_AverageWriteIO",
+                    "Disk_Throughput", "Disk_ReadThroughput", "Disk_WriteThroughput"]
+    disk_total_options = ["BandWidth_KB", "Read_Bandwidth_KB", "Write_Bandwidth_KB"]
+    cpu_options = ["CPUUsage"]
+    memory_options = ["MemoryUsage"]
+    ethernet_options = ["Network_Packet_Rate", "Network_Inbound_Packet_Rate", "Network_Outbound_Packet_Rate",
+                        "ReadBandWidthUsage", "BandWidth", "Read_Bandwidth", "Write_Bandwidth"]
+    cifs_options = ["CIFS_Bandwidth", "CIFS_Out_Bandwidth", "CIFS_In_Bandwidth",
+                    "Connected_CIFS_Client_Count", "CIFS_write_latency_avg", "CIFS_write_latency_max",
+                    "CIFS_read_latency_avg", "CIFS_read_latency_max"]
+    node_cifs_options = ["node_CIFS_Bandwidth", "node_CIFS_Out_Bandwidth", "node_CIFS_In_Bandwidth",
+                         "node_Connected_CIFS_Client_Count", "node_CIFS_write_latency_avg",
+                         "node_CIFS_write_latency_max", "node_CIFS_read_latency_avg", "node_CIFS_read_latency_max"]
+    node_nfs_options = ["node_NFS_Bandwidth", "node_NFS_Out_Bandwidth", "node_NFS_In_Bandwidth",
+                        "node_Connected_NFS_Client_Count", "node_NFS_write_latency_avg", "node_NFS_write_latency_max",
+                        "node_NFS_read_latency_avg", "node_NFS_read_latency_max", "node_NFS_node_OPS",
+                        "node_NFS_node_Read_OPS", "node_NFS_node_Write_OPS"]
+    nfs_options = ["NFS_Bandwidth", "NFS_Out_Bandwidth", "NFS_In_Bandwidth", "Connected_NFS_Client_Count",
+                   "NFS_read_latency_avg", "NFS_read_latency_max", "NFS_write_latency_avg", "NFS_write_latency_max",
+                   "NFS_node_Read_OPS", "NFS_node_Write_OPS", "NFS_node_OPS"]
+    client_nfs_options = ["client_NFS_Bandwidth", "client_NFS_Out_Bandwidth", "client_NFS_In_Bandwidth",
+                          "client_NFS_Read_latency_avg", "client_NFS_Read_latency_max",
+                          "client_NFS_Write_latency_avg", "client_NFS_Write_latency_max"]
+    client_cifs_options = ["client_CIFS_Bandwidth", "client_CIFS_Out_Bandwidth", "client_CIFS_In_Bandwidth",
+                           "client_CIFS_Write_latency_avg", "client_CIFS_Write_latency_max",
+                           "client_CIFS_Read_latency_avg", "client_CIFS_Read_latency_max"]
+    option = sys.argv[1]
+    is_json = False
+    if option == "record":
+        # clollect node info
+        node_collect_and_write_data()
+    elif option == "disk":
+        Disk_perf_record()
+    elif option == "nfs":
+        nfs_perf_record()
+    elif option == "cifs":
+        cifs_perf_record()
+    elif option == "cifs_latency":
+        cifs_latency_record()
+    elif option == "ethernet":
+        Ethernet_perf_record()
+    elif option == "mem":
+        Memory_perf_record()
+    elif option == "cpu":
+        Cpu_perf_record()
+    else:
+        if option in node_nfs_options:
+            try:
+                start_time = sys.argv[2]
+                start_time = start_time.replace('_', ' ')
+            except:
+                print "need timestemp"
+                sys.exit(1)
+            query_node_perf(option, period, "Nfs.db", start_time, if_json=is_json)
+        elif option in node_cifs_options:
+            try:
+                start_time = sys.argv[2]
+                start_time = start_time.replace('_', ' ')
+            except:
+                print "need timestemp"
+                sys.exit(1)
+            query_node_perf(option, period, "Cifs_Perf.db", start_time, if_json=is_json)
+        else:
+            try:
+                period = int(sys.argv[2])
+            except ValueError, e:
+                print e
+                sys.exit(1)
+            if period > 3600:
+                error(3506)
+            try:
+                if sys.argv[3] == "True":
+                    is_json = True
+                elif sys.argv[3] == "False":
+                    is_json = False
+                else:
+                    error(3507, sys.argv[3])
+            except Exception, e:
+                print e
+
+            if option not in disk_total_options + node_options + cpu_options + memory_options + ethernet_options\
+                    + cifs_options + nfs_options + client_cifs_options + client_nfs_options:
+                error(610)
+            if option in disk_total_options:
+                eval(sys.argv[1])(sys.argv[2], sys.argv[3])
+            elif option in node_options:
+                query_disk_perf_data(option, period, "Disk_Data_Throughput.db", if_json=is_json)
+            elif option in cpu_options:
+                query_perf_data(option, period, "CPUUsage.db", if_json=is_json)
+            elif option in memory_options:
+                query_perf_data(option, period, "MemoryUsage.db", if_json=is_json)
+            elif option in ethernet_options:
+                query_perf_data(option, period, "Eth_Data_Throughput.db", if_json=is_json)
+            elif option in cifs_options:
+                latencty_query(option, period, "Cifs_Perf.db", if_json=is_json)
+            elif option in nfs_options:
+                latencty_query(option, period, "Nfs.db", if_json=is_json)
+            elif option in client_nfs_options:
+                query_perf_data(option[7:], period, "Nfs.db", if_json=is_json)
+            elif option in client_cifs_options:
+                query_perf_data(option[7:], period, "Cifs_Perf.db", if_json=is_json)
+

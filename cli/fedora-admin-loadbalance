@@ -1,0 +1,939 @@
+#!/usr/bin/python
+# coding:utf-8
+
+import os
+import sys
+import getopt
+import commands
+import re
+import traceback
+import os.path
+import json
+import types
+import time
+from lxml import etree
+import OptParser
+
+import icfs_util
+from loadbalancexml import PATH_XML_FILE as LOADBALANCE_XML_FILE
+from linksxml import PATH_XML_FILE as LINKS_XML_FILE
+
+from icfs_util import run_remote_cmd, run_remote_copy
+
+PDNS_CONF_FILE = "/etc/pdns/pdns.conf"
+
+def usage():
+    print """Help(-h|--help)for icfs-admin-loadbalance:
+Usage:
+>> icfs-admin-loadbalance ----+ --add    +----><
+                              + --delete +
+                              + --update +
+                              ' --query  '
+                              ' --manager'
+Functions: add loadbalance, delete loadbalance, update loadbalance, query loadbalance
+Options:
+  --add:        add loadbalance
+  --delete:     delete loadbalance 
+  --update:     update loadbalance 
+  --query:      query loadbalance 
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+icfs-admin-loadbalance --add:
+Usage:
+>> icfs-admin-loadbalance ---- --add ---- --domain domain_name ---- --policy policy_value ----><
+Functions: Add domain
+Options: 
+  --domain:     domain name
+  --policy:     loadbalance policy(round-robin, link)
+  --cifs:       cifs port
+  --nfs:        nfs port
+  --ip:         ip weight
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+  
+>> icfs-admin-loadbalance ---- --add ---- --domain domain_name ---- --ip ip_weight ----><
+Functions: As ip address in specific domain
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+  
+>> icfs-admin-loadbalance ---- --add --+-- --cifs cifs_port --+----><
+                                       '-- --nfs nfs_port   --'
+Functions: Add cifs/nfs port 
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+  
+icfs-admin-loadbalance --delete:
+Usage:
+>> icfs-admin-loadbalance ---- --delete ---- --domain domain_name ----><
+Functions: Delete domain
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+  
+>> icfs-admin-loadbalance ---- --delete ---- --domain domain_name ---- --ip ip_address ----><
+Functions: Delete ip from specific domain
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+  
+>> icfs-admin-loadbalance ---- --delete --+-- --cifs cifs_port --+----><
+                                          '-- --nfs nfs_port   --'
+Functions: Delete cifs/nfs port
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+  
+icfs-admin-loadbalance --update:
+Usage:
+>> icfs-admin-loadbalance ---- --update ---- --domain domain_name ---- --refresh refresh_interval ------------->
+   --- --retry retry_interval ---- --expiry expiry_interval ---- --ttl ttl_value ---- --policy policy_value --><
+Functions: Update attributes in specific domain
+Options: 
+  --refresh:    refresh interval
+  --retry:      retry interval
+  --expiry:     expiry interval
+  --ttl:        ttl value
+  --policy:     loadbalance policy
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>> icfs-admin-loadbalance ---- --update ---- --collect collect_interval ----------------------------->
+   -- --send send_interval ---- --community community_value ---- --port dst_port ---- --ip dst_ip --><
+Functions: Update attributes
+Options: 
+  --collect:    collect interval
+  --send:       send interval
+  --community:  access authority
+  --port:       destination port
+  --ip:         destination ip
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+  
+icfs-admin-loadbalance --query:
+Usage:
+>> icfs-admin-loadbalance ---- --query ----><
+Functions: Query loadbalance
+Options: None
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+icfs-admin-loadbalance --manager:
+Usage:
+>> icfs-admin-loadbalance ---- --manager ---- + --start   +----><
+                                              ' --stop    '
+                                              ' --status  '
+                                              ' --enable  '
+                                              ' --disable '
+                                              ' --able    '
+Functions: Manage loadbalance servcie
+Options:
+    --start:   Start loadbalance service
+    --stop:    Stop loadbalance service
+    --status:  Query loadbalance service status
+    --enable:  Enable the service to boot from the start
+    --disable: Diable the service to boot from the start
+    --able:    Query whether the service can boot from the start or not
+  """
+
+
+def loadbalance_init():
+    loadbalance_xml_changed = False
+    links_xml_changed = False
+
+    # loadbalancexml.py --init
+    if not os.path.exists(LOADBALANCE_XML_FILE):
+        commands.getstatusoutput("loadbalancexml.py --init")
+        loadbalance_xml_changed = True
+        
+    # linksxml.py --init
+    if not os.path.exists(LINKS_XML_FILE):
+        commands.getstatusoutput("linksxml.py --init")
+        links_xml_changed = True
+    
+    # synchronize the changed files to other nodes
+    if loadbalance_xml_changed:
+        synchronize_file_ex(LOADBALANCE_XML_FILE)
+    if links_xml_changed:
+        synchronize_file_ex(LINKS_XML_FILE)
+
+
+def restart_loadbalance():
+    actHostList = []
+    result = run_remote_cmd('*', "ps -ef|grep -E 'loadbalances|pdns_server|link'|grep -v grep | awk 'END{print NR}'")
+    for hostName, returnInfor in result.items():
+        if int(returnInfor["stdout"]) >= 4:
+            actHostList.append(actHostList)
+
+    if actHostList != []:
+        result = run_remote_cmd("*", "loadbalance-manager restart")
+        for hostName, returnInfor in result.items():
+            if returnInfor["retcode"] != 0:
+                if "ctdb status not ok." in returnInfor["stdout"]:
+                    Error(1801)
+                else:
+                    print returnInfor["stdout"]
+                    sys.exit(1)
+
+
+def loadbalance_add_domain():
+    # Determine whether the domain name already exists
+    parser = etree.XMLParser(remove_blank_text=True)
+    try:
+        loadbalance_tree = etree.parse(LOADBALANCE_XML_FILE, parser)
+    except Exception, e:
+        print e
+        sys.exit(1)
+
+    domainName = loadbalance_tree.xpath("domainname[@name='%s']" % domain_name)
+    if domainName != []:
+        print Error(1802)
+
+    # loadbalancexml.py --add domainname=dn serial=s
+    # serial is generated automatically 
+    serial = time.strftime("%Y%m%d%H%M%S", time.localtime())
+    status, output = commands.getstatusoutput("loadbalancexml.py --add domainname=%s serial=%s" % (domain_name, serial))
+    if status != 0:
+        print output
+        sys.exit(1)
+    
+    status, output = commands.getstatusoutput("loadbalancexml.py --update domainname=%s policy=%s" % (domain_name, policy))
+    if status != 0:
+        print output
+        sys.exit(1)
+    
+    synchronize_file_ex(LOADBALANCE_XML_FILE)
+
+    restart_loadbalance()
+
+
+def loadbalance_add_address():
+    # Get the existing IP list "existedIp"
+    parser = etree.XMLParser(remove_blank_text=True)
+    try:
+        loadbalance_tree = etree.parse(LOADBALANCE_XML_FILE, parser)
+    except Exception, e:
+        print e
+        sys.exit(1)
+    domain_nodes = loadbalance_tree.xpath("domainname[@name='%s']" % domain_name)
+    existedIp = []
+    for domain_node in domain_nodes:
+        ip_weight_nodes = domain_node.xpath("addresspool")
+        for node in ip_weight_nodes:
+            existedIp.append(node.get("address"))
+
+    # loadbalancexml.py --add domainname=dn address=a weight=w
+    # loadbalancexml.py --update domainname=dn address=a weight=w
+    ip_weight_str_add = ""
+    ip_weight_str_update = ""
+    value_list = dst_ip.split(",")
+    ipList = []
+    for value in value_list:
+        ip_weight = value.split(":")
+        if len(ip_weight) != 2:
+            Error(610)
+        icfs_util.ip_format(ip_weight[0])
+        if ip_weight[1] == '':
+            Error(610)
+        if re.findall(r'[^\d]',ip_weight[1]) !=[]:
+            Error(610)
+        if ip_weight[0] in ipList:
+            Error(1803)
+        else:
+            ipList.append(ip_weight[0])
+        if ip_weight[0] not in existedIp:
+            ip_weight_str_add = ip_weight_str_add + "address=%s weight=%s "%(ip_weight[0], ip_weight[1])
+        else:
+            ip_weight_str_update = ip_weight_str_update + "address=%s weight=%s "%(ip_weight[0], ip_weight[1])
+
+    if len(ip_weight_str_add) == 0 and len(ip_weight_str_update) == 0:
+        Error(610)
+
+    if len(ip_weight_str_add) != 0:
+        status_add, output_add = commands.getstatusoutput("loadbalancexml.py --add domainname=%s %s" % (domain_name, ip_weight_str_add))
+        if status_add != 0:
+            print output_add
+            sys.exit(1)
+
+    if len(ip_weight_str_update) != 0:
+        status_update, output_update = commands.getstatusoutput("loadbalancexml.py --update domainname=%s %s" % (domain_name, ip_weight_str_update))
+        if status_update != 0:
+            print output_update
+            sys.exit(1)
+
+    synchronize_file_ex(LOADBALANCE_XML_FILE)
+
+    restart_loadbalance()
+
+
+def loadbalance_add_port():
+    # linksxml.py --add cifs_port=cp
+    # linksxml.py --add nfs_port=np
+    status = 1
+    output = ""
+    if cifs_port != None:
+        status, output = commands.getstatusoutput("linksxml.py --add cifs_port=%s" % cifs_port)
+    elif nfs_port != None:
+        status, output = commands.getstatusoutput("linksxml.py --add nfs_port=%s" % nfs_port)
+        
+    if status == 0:
+        synchronize_file_ex(LINKS_XML_FILE)
+    else:
+        print output
+        sys.exit(1)
+
+    restart_loadbalance()
+
+
+def loadbalance_delete_domain():
+    # loadbalancexml.py --delete domainname=dn
+    status, output = commands.getstatusoutput("loadbalancexml.py --delete domainname=%s" % domain_name)
+    if status == 0:
+        synchronize_file_ex(LOADBALANCE_XML_FILE)
+        restart_loadbalance()
+    else:
+        print output
+        sys.exit(1)
+
+
+def loadbalance_delete_address():
+    # loadbalancexml.py --delete domainname=dn address=a
+    ip_str = ""
+    ip_list = dst_ip.split(",")
+    for ip_value in ip_list:
+        icfs_util.ip_format(ip_value)
+        ip_str = ip_str + " address=%s"%ip_value
+    
+    if len(ip_str) == 0:
+        Error(610)
+    
+    status, output = commands.getstatusoutput("loadbalancexml.py --delete domainname=%s %s" % (domain_name, ip_str))
+    if status == 0:
+        synchronize_file_ex(LOADBALANCE_XML_FILE)
+        restart_loadbalance()
+    else:
+        print output
+        sys.exit(1)
+
+
+def loadbalance_delete_port():
+    # linksxml.py --delete cifs_port=cp
+    # linksxml.py --delete nfs_port=np
+    status = 1
+    output = ""
+    if cifs_port != None:
+        status, output = commands.getstatusoutput("linksxml.py --delete cifs_port=%s" % cifs_port)
+    elif nfs_port:
+        status, output = commands.getstatusoutput("linksxml.py --delete nfs_port=%s" % nfs_port)
+        
+    if status == 0:
+        synchronize_file_ex(LINKS_XML_FILE)
+        restart_loadbalance()
+    else:
+        print output
+        sys.exit(1)
+
+
+def loadbalance_update_domain_ip():
+    # loadbalancexml.py --update domainname=dn address=a weight=w
+    ip_weight_str = ""
+    value_list = dst_ip.split(",")
+    for value in value_list:
+        ip_weight = value.split(":")
+        if len(ip_weight) != 2:
+            Error(610)
+
+        icfs_util.ip_format(ip_weight[0])
+        if ip_weight[1] == '':
+            Error(610)
+        if re.findall(r'[^\d]', ip_weight[1]) != []:
+            Error(610)
+
+        ip_weight_str = ip_weight_str + "address=%s weight=%s " % (ip_weight[0], ip_weight[1])
+
+    if len(ip_weight_str) == 0:
+        Error(610)
+
+    status, output = commands.getstatusoutput("loadbalancexml.py --update domainname=%s %s" % (domain_name, ip_weight_str))
+    if status == 0:
+        synchronize_file_ex(LOADBALANCE_XML_FILE)
+    else:
+        print output
+        sys.exit(1)
+    restart_loadbalance()
+
+
+def loadbalance_replace_domain_ip():
+    # Get the existing IP list "existedIp"
+    parser = etree.XMLParser(remove_blank_text=True)
+    try:
+        loadbalance_tree = etree.parse(LOADBALANCE_XML_FILE, parser)
+    except Exception, e:
+        print e
+        sys.exit(1)
+    domain_nodes = loadbalance_tree.xpath("domainname[@name='%s']" % domain_name)
+    existedIp = []
+    for domain_node in domain_nodes:
+        ip_weight_nodes = domain_node.xpath("addresspool")
+        for node in ip_weight_nodes:
+            existedIp.append(node.get("address"))
+
+    # loadbalancexml.py --delete domainname=dn address=a
+    ip_str = ""
+    for ip_value in existedIp:
+        icfs_util.ip_format(ip_value)
+        ip_str = ip_str + " address=%s" % ip_value
+
+    if ip_str != '':
+        status, output = commands.getstatusoutput("loadbalancexml.py --delete domainname=%s %s" % (domain_name, ip_str))
+        if status != 0:
+            print output
+            sys.exit(1)
+    if dst_ip == "None":
+        sys.exit(0)
+
+    # loadbalancexml.py --add domainname=dn address=a weight=w
+    # loadbalancexml.py --update domainname=dn address=a weight=w
+    ip_weight_str_add = ""
+    value_list = dst_ip.split(",")
+    ipList = []
+    for value in value_list:
+        ip_weight = value.split(":")
+        if len(ip_weight) != 2:
+            Error(610)
+        icfs_util.ip_format(ip_weight[0])
+        if ip_weight[1] == '':
+            Error(610)
+        if re.findall(r'[^\d]', ip_weight[1]) != []:
+            Error(610)
+        if ip_weight[0] in ipList:
+            Error(1803)
+        else:
+            ipList.append(ip_weight[0])
+            ip_weight_str_add = ip_weight_str_add + "address=%s weight=%s " % (ip_weight[0], ip_weight[1])
+
+    if len(ip_weight_str_add) == 0:
+        Error(610)
+    else:
+        status_add, output_add = commands.getstatusoutput(
+            "loadbalancexml.py --add domainname=%s %s" % (domain_name, ip_weight_str_add))
+        if status_add != 0:
+            print output_add
+            sys.exit(1)
+
+    synchronize_file_ex(LOADBALANCE_XML_FILE)
+    restart_loadbalance()
+
+
+def loadbalance_update_domain():
+    # loadbalancexml.py --update
+    cmd = "loadbalancexml.py --update domainname=%s" % domain_name
+    if refresh_interval != None:
+        cmd = cmd + " refresh=%s" % refresh_interval
+    if retry_interval != None:
+        cmd = cmd + " retry=%s" % retry_interval
+    if expiry_interval != None:
+        cmd = cmd + " expiry=%s" % expiry_interval
+    if ttl_interval != None:
+        cmd = cmd + " ttl=%s" % ttl_interval
+    if policy != None:
+        cmd = cmd + " policy=%s" % policy
+    status, output = commands.getstatusoutput(cmd)
+    if status == 0:
+        synchronize_file_ex(LOADBALANCE_XML_FILE)
+        restart_loadbalance()
+    else:
+        print output
+        sys.exit(1)
+
+
+def loadbalance_update_links():
+    # links_xml.py --update
+    if collect_interval != None:
+        status, output = commands.getstatusoutput("linksxml.py --update collect_interval=%s" % collect_interval)
+        if status != 0:
+            print output
+            sys.exit(1)
+
+    if send_interval != None:
+        status, output = commands.getstatusoutput("linksxml.py --update send_interval=%s" % send_interval)
+        if status != 0:
+            print output
+            sys.exit(1)
+
+    if dst_ip != None:
+        status, output = commands.getstatusoutput("linksxml.py --update dst_ip=%s" % dst_ip)
+        if status != 0:
+            print output
+            sys.exit(1)
+        
+    synchronize_file_ex(LOADBALANCE_XML_FILE)
+    synchronize_file_ex(LINKS_XML_FILE)
+    restart_loadbalance()
+
+
+def loadbalance_query():
+    # LOADBALANCE_XML_FILE
+    parser = etree.XMLParser(remove_blank_text=True)
+    try:
+        loadbalance_tree = etree.parse(LOADBALANCE_XML_FILE, parser)
+    except Exception, e:
+        print e
+        sys.exit(1)
+    
+    domain_nodes = loadbalance_tree.xpath("domainname")
+    print "%-30s%s" % ("Domain_name", "Policy")
+    for domain_node in domain_nodes:
+        name = domain_node.get("name")
+        policy_nodes = domain_node.xpath("policy")
+        policy = policy_nodes[0].get("value") if len(policy_nodes) > 0 else ""
+        if len(name) < 30:
+            print "%-30s%s" % (name, policy)
+        else:
+            print "%s  %s" % (name, policy)
+
+
+def loadbalance_query_domain():
+    # LOADBALANCE_XML_FILE
+    parser = etree.XMLParser(remove_blank_text=True)
+    try:
+        loadbalance_tree = etree.parse(LOADBALANCE_XML_FILE, parser)
+    except Exception, e:
+        print e
+        sys.exit(1)
+
+    # Get virtual ip list
+    virtualIpList = []
+    deleteIpList = []
+    status, output = commands.getstatusoutput("ctdb ip all")
+    if status != 0:
+        print output
+        sys.exit(1)
+    lines = output.split("\n")
+    lines.pop(0)
+    for line in lines:
+        values = line.split(" ")
+        if len(values) != 2:
+            continue
+        virtualIpList.append(values[0])
+    
+    domain_nodes = loadbalance_tree.xpath("domainname[@name='%s']"%domain_name)
+    for domain_node in domain_nodes:
+        print "domain:%s" % domain_node.get("name")
+        refresh_interval_nodes = domain_node.xpath("time[@type='refresh']")
+        print "refresh_interval:%s" % (refresh_interval_nodes[0].get("value") if len(refresh_interval_nodes) > 0 else "")
+        retry_interval_nodes = domain_node.xpath("time[@type='retry']")
+        print "retry_interval:%s" % (retry_interval_nodes[0].get("value") if len(retry_interval_nodes) > 0 else "")
+        expiry_interval_nodes = domain_node.xpath("time[@type='expiry']")
+        print "expiry_interval:%s" % (expiry_interval_nodes[0].get("value") if len(expiry_interval_nodes) > 0 else "")
+        ttl_interval_nodes = domain_node.xpath("time[@type='ttl']")
+        print "ttl_interval:%s" % (ttl_interval_nodes[0].get("value") if len(ttl_interval_nodes) > 0 else "")
+        policy_nodes = domain_node.xpath("policy")
+        print "policy:%s" % (policy_nodes[0].get("value") if len(policy_nodes) > 0 else "")
+        ip_weight_nodes = domain_node.xpath("addresspool")
+        for node in ip_weight_nodes:
+            if str(node.get("address")) in virtualIpList:
+                print "ip:%s weight:%s" % (node.get("address"), node.get("weight"))
+            else:
+                deleteIpList.append(str(node.get("address")))
+        if deleteIpList != []:
+            ip_str = ""
+            for ip_value in deleteIpList:
+                ip_str = ip_str + " address=%s" % ip_value
+            if ip_str != "":
+                status, output = commands.getstatusoutput("loadbalancexml.py --delete domainname=%s %s" % (domain_name, ip_str))
+                if status == 0:
+                    synchronize_file_ex(LOADBALANCE_XML_FILE)
+
+
+def loadbalance_query_address():
+    # ctdb ip all
+    status, output = commands.getstatusoutput("ctdb ip all")
+    if status != 0:
+        print output
+        sys.exit(1)
+    
+    # Public IPs on ALL nodes
+    # 192.168.1.153 0
+    # 192.168.1.152 2
+    # 192.168.1.151 1
+    print "Loadbalance virtual ip list:"
+    lines = output.split("\n")
+    lines.pop(0)
+    for line in lines:
+        values = line.split(" ")
+        if len(values) != 2:
+            continue
+        print values[0]
+
+
+def loadbalance_query_link():
+    # LINKS_XML_FILE
+    parser = etree.XMLParser(remove_blank_text=True)
+    try:
+        links_tree = etree.parse(LINKS_XML_FILE, parser)
+    except Exception, e:
+        print e
+        sys.exit(1)
+        
+    collect_interval_nodes = links_tree.xpath("Interval[@name='Collect']")
+    print "collect_interval:%s" % (collect_interval_nodes[0].text if len(collect_interval_nodes) > 0 else "")
+    send_interval_nodes = links_tree.xpath("Interval[@name='Send']")
+    print "send_interval:%s" % (send_interval_nodes[0].text if len(send_interval_nodes) > 0 else "")
+    dst_ip_nodes = links_tree.xpath("Snmp/Dst_ip")
+    print "snmp_dst_ip:%s" % (dst_ip_nodes[0].text if len(dst_ip_nodes) > 0 else "")
+    dst_port_nodes = links_tree.xpath("Snmp/Dst_port")
+    print "snmp_dst_port:%s" % (dst_port_nodes[0].text if len(dst_port_nodes) > 0 else "")
+    community_nodes = links_tree.xpath("Snmp/Community")
+    print "snmp_community:%s" % (community_nodes[0].text if len(community_nodes) > 0 else "")
+    cifs_nodes = links_tree.xpath("Protocol[@name='CIFS']")
+    for cifs_port_node in cifs_nodes[0]:
+        print "cifs_port:%s" % cifs_port_node.text
+    nfs_nodes = links_tree.xpath("Protocol[@name='NFS']")
+    for nfs_port_node in nfs_nodes[0]:
+        print "nfs_port:%s" % nfs_port_node.text
+
+
+def synchronize_file(file_name):
+    # synchronize file to other nodes
+    # return 0 if success else 1
+    try:
+        result = run_remote_copy('*', file_name, file_name)
+    except (Exception, SystemExit):
+        return 1
+
+    for hostName, returnInfor in result.items():
+        if returnInfor["retcode"] != 0:
+            return 1
+    return 0
+
+
+def synchronize_file_ex(file_name):
+    if synchronize_file(file_name) != 0:
+        icfs_util.error('033', file_name)
+
+
+def loadbalance_manager_start():
+    # balance-manager --start 
+    result = run_remote_cmd('*', "loadbalance-manager start")
+    for hostName, returnInfor in result.items():
+        if returnInfor["retcode"] != 0:
+            if "ctdb status not ok." in returnInfor["stdout"]:
+                Error(1801)
+            else:
+                print returnInfor["stdout"]
+                sys.exit(1)
+
+
+def loadbalance_manager_restart():
+    # balance-manager --restart 
+    result = run_remote_cmd('*', "loadbalance-manager restart")
+    for hostName, returnInfor in result.items():
+        if returnInfor["retcode"] != 0:
+            if "ctdb status not ok." in returnInfor["stdout"]:
+                Error(1801)
+            else:
+                print returnInfor["stdout"]
+                sys.exit(1)
+
+
+def loadbalance_manager_stop():
+    # balance-manager --stop
+    result = run_remote_cmd('*', "loadbalance-manager stop")
+    for hostName, returnInfor in result.items():
+        if returnInfor["retcode"] != 0:
+            print returnInfor["stdout"]
+            sys.exit(1)
+
+
+def loadbalance_manager_status():
+    # balance-manager --status
+    printTable = ["HostName".ljust(15), "Status".ljust(15)]
+    printStatus = ["on", "off", "unknown"]
+   # result = run_remote_cmd('*', "ps -ef|grep -w loadbalances|grep -w pdns|grep -w link| grep -v grep | awk 'END{print NR}'")
+    #print printTable[0] + printTable[1]
+    #for hostName, returnInfor in result.items():
+     #   if returnInfor["stdout"] != '0':
+      #      print hostName.ljust(14), printStatus[0]
+       # elif returnInfor["stdout"] == '0':
+        #    print hostName.ljust(14), printStatus[1]
+        #else:
+         #   print hostName.ljust(14), printStatus[2]
+    result = run_remote_cmd('*', "ps -ef|grep -E 'loadbalances|pdns_server|link'|grep -v grep | awk 'END{print NR}'")
+    # result_pdns = run_remote_cmd('*', "ps -ef|grep pdns_server|grep -v grep | awk 'END{print NR}'")
+    # result_link = run_remote_cmd('*', "ps -ef|grep link|grep -v grep | awk 'END{print NR}'")
+    # result =
+    print printTable[0] + printTable[1]
+    for hostName, returnInfor in result.items():
+        if int(returnInfor["stdout"]) >= 4:
+            print hostName.ljust(14), printStatus[0]
+        elif int(returnInfor["stdout"]) < 4:
+            print hostName.ljust(14), printStatus[1]
+        else:
+            print hostName.ljust(14), printStatus[2]
+
+
+def loadbalance_manager_enable():
+    if not single:
+        result = run_remote_cmd('*', "icfs-admin-loadbalance --manage --enable --single")
+        for hostName, returnInfor in result.iteritems():
+            if returnInfor['retcode'] != 0:
+                sys.exit(1)
+    else:
+        patt_1 = re.compile("^.*?sh\s*/usr/bin/loadbalance_auto\.sh.*?$")
+        enable_str = "systemctl start ctdb && nohup sh /usr/bin/loadbalance_auto.sh &\n"
+        try:
+            with open("/etc/rc.d/rc.local", "r") as fpRead:
+                lines = fpRead.read()
+                lines = lines.splitlines()
+        except Exception:
+            sys.exit(1)
+
+        new_lines = []
+        for line in lines:
+            m_1 = patt_1.match(line)
+            if m_1:
+                continue
+            new_lines.append(line)
+
+        new_lines.append(enable_str)
+
+        if new_lines != lines:
+            try:
+                with open("/etc/rc.d/rc.local", "w") as fpWrite:
+                    fpWrite.write("\n".join(new_lines))
+            except Exception:
+                sys.exit(1)
+
+
+def loadbalance_manager_disable():
+    if not single:
+        result = run_remote_cmd('*', "icfs-admin-loadbalance --manage --disable --single")
+        for hostName, returnInfor in result.iteritems():
+            if returnInfor['retcode'] != 0:
+                sys.exit(1)
+    else:
+        patt_1 = re.compile("^.*?sh\s*/usr/bin/loadbalance_auto\.sh.*?$")
+        try:
+            with open("/etc/rc.d/rc.local", "r") as fpRead:
+                lines = fpRead.readlines()
+        except Exception:
+            sys.exit(1)
+
+        new_lines = []
+        for line in lines:
+            m_1 = patt_1.match(line)
+            if m_1:
+                continue
+            new_lines.append(line)
+
+        if new_lines != lines:
+            try:
+                with open("/etc/rc.d/rc.local", "w") as fpWrite:
+                    fpWrite.write("".join(new_lines))
+            except Exception:
+                sys.exit(1)
+
+
+def loadbalance_manager_able():
+    printTable = ["HostName".ljust(15), "Able".ljust(15)]
+    printStatus = ["enable", "disable", "unknown"]
+
+    if not single:
+        print printTable[0] + printTable[1]
+        result = run_remote_cmd('*', "icfs-admin-loadbalance --manage --able --single")
+        for hostName, returnInfor in result.iteritems():
+            if returnInfor['retcode'] != 0:
+                print hostName.ljust(14), printStatus[2]
+            else:
+                print hostName.ljust(14), returnInfor['stdout']
+    else:
+        patt_1 = re.compile("^.*?sh\s*/usr/bin/loadbalance_auto\.sh.*?$")
+        patt_2 = re.compile("^\s*systemctl\s*start\s*ctdb\s*&&\s*nohup\s*sh\s*/usr/bin/loadbalance_auto\.sh\s*&\s*$")
+        try:
+            with open("/etc/rc.d/rc.local", "r") as fpRead:
+                lines = fpRead.readlines()
+        except Exception:
+            print printStatus[2]
+
+        count_1 = 0
+        count_2 = 0
+        for line in lines:
+            m_1 = patt_1.match(line)
+            if m_1:
+                count_1 += 1
+            m_2 = patt_2.match(line)
+            if m_2:
+                count_2 += 1
+
+        if (count_2 == 1) and (count_1 == 1):
+            print printStatus[0]
+        else:
+            print printStatus[1]
+
+
+def Error(num):
+    if num == 610:
+        print "Error(610): Invalid input! ",
+    elif num == 1800:
+        print "Error(1800): policy value must be 'round-robin' or 'link'",
+    elif num == 1801:
+        print "Error(1801): CTDB status is not ok",
+    elif num == 1802:
+        print "Error(1802): Domain name already exists",
+    elif num == 1803:
+        print "Error(1803): The added ip address is duplicated",
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    operation = None
+    domain_name = None
+    cifs_port = None
+    nfs_port = None
+    dst_ip = None
+    refresh_interval = None
+    retry_interval = None
+    expiry_interval = None
+    ttl_interval = None
+    policy = None
+    collect_interval = None
+    send_interval = None
+    community = None
+    dst_port = None
+    UI = False
+    single = False
+
+    try:
+        opt_parser = OptParser.OptParser()
+        opt_parser.append("help", "{-h|--help}")
+        opt_parser.append("add_domain", "--add,--domain=,--policy=")
+        opt_parser.append("add_domain_ip", "--add,--domain=,--ip=")
+        opt_parser.append("add_port", "--add,{--cifs=|--nfs=}")
+        opt_parser.append("delete_domain", "--delete,--domain=")
+        opt_parser.append("delete_domain_ip", "--delete,--domain=,--ip=")
+        opt_parser.append("delete_port", "--delete,{--cifs=|--nfs=}")
+        opt_parser.append("update_domain_ip", "--update,--domain=,--ip=[--ui]")
+        opt_parser.append("update_domain", "--update,--domain={--refresh=|--retry=|--expiry=|--ttl=|--policy=|--refresh=,--retry=,--expiry=,--ttl=,--policy=}")
+        opt_parser.append("update_link", "--update{--collect=|--send=|--ip=|--collect=,--send=,--ip=}")
+        opt_parser.append("query_domain", "{--query|--query,--domain=|--query,--link|--query,--address}")
+        opt_parser.append("manager", "--manager{--start|--restart|--stop|--status|--enable|--disable|--able}[--single]")
+        # parse arguments
+        m_name, m_opts = opt_parser.parse(sys.argv[1:])
+    except Exception, err:
+        print "Error(610): Invalid input!", err
+        sys.exit(1)
+
+    for o, a in m_opts:
+        if o == "--domain":
+            domain_name = a
+            icfs_util.domain_format(domain_name)
+        elif o == "--policy":
+            policy = a
+            if policy not in ("round-robin", "link"):
+                Error(1800)
+        elif o == "--ip":
+            dst_ip = a
+        elif o == "--cifs":
+            cifs_port = a
+            icfs_util.port_format(cifs_port)
+        elif o == "--nfs":
+            nfs_port = a
+            icfs_util.port_format(nfs_port)
+        elif o == "--refresh":
+            refresh_interval = a
+            if re.findall(r'[^\d]', refresh_interval) != []:
+                Error(610)
+        elif o == "--retry":
+            retry_interval = a
+            if re.findall(r'[^\d]', retry_interval) != []:
+                Error(610)
+        elif o == "--expiry":
+            expiry_interval = a
+            if re.findall(r'[^\d]', expiry_interval) != []:
+                Error(610)
+        elif o == "--ttl":
+            ttl_interval = a
+            if re.findall(r'[^\d]', ttl_interval) != []:
+                Error(610)
+        elif o == "--collect":
+            collect_interval = a
+            if re.findall(r'[^\d]', collect_interval) != []:
+                Error(610)
+        elif o == "--send":
+            send_interval = a
+            if re.findall(r'[^\d]', send_interval) != []:
+                Error(610)
+        elif o == "--ui":
+            UI = True
+        elif o == "--single":
+            single = True
+
+    loadbalance_init()
+
+    if m_name == "help":
+        usage()
+        sys.exit(0)
+    elif m_name == "add_domain":
+        loadbalance_add_domain()
+    elif m_name == "add_domain_ip":
+        loadbalance_add_address()
+    elif m_name == "add_port":
+        loadbalance_add_port()
+    elif m_name == "delete_domain":
+        loadbalance_delete_domain()
+    elif m_name == "delete_domain_ip":
+        loadbalance_delete_address()
+    elif m_name == "delete_port":
+        loadbalance_delete_port()
+    elif m_name == "update_domain_ip":
+        if not UI:
+            loadbalance_update_domain_ip()
+        else:
+            loadbalance_replace_domain_ip()
+    elif m_name == "update_domain":
+        loadbalance_update_domain()
+    elif m_name == "update_link":
+        loadbalance_update_links()
+    elif m_name == "query_domain":
+        if len(sys.argv) == 2:
+            loadbalance_query()
+        elif "--address" in sys.argv:
+            loadbalance_query_address()
+        elif "--link" in sys.argv:
+            loadbalance_query_link()
+        elif "--domain" in sys.argv:
+            loadbalance_query_domain()
+        else:
+            Error(610)
+    elif m_name == "manager":
+        if "--start" in sys.argv:
+            # balance-manager --start
+            loadbalance_manager_start()
+        elif "--restart" in sys.argv:
+            loadbalance_manager_restart()
+        elif "--stop" in sys.argv:
+            loadbalance_manager_stop()
+        elif "--status" in sys.argv:
+            loadbalance_manager_status()
+        elif "--enable" in sys.argv:
+            loadbalance_manager_enable()
+        elif "--disable" in sys.argv:
+            loadbalance_manager_disable()
+        elif "--able" in sys.argv:
+            loadbalance_manager_able()
+        else:
+            Error(610)
+    else:
+        Error(610)

@@ -1,0 +1,394 @@
+#!/usr/bin/python 
+# coding:utf-8
+
+import sys
+import commands
+import OptParser
+import salt.client
+
+import ganesha_parse
+from ganesha_parse import StringElement
+from ganesha_parse import ListElement
+
+
+def usage():
+    print """Help(-h|--help) for icfs-admin-performance:
+Usage:
+>> icfs-admin-performance ---- --type service_type --+-- --open   --+----><
+                                                     +-- --close  --+
+                                                     '-- --status --'
+Functions: Open/close performance function, or check performance open/close status
+  --type  :   service type
+  --open  :   open performance function
+  --close :   close performance function
+  --status:   check open/close status
+Exit status:
+  0 if executed succefully
+  1 if executed unsuccessfully
+
+>> icfs-admin-performance ---- --type service_type ---- --query --+-- --all            --+----><
+                                                                  '-- --node node_name --'
+Functions: Query performance statistics of specific service
+  --type  :   service type
+  --all   :   all nodes
+  --node  :   node name
+Exit status:
+  0 if executed succefully
+  1 if executed unsuccessfully """
+
+
+def error(num, *description):
+    if num == 100:
+        print "Error(100): Can not find path in cluster file system!"
+    elif num == 110:
+        print "Error(110): Failed to mount icfs-fuse for %s" % description
+    elif num == 299:
+        print "Error(299): Invalid salt service"
+    elif num == 307:
+        print "Error(307): Salt service down in %s" % description
+    elif num == 308:
+        print "Error(308): Invalid salt-key"
+    elif num == 310:
+        print "Error(310): Failed to get ADC server name/ip"
+    elif num == 610:
+        print "Error(610): Invalid input!"
+    elif num == 721:
+        print "Error(721): Invalid path"
+    elif num == 504:
+        print "Error(504): File system not mount! "
+    elif num == 500:
+        print "Error(500): Can not get cluster version! "
+    sys.exit(1)
+
+
+# Checking salt service : running , up
+def salt_stat_check():
+    salt_ck = commands.getoutput("service salt-master status")
+    if "unrecognized service" in salt_ck:
+        error(299)
+    elif "stopped" in salt_ck:
+        salt_rst = commands.getoutput("service salt-master start")
+        if not salt_rst or "FAILED" in salt_rst:
+            error(299)
+    salt_down = commands.getoutput("salt-run manage.down")
+    if "YPBINDPROC_DOMAIN: Domain not bound" in salt_down:
+        salt_yp = salt_down.lstrip("YPBINDPROC_DOMAIN: Domain not bound")
+    else:
+        salt_yp = salt_down
+    if salt_yp:
+        salt_dd = salt_yp.replace("\n", ",")
+        salt_dl = salt_dd.lstrip(',')
+        error(307, salt_dl)
+    salt_key = commands.getoutput("salt-key -l acc")
+    salt_key_l = salt_key.split('\n')
+    if "Accepted Keys:" in salt_key_l:
+        salt_key_l.remove("Accepted Keys:")
+    if "YPBINDPROC_DOMAIN: Domain not bound" in salt_key_l:
+        salt_key_l.remove("YPBINDPROC_DOMAIN: Domain not bound")
+    if not salt_key_l:
+        error(308)
+
+
+def get_node_list():
+    node_list = []
+    status, output = commands.getstatusoutput("salt-key -l acc")
+    if status != 0:
+        return node_list
+
+    node_list = output.split("\n")
+    node_list.pop(0)
+    return node_list
+
+
+def nfs_performance_open():
+    # check salt status
+    salt_stat_check()
+
+    # read and parse ganesha.conf
+    try:
+        root = ganesha_parse.parse_file("/etc/ganesha/ganesha.conf")
+    except (IOError, SyntaxError), e:
+        print e
+        sys.exit(1)
+
+    core_param_list = root.group("NFS_CORE_PARAM")
+    # check whether performance status is already open
+    for core_param in core_param_list:
+        if core_param.get_string_value("Enable_Stat_Tool") == "true":
+            print "nfs performance is already open"
+            sys.exit(1)
+
+    # open nfs performance
+    if len(core_param_list) == 0:
+        core_param = ListElement()
+        core_param.append("Enable_Stat_Tool", StringElement("true"))
+        root.append("NFS_CORE_PARAM", core_param)
+    else:
+        for core_param in core_param_list:
+            core_param.set_string_value("Enable_Stat_Tool", "true")
+
+    # write ganesha.conf
+    try:
+        ganesha_parse.dump_file("/etc/ganesha/ganesha.conf", root)
+    except (ValueError, IOError), e:
+        print e
+        sys.exit(1)
+
+    saltt, saltout = commands.getstatusoutput("salt-cp '*' /etc/ganesha/ganesha.conf /etc/ganesha/ganesha.conf")
+    saltout = saltout.split('\n')
+    for check_salt in saltout:
+        if not check_salt.find("True") >= 0:
+            error(703)
+
+    # turn on time_delay switch without restarting ganesha
+    commands.getstatusoutput("salt '*' cmd.run 'ganesha_mgr set_switch time_delay true'")
+
+
+def nfs_performance_close():
+    salt_stat_check()
+
+    # read and parse ganesha.conf
+    try:
+        root = ganesha_parse.parse_file("/etc/ganesha/ganesha.conf")
+    except (IOError, SyntaxError), e:
+        print e
+        sys.exit(1)
+
+    core_param_list = root.group("NFS_CORE_PARAM")
+    # check whether performance status is already close
+    is_open = False
+    for core_param in core_param_list:
+        if core_param.get_string_value("Enable_Stat_Tool") == "true":
+            is_open = True
+            break
+
+    if not is_open:
+        print "nfs performance is already close"
+        sys.exit(1)
+
+    # close nfs performance
+    for core_param in core_param_list:
+        core_param.remove_key("Enable_Stat_Tool")
+
+    # write ganesha.conf
+    try:
+        ganesha_parse.dump_file("/etc/ganesha/ganesha.conf", root)
+    except (ValueError, IOError), e:
+        print e
+        sys.exit(1)
+
+    saltt, saltout = commands.getstatusoutput("salt-cp '*' /etc/ganesha/ganesha.conf /etc/ganesha/ganesha.conf")
+    saltout = saltout.split('\n')
+    for check_salt in saltout:
+        if not check_salt.find("True") >= 0:
+            error(703)
+
+    # turn off time_delay switch without restarting ganesha
+    commands.getstatusoutput("salt '*' cmd.run 'ganesha_mgr set_switch time_delay false'")
+
+
+def nfs_performance_status():
+    # read and parse ganesha.conf
+    try:
+        root = ganesha_parse.parse_file("/etc/ganesha/ganesha.conf")
+    except (IOError, SyntaxError), e:
+        print e
+        sys.exit(1)
+
+    core_param_list = root.group("NFS_CORE_PARAM")
+    # check whether performance status is already close
+    is_open = False
+    for core_param in core_param_list:
+        if core_param.get_string_value("Enable_Stat_Tool") == "true":
+            is_open = True
+            break
+
+    print "open" if is_open else "close"
+
+
+def nfs_performance_query_all():
+    operation_tuple = (
+        "NULL", "GETATTR", "SETATTR", "LOOKUP", "ACCESS", "READLINK", "READ", "WRITE",
+        "CREATE", "MKDIR", "SYMLINK", "MKNOD", "REMOVE", "RMDIR", "RENAME", "LINK", "READDIR",
+        "READDIRPLUS", "FSSTAT", "FSINFO", "PATHCONF", "COMMIT", "NFS3PROC_MOUNT"
+    )
+
+    param_tuple = (
+        "RECV_NUM", "HANDLE_NUM", "TOTAL_TIME", "MAX_TIME", "MIN_TIME"
+    )
+
+    statistics_info = dict()
+    for operation in operation_tuple:
+        param_dict = dict()
+        for param in param_tuple:
+            param_dict[param] = 0
+        statistics_info[operation] = param_dict
+
+    client = salt.client.LocalClient()
+    ret = client.cmd("*", "cmd.run", ["ganesha_stat_tool show_nfs_ops"])
+    for n_name, n_output in ret.items():
+        if n_output.startswith("Error:"):
+            print "Query failed on node:", n_name
+            sys.exit(1)
+
+        lines = n_output.split("\n")
+        for line in lines:
+            params = line.split()
+            if len(params) != 9:
+                continue
+
+            operation = params[0]
+            if operation not in operation_tuple:
+                continue
+
+            try:
+                receive_num = int(params[1])
+                handle_num = int(params[2])
+                ave_time = int(params[3])
+                max_time = int(params[4])
+                min_time = int(params[5])
+                total_time = ave_time * handle_num
+            except ValueError:
+                continue
+
+            statistics_info[operation]["RECV_NUM"] += receive_num
+            statistics_info[operation]["HANDLE_NUM"] += handle_num
+            statistics_info[operation]["TOTAL_TIME"] += total_time
+            statistics_info[operation]["MAX_TIME"] = max(statistics_info[operation]["MAX_TIME"], max_time)
+            if statistics_info[operation]["MIN_TIME"] != 0 and min_time != 0:
+                statistics_info[operation]["MIN_TIME"] = min(statistics_info[operation]["MIN_TIME"], min_time)
+            else:
+                statistics_info[operation]["MIN_TIME"] = max(statistics_info[operation]["MIN_TIME"], min_time)
+
+    print "%-15s %-15s %-15s %-15s %-15s %s" % ("Ops", "T_R", "H_R", "H_L_A", "H_L_MA", "H_L_MI")
+    for operation in operation_tuple:
+        receive_num = statistics_info[operation]["RECV_NUM"]
+        handle_num = statistics_info[operation]["HANDLE_NUM"]
+        total_time = statistics_info[operation]["TOTAL_TIME"]
+        max_time = statistics_info[operation]["MAX_TIME"]
+        min_time = statistics_info[operation]["MIN_TIME"]
+        ave_time = total_time / handle_num if handle_num != 0 else 0
+        print "%-15s %-15s %-15s %-15s %-15s %s" % (operation, receive_num, handle_num, ave_time, max_time, min_time)
+
+
+def nfs_performance_query_node(node):
+    operation_tuple = (
+        "NULL", "GETATTR", "SETATTR", "LOOKUP", "ACCESS", "READLINK", "READ", "WRITE",
+        "CREATE", "MKDIR", "SYMLINK", "MKNOD", "REMOVE", "RMDIR", "RENAME", "LINK", "READDIR",
+        "READDIRPLUS", "FSSTAT", "FSINFO", "PATHCONF", "COMMIT", "NFS3PROC_MOUNT"
+    )
+
+    param_tuple = (
+        "RECV_NUM", "HANDLE_NUM", "TOTAL_TIME", "MAX_TIME", "MIN_TIME"
+    )
+
+    statistics_info = dict()
+    for operation in operation_tuple:
+        param_dict = dict()
+        for param in param_tuple:
+            param_dict[param] = 0
+        statistics_info[operation] = param_dict
+
+    node_list = get_node_list()
+    if node not in node_list:
+        print "Node %s not reachable" % node
+
+    client = salt.client.LocalClient()
+    ret = client.cmd(node, "cmd.run", ["ganesha_stat_tool show_nfs_ops"])
+    if node not in ret:
+        print "Query failed on node:", node
+        sys.exit(1)
+
+    output = ret[node]
+    if output.startswith("Error:"):
+        print "Query failed on node:", node
+        sys.exit(1)
+
+    lines = output.split("\n")
+    for line in lines:
+        params = line.split()
+        if len(params) != 9:
+            continue
+
+        operation = params[0]
+        if operation not in operation_tuple:
+            continue
+        try:
+            receive_num = int(params[1])
+            handle_num = int(params[2])
+            ave_time = int(params[3])
+            max_time = int(params[4])
+            min_time = int(params[5])
+            total_time = ave_time * handle_num
+        except ValueError:
+            continue
+
+        statistics_info[operation]["RECV_NUM"] += receive_num
+        statistics_info[operation]["HANDLE_NUM"] += handle_num
+        statistics_info[operation]["TOTAL_TIME"] += total_time
+        statistics_info[operation]["MAX_TIME"] = max(statistics_info[operation]["MAX_TIME"], max_time)
+        if statistics_info[operation]["MIN_TIME"] != 0 and min_time != 0:
+            statistics_info[operation]["MIN_TIME"] = min(statistics_info[operation]["MIN_TIME"], min_time)
+        else:
+            statistics_info[operation]["MIN_TIME"] = max(statistics_info[operation]["MIN_TIME"], min_time)
+
+    print "%-15s %-15s %-15s %-15s %-15s %s" % ("Ops", "T_R", "H_R", "H_L_A", "H_L_MA", "H_L_MI")
+    for operation in operation_tuple:
+        receive_num = statistics_info[operation]["RECV_NUM"]
+        handle_num = statistics_info[operation]["HANDLE_NUM"]
+        total_time = statistics_info[operation]["TOTAL_TIME"]
+        max_time = statistics_info[operation]["MAX_TIME"]
+        min_time = statistics_info[operation]["MIN_TIME"]
+        ave_time = total_time / handle_num if handle_num != 0 else 0
+        print "%-15s %-15s %-15s %-15s %-15s %s" % (operation, receive_num, handle_num, ave_time, max_time, min_time)
+
+
+def nfs_performance_query():
+    salt_stat_check()
+
+    if all_node:
+        nfs_performance_query_all()
+    else:
+        nfs_performance_query_node(node_name)
+
+
+if __name__ == '__main__':
+    service_type = None
+    node_name = None
+    all_node = False
+    try:
+        parser = OptParser.OptParser()
+        parser.append("help", "{-h|--help}")
+        parser.append("open", "--type=,--open")
+        parser.append("close", "--type=,--close")
+        parser.append("status", "--type=,--status")
+        parser.append("query", "--type=,--query{--all|--node=}")
+        m_name, m_opts = parser.parse(sys.argv[1:])
+    except Exception, err:
+        print err
+        error(610)
+        sys.exit(1)
+
+    for k, v in m_opts:
+        if k == "--type":
+            service_type = v.lower()
+            if service_type != "nfs":
+                print "Unsupported type:", service_type
+                sys.exit(1)
+        elif k == "--all":
+            all_node = True
+        elif k == "--node":
+            node_name = v
+
+    if m_name == "help":
+        usage()
+    elif m_name == "open":
+        nfs_performance_open()
+    elif m_name == "close":
+        nfs_performance_close()
+    elif m_name == "status":
+        nfs_performance_status()
+    elif m_name == "query":
+        nfs_performance_query()
+    else:
+        error(610)

@@ -1,0 +1,574 @@
+#!/usr/bin/python
+#coding: utf-8
+# -*- copyright -*-
+
+# change log
+# 20180223 zanglinjie (http_create_user) batch create http user in task-manage,salt check
+# httpd start/stop/status.
+# 20180301 zanglinjie Apache user check and user permissions configure and remote copy.
+# 20180314 zanglinjie Fix Apache query share path problem.
+
+import os
+import sys
+import getopt
+import commands
+import platform
+import re
+import linecache
+import shutil
+
+from LinuxConfigParser import LinuxConfigParser
+from icfs_util import get_remote_host_list, run_remote_ping
+from icfs_util import run_remote_cmd, run_remote_copy
+from apache_conf_parser import *
+
+config_path = "/etc/httpd/conf/httpd.conf"
+Check_path_keyword = "Location"
+Check_user_keyword = "Require user"
+
+def usage():
+    print '''Help(-h|--help) for icfs-admin-http:
+Usage:
+>> icfs-admin-http ----+ --create +----><
+                       + --delete +
+                       ' --query  '
+ Functions : Create/Set/Delete/Query HTTP service
+ Options:
+   --create: create httpd service
+   --delete: delete httpd service
+   --query:  query  httpd service
+ Exit status;
+   0 if executed successfully
+   1 if executed unsuccessfully
+
+icfs-admin-http ---- --create ---------------+-- -ano --- -p path-------------------------+----><
+                                             '-- -p  path---------------------------------'
+                                             '-- --user user_name ---- -------------------'
+Functions: create HTTP service, set share path add user for the httpd service
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-http ---- --delete---------------------------+------------------- -p path--------------------------+---------------------------------+------><
+							+----------ano ----- -p path -----------------------------------------------------------+
+							'------------------- --user user_name --------------------------------------------------'
+
+Functions: create HTTP service, set share path add user for the httpd service
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+icfs-admin-http --query:
+Usage:
+icfs-admin-http ---- --query
+Functions: Query the http path in cluster
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-http --stop\start\status:
+Usage:
+icfs-admin-http --+-- --start  --+--><
+                  +-- --stop   --+
+                  '-- --status --'
+Functions: Start/Stop http service, or check http service status
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+
+class osInfo():
+    def __init__(self, os_name, os_version, os_edtion):
+        self.os_name = os_name
+        self.os_version = os_version
+        self.os_edtion =os_edtion
+
+
+def get_os_type():
+    os_info = platform.linux_distribution()
+    return osInfo(os_info[0], os_info[1], os_info[2])
+
+
+# check remote host status
+def check_remote_host_stat():
+    host_list = get_remote_host_list()
+    if not host_list:
+        print "Error(056): Remote hosts list is empty"
+        sys.exit(1)
+
+    ret_dict = run_remote_ping("*")
+    fail_list = [name for name, ret in ret_dict.items() if ret["status"] is False]
+    if fail_list:
+        print "Error(057): Remote hosts %s is not accessable" % ",".join(fail_list)
+        sys.exit(1)
+
+
+# split path
+def split_path(dirpath):
+    path_list = dirpath.split("/")
+    return len(path_list)
+
+
+def Error(num, *description):
+    if num == 610:
+        print "Error(610): Invalid input!"
+    elif num == 1900:
+        print "Error(1900): Invalid HTTP user.",
+    elif num == 1906:
+        print "Error(1906): Read HTTP user config file failed: %s" % description
+    elif num == 3201:
+        print "Error(3201): Read HTTP config file failed: %s" % description
+    elif num == 3202:
+        print "Error(3202):Invalid HTTP path or the path is not exit in icfs system."
+    elif num == 3203:
+        print "Error(3203):The HTTP path has been exist."
+    elif num == 3204:
+        print "Error(3204):The httpd.conf is not exist."
+    elif num == 3205:
+        print "Error(3205):The HTTP dir is not exist."
+    elif num == 3206:
+        print "Error(3206): Failed to copy HTTP config file to other host."
+    elif num == 3207:
+        print "Error(3207): Failed to copy HTTP Apache virtual user md5 file to other host."
+    elif num == 3208:
+        print "Error(3208):The HTTP user has been exists."
+    elif num == 3209:
+        print "Error(3209):The HTTP share path is already exists,do not create again."
+    elif num == 3210:
+        print "Error(3210):The HTTP share path is not exist."
+    elif num == 3211:
+        print "Error(3211):The HTTP share path is anonymous users,try add -ano again."
+    elif num == 3212:
+        print "Error(3212):The HTTP share path is not anonymous users,don't add -ano."
+    elif num == 3213:
+        print "Error(3213):The HTTP user file is not exist."
+    elif num == 3214:
+        print "Error(3214):The HTTP user name is not exist."
+    sys.exit(1)
+
+
+def username_check(username):
+    # check user name format
+    if re.match(r"^[a-zA-Z][a-zA-Z0-9_]{0,31}$", username) is None:
+        Error(1900)
+
+
+def http_user_create():
+    # whether or not icfs-fuse exist
+    if not commands.getstatusoutput('mount|grep -w /mnt/icfs')[1]:
+        commands.getstatusoutput('icfs-fuse /mnt/icfs')
+
+    if os.path.exists("/etc/httpd/conf/htpasswd"):
+        if not commands.getstatusoutput("grep -w '%s' /etc/httpd/conf/htpasswd" %user_name)[1]:
+               username_check(user_name)
+               commands.getstatusoutput("htpasswd /etc/httpd/conf/htpasswd %s" %user_name)
+        else:
+            Error(3208)
+    else:
+        username_check(user_name)
+        commands.getstatusoutput("htpasswd -c -m /etc/httpd/conf/htpasswd %s" %user_name)
+
+    ret_dict_user = run_remote_copy("*", "/etc/httpd/conf/htpasswd", "/etc/httpd/conf/htpasswd")
+    fail_list_user = [name for name, ret in ret_dict_user.items() if ret["retcode"] != 0]
+    if fail_list_user:
+        Error(3207)
+
+    run_remote_cmd("*", "systemctl restart httpd")
+
+def http_path_create():
+    # whether or not current path exist
+    if not commands.getstatusoutput("grep 'AuthUserFile' /etc/httpd/conf/httpd.conf")[1]:
+        path_dir = linecache.getline(config_path,362)
+        current_path = path_dir.split(' ')[5]
+    else:
+        path_dir = linecache.getline(config_path, 366)
+        current_path = path_dir.split(' ')[5]
+
+    # whether or not icfs-fuse exist
+    if not commands.getstatusoutput('mount|grep -w /mnt/icfs')[1]:
+        commands.getstatusoutput('icfs-fuse /mnt/icfs')
+    if not os.path.isdir('/mnt/icfs%s' %path):
+        Error(3202)
+        sys.exit(1)
+    else:
+        commands.getstatusoutput('chmod -R 777 /mnt/icfs%s' %path)
+
+    if os.path.exists(config_path):
+        if not commands.getstatusoutput("grep 'DocumentRoot /mnt/icfs%s/' /etc/httpd/conf/httpd.conf" %path)[1]:
+            if split_path(current_path) == 4 :
+                with open(config_path, 'r') as foo:
+                    lines =foo.readlines()
+                    lines[357] = "   Require valid-user\n"
+                    lines.insert(358,"   AuthType Basic\n   AuthName 'AS13000 Restricted Site'\n ")
+                    lines.insert(359, "   AuthUserFile /etc/httpd/conf/htpasswd\n")
+                    lines.insert(360, "   AuthBasicProvider file\n")
+                    #foo.writelines('\n'.join(share_path_add))
+                    #foo.writelines('\n')
+                with open(config_path, 'w') as f_w:
+                    for line in lines:
+                        if "/mnt/icfs" in line:
+                            line = line.replace("/mnt/icfs","/mnt/icfs%s" %path)
+                        f_w.write(line)
+                    f_w.close()
+                    foo.close()
+            else:
+                Error(3209)
+        else:
+            Error(3203)
+    else:
+        Error(3201,"/etc/httpd/conf/httpd.conf")
+        sys.exit(1)
+
+    ret_dict = run_remote_copy("*", "/etc/httpd/conf/httpd.conf", "/etc/httpd/conf/httpd.conf")
+    fail_list = [name for name, ret in ret_dict.items() if ret["retcode"] != 0]
+    if fail_list:
+        Error(3206)
+
+    run_remote_cmd("*", "systemctl restart httpd")
+
+def http_ano_create():
+    # whether or not current path exist
+    if not commands.getstatusoutput("grep 'AuthUserFile' /etc/httpd/conf/httpd.conf")[1]:
+        path_dir = linecache.getline(config_path,362)
+        current_path = path_dir.split(' ')[5]
+    else:
+        path_dir = linecache.getline(config_path, 366)
+        current_path = path_dir.split(' ')[5]
+
+    # whether or not icfs-fuse exist
+    if not commands.getstatusoutput('mount|grep -w /mnt/icfs')[1]:
+        commands.getstatusoutput('icfs-fuse /mnt/icfs')
+    if not os.path.isdir('/mnt/icfs%s' %path):
+        Error(3205)
+        sys.exit(1)
+    else:
+        commands.getstatusoutput('chmod -R 777 /mnt/icfs%s' %path)
+
+    if os.path.isfile(config_path):
+        if not commands.getstatusoutput("grep 'DocumentRoot /mnt/icfs%s/' /etc/httpd/conf/httpd.conf" %path)[1]:
+            if split_path(current_path) == 4:
+                with open(config_path, 'r') as foo:
+                    lines = foo.readlines()
+                with open(config_path, 'w') as f_w:
+                    for line in lines:
+                        if "/mnt/icfs" in line:
+                            line = line.replace("/mnt/icfs", "/mnt/icfs%s" % path)
+                        f_w.write(line)
+                    f_w.close()
+                    foo.close()
+                if commands.getstatusoutput("grep 'AuthUserFile' /etc/httpd/conf/httpd.conf")[1]:
+                    with open(config_path, 'r') as foo:
+                        lines = foo.readlines()
+                        lines[357] = "   Require all granted\n"
+                        lines[358] = "\n"
+                        lines[359] = "\n"
+                        lines[360] = "\n"
+                        lines[361] = "\n"
+                        foo.close()
+            else:
+                Error(3209)
+        else:
+            Error(3203)
+    else:
+        Error(3204)
+        sys.exit(1)
+
+    ret_dict = run_remote_copy("*", "/etc/httpd/conf/httpd.conf", "/etc/httpd/conf/httpd.conf")
+    fail_list = [name for name, ret in ret_dict.items() if ret["retcode"] != 0]
+    if fail_list:
+        Error(3206)
+
+    run_remote_cmd("*", "systemctl restart httpd")
+
+def http_start():
+    # start http on all nodes
+    # start success return 1
+    # start error return 0
+    status = 0
+    os_type = get_os_type()
+    if os_type.os_version.startswith("7."):
+        run_remote_cmd("*", "systemctl start httpd")
+        ret_dict = run_remote_cmd("*", "systemctl status httpd | grep Active")
+    else:
+        run_remote_cmd("*", "service httpd start")
+        ret_dict = run_remote_cmd("*", "service httpd status")
+
+    running_list = [name for name, ret in ret_dict.items() if "running" in ret["stdout"]]
+    if running_list:
+        status = 1
+
+    return status
+
+def http_stop():
+    # stop all http
+    # stop success return 1
+    # stop error return 0
+    status = 1
+    os_type = get_os_type()
+    if os_type.os_version.startswith("7."):
+        run_remote_cmd("*", "systemctl stop httpd")
+        ret_dict = run_remote_cmd("*", "systemctl status httpd | grep Active")
+    else:
+        run_remote_cmd("*", "service httpd stop")
+        ret_dict = run_remote_cmd("*", "service httpd status")
+
+    running_list = [name for name, ret in ret_dict.items() if "running" in ret["stdout"]]
+    if running_list:
+        status = 0
+
+    return status
+
+def http_status():
+    os_type = get_os_type()
+    if os_type.os_version.startswith("7."):
+        cmd = "systemctl status httpd | grep Active"
+    else:
+        cmd = "service httpd status"
+
+    ret_dict = run_remote_cmd("*", cmd)
+    for name, ret in ret_dict.items():
+        if ret["retcode"] == -1:
+            print (name + ":").ljust(15), "unknown"
+        elif "running" in ret["stdout"]:
+            print (name + ":").ljust(15), "running"
+            success = True
+        else:
+            print (name + ":").ljust(15), "dead"
+            success = True
+
+    sys.exit(0 if success else 1)
+
+
+def http_user_query():
+    user_list = {}
+    if os.path.exists("/etc/httpd/conf/htpasswd"):
+        try:
+            with open("/etc/httpd/conf/htpasswd", "r") as f:
+                for line in f:
+                    (key,value)= line.strip().split(':')
+                    user_list[key] = key
+        except IOError, e:
+            Error(1906, "/etc/httpd/conf/htpasswd")
+
+    print "Apache Virtual User:"
+    for key in user_list:
+        print (    str(user_list[key]))
+
+
+def http_share_query():
+    if not commands.getstatusoutput("grep 'AuthUserFile' /etc/httpd/conf/httpd.conf")[1]:
+        path_dir = linecache.getline(config_path,362)
+        current_path = path_dir.split(' ')[5]
+        print "Apache Share Path:"
+        print current_path
+    else:
+        path_dir = linecache.getline(config_path, 366)
+        current_path = path_dir.split(' ')[5]
+        print "Apache Share Path:"
+        print current_path
+
+
+def http_path_delete():
+    #delete the httpd.conf file of the share path, include the user
+    if not os.path.isdir('/mnt/icfs%s' % path):
+        Error(3202)
+        sys.exit(1)
+    file = ApacheConfParser(config_path)
+    file.nodes = [ i for i in file.nodes if not isinstance(i, Directive) or path not in i.arguments]
+    if os.path.exists(config_path):
+        if commands.getstatusoutput("grep 'DocumentRoot /mnt/icfs%s/' /etc/httpd/conf/httpd.conf" %path)[1]:
+            if commands.getstatusoutput("grep 'AuthUserFile /etc/httpd/conf/htpasswd' /etc/httpd/conf/httpd.conf")[1]:
+                with open(config_path, 'r') as foo:
+                    lines =foo.readlines()
+                    lines[357] = "   Require all granted\n"
+                    lines[358] = ""
+                    lines[359] = ""
+                    lines[360] = ""
+                    lines[361] = ""
+                    #foo.writelines('\n'.join(share_path_add))
+                    #foo.writelines('\n')
+                with open(config_path, 'w') as f_w:
+                    for line in lines:
+                        if "/mnt/icfs" in line:
+                            line = line.replace("/mnt/icfs%s" %path,"/mnt/icfs")
+                        f_w.write(line)
+                    f_w.close()
+                    foo.close()
+            else:
+                Error(3211)
+        else:
+            Error(3210)
+    else:
+        Error(3201,"/etc/httpd/conf/httpd.conf")
+        sys.exit(1)
+
+    ret_dict = run_remote_copy("*", "/etc/httpd/conf/httpd.conf", "/etc/httpd/conf/httpd.conf")
+    fail_list = [name for name, ret in ret_dict.items() if ret["retcode"] != 0]
+    if fail_list:
+        Error(3206)
+
+    run_remote_cmd("*", "systemctl restart httpd")
+
+def http_path_delete_ano():
+    #delete the httpd.conf file of the share path which is anomonous
+    file = ApacheConfParser(config_path)
+    ano_path = "/mnt/icfs" + path
+    switch_ano_path = '"' + ano_path +'"'
+    file.nodes = [i for i in file.nodes if not isinstance(i, Directive) or ano_path not in i.arguments]
+
+    if os.path.exists(config_path):
+        if commands.getstatusoutput("grep 'DocumentRoot /mnt/icfs%s/' /etc/httpd/conf/httpd.conf" %path)[1]:
+            if not commands.getstatusoutput("grep 'AuthUserFile /etc/httpd/conf/htpasswd' /etc/httpd/conf/httpd.conf")[1]:
+                with open(config_path, 'r') as foo:
+                    lines =foo.readlines()
+                with open(config_path, 'w') as f_w:
+                    for line in lines:
+                        if "/mnt/icfs" in line:
+                            line = line.replace("/mnt/icfs%s" %path,"/mnt/icfs")
+                        f_w.write(line)
+                    f_w.close()
+                    foo.close()
+            else:
+                Error(3212)
+        else:
+            Error(3210)
+    else:
+        Error(3201,"/etc/httpd/conf/httpd.conf")
+        sys.exit(1)
+
+    ret_dict = run_remote_copy("*", "/etc/httpd/conf/httpd.conf", "/etc/httpd/conf/httpd.conf")
+    fail_list = [name for name, ret in ret_dict.items() if ret["retcode"] != 0]
+    if fail_list:
+        Error(3206)
+
+    run_remote_cmd("*", "systemctl restart httpd")
+
+def http_user_delete():
+    user = user_name
+    if commands.getstatusoutput("grep -w '%s' /etc/httpd/conf/htpasswd" % user_name)[1]:
+        if os.path.exists('/etc/httpd/conf/htpasswd'):
+            with open('/etc/httpd/conf/htpasswd','r') as f_user:
+                 with open('/etc/httpd/conf/htpasswd.new','w') as g_user:
+                     for line in f_user.readlines():
+                         if user != line.split(':')[0]:
+                             g_user.write(line)
+            shutil.move('/etc/httpd/conf/htpasswd.new','/etc/httpd/conf/htpasswd')
+        else:
+            error(3213)
+    else:
+        error(3214)
+
+    ret_dict = run_remote_copy("*", "/etc/httpd/conf/htpasswd", "/etc/httpd/conf/htpasswd")
+    fail_list = [name for name, ret in ret_dict.items() if ret["retcode"] != 0]
+    if fail_list:
+        Error(3206)
+
+    run_remote_cmd("*", "systemctl restart httpd")
+
+if __name__ == '__main__':
+    operation = None
+    path = None
+    user_name = None
+
+    try:
+        options, args = getopt.getopt(sys.argv[1:],"hp:ano", ["help", "create", "set", "query", "delete", "user=" ,
+                                                          "start", "stop", "status"])
+    except getopt.GetoptError, err:
+        Error(610)
+        sys.exit(1)
+
+    if options == [] or args != []:
+            Error(610)
+            sys.exit(1)
+
+    for k, v in options:
+        if k in ("-h", "--help"):
+            usage()
+            sys.exit(0)
+        elif k == "-p":
+            path = v
+        elif k == "--user":
+            user_name = v
+        elif k == "--create":
+            operation = "create"
+        elif k == "--delete":
+            operation = "delete"
+        elif k == "--query":
+            operation = "query"
+        elif k == "--start":
+            operation = "start"
+        elif k == "--stop":
+            operation = "stop"
+        elif k == "--status":
+            operation = "status"
+    if operation == "create":
+        if len(sys.argv) == 5 and sys.argv[1] == "--create" and sys.argv[2] =="-ano" and sys.argv[3] == "-p":
+            check_remote_host_stat()
+            http_ano_create()
+        elif len(sys.argv) == 4 and sys.argv[1] == "--create" and sys.argv[2] == "-p" :
+            check_remote_host_stat()
+            http_path_create()
+        elif len(sys.argv) == 4 and sys.argv[1] == "--create" and sys.argv[2] == "--user":
+            check_remote_host_stat()
+            http_user_create()
+        else:
+             Error(610)
+             sys.exit(1)
+
+    elif operation == "delete":
+        if len(sys.argv) == 4 and sys.argv[1] == "--delete" and sys.argv[2] == "-p":
+            check_remote_host_stat()
+            http_path_delete()
+        elif len(sys.argv) == 5 and sys.argv[1] == "--delete" and sys.argv[2] == "-ano" and sys.argv[3] == "-p":
+            check_remote_host_stat()
+            http_path_delete_ano()
+        elif len(sys.argv) == 4 and sys.argv[1] == "--delete" and sys.argv[2] == "--user":
+            check_remote_host_stat()
+            http_user_delete()
+        else:
+            Error(610)
+            sys.exit(1)
+    elif operation == "query":
+        if len(sys.argv) == 2 and sys.argv[1] == "--query":
+            http_share_query()
+            http_user_query()
+        else:
+            Error(610)
+            sys.exit(1)
+    elif operation == "start":
+        if len(sys.argv) == 2 and sys.argv[1] == "--start":
+            check_remote_host_stat()
+            flag = http_start()
+            if flag == 1:
+                print "start http success"
+                sys.exit(0)
+            else:
+                print "start http error"
+                sys.exit(1)
+        else:
+            Error(610)
+            sys.exit(1)
+    elif operation == "stop":
+        if len(sys.argv) == 2 and sys.argv[1] == "--stop":
+            check_remote_host_stat()
+            flag = http_stop()
+            if flag == 1:
+                print "stop http success"
+                sys.exit(0)
+            else:
+                print "stop http error"
+                sys.exit(1)
+        else:
+            Error(610)
+            sys.exit(1)
+    elif operation == "status":
+        if len(sys.argv) == 2 and sys.argv[1] == "--status":
+            http_status()
+        else:
+            Error(610)
+            sys.exit(1)
+    else:
+        Error(610)
+        sys.exit(1)

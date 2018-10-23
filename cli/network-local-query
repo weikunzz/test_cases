@@ -1,0 +1,200 @@
+#!/usr/bin/python
+#coding:utf-8
+
+'''
+@author:     huper
+@contact:    duanluheng@inspur.com
+@date:       2016-11-9 
+'''
+import sys
+import getopt
+import commands
+import re
+import platform
+
+#all nic info list
+nic_list=[]
+bus_info_list={}
+class Nic:
+    name=""
+    slot="None"
+    health="healthy"
+    state="normal"
+    mac="None"
+    mtu="None"
+    ip="None"
+    mask="None"
+    gateway="None"
+    speed="None"
+    type="3"
+    bus_info="None"
+    net_type="ether" # ether,ib,master,slave
+    master = "None"
+    def __init__(self,name=None):
+        if name:
+            self.name = name
+            
+def get_all_nic():
+#get all nic name
+    nic_link_list = commands.getoutput("ip link show")
+    for nic_link in nic_link_list.splitlines():
+        if re.match("^\d:", nic_link):
+            nic_name = nic_link.split(":")[1].strip()
+            if nic_name != "lo":
+                nic = Nic(nic_name)
+                nic_list.append(nic)
+
+def get_netmask_by_prefix(prefix):
+    netmask = ""
+    try:
+        prefix = int(prefix)
+        if prefix > 31:
+            return "255.255.255.255"
+        if prefix <=0 :
+            return "None"
+        pre = prefix / 8
+        mod = prefix % 8
+        i=0
+        while i < pre:
+            netmask = netmask + "255."
+            i=i+1
+        i = 0
+        tmp = ""
+        while i < 8:
+            if i<mod:
+                tmp = tmp + '1'
+            else:
+                tmp = tmp + '0'
+            i = i + 1
+        tmp = int(tmp,2)
+        netmask = netmask + str(tmp)
+        last = 4-pre-1
+        i = 0
+        while i < last:
+            netmask = netmask + ".0"
+            i = i+1
+        return netmask
+    except Exception,e:
+        return "None"
+
+def ip_addr_info_analysis(ip_a_info):
+    resultdic={}
+    line_num = 0
+    for line in ip_a_info.splitlines():
+        infos = line.split()
+        if line_num == 0:#first line , content mtu bond
+            #infos like this--- ['5:', 'bond0:', '<BROADCAST,MULTICAST,MASTER,UP,LOWER_UP>', 'mtu', '1500', 'qdisc', 'noqueue', 'state', 'UP']
+            if "MASTER" in infos[2]:
+                resultdic["net_type"]="master"
+            elif "SLAVE" in infos[2]:
+                resultdic["net_type"]="slave"
+            else:
+                resultdic["net_type"]="ether"
+            tmp={}
+            i=3
+            while i < len(infos) :
+                tmp[infos[i]] = infos[i+1]
+                i=i+2
+            resultdic["mtu"] = tmp["mtu"]
+            resultdic["state"] = tmp["state"]
+            if resultdic["net_type"] == "slave":
+                resultdic["master"] = tmp["master"]
+        if line_num == 1: # second line ,content net_type , mac
+            #infos like this----   ['link/ether', '6c:92:bf:04:57:4d', 'brd', 'ff:ff:ff:ff:ff:ff']
+            if "infiniband" in infos[0] and not resultdic.has_key("net_type"):
+                resultdic["net_type"]="ib"
+            resultdic["mac"] = infos[1]
+        if line_num == 2: # third line ,content ip addr and mask info
+            #infos like this ----   ['inet', '100.7.35.200/20', 'brd 100.7.47.255', 'scope global', 'enp4s0f0']
+            ipinfo = infos[1].split('/')
+            resultdic["ip"] = ipinfo[0]
+            resultdic["mask"] = get_netmask_by_prefix(ipinfo[1])
+        if line_num == 3:
+            break
+        line_num = line_num + 1
+    return resultdic       
+    
+def get_nic_info(nic):
+#nic obj of Nic
+    nic_name = nic.name
+    ip_a_info = commands.getoutput("ip addr show %s"%(nic_name))
+    result = ip_addr_info_analysis(ip_a_info)
+    for key,value in result.iteritems():
+        if key == "net_type":
+            nic.net_type=value
+        if key == "mtu":
+            nic.mtu = value
+        if key == "state":
+            if value != "UP":
+                nic.state = "abnormal"
+                nic.health = "unhealthy"
+        if key == "master":
+            nic.master = value
+        if key == "mac":
+            nic.mac = value
+        if key == "ip":
+            nic.ip = value
+        if key == "mask":
+            nic.mask = value
+    nic_ethtool = commands.getoutput("ethtool %s"%(nic_name))
+    #speed and type
+    info = re.search("Speed:.*",nic_ethtool)
+    if info:
+        speed = info.group().split(":")[1].strip()
+        if "10000M" in speed:
+            nic.speed=speed
+            nic.type="1"
+        elif "1000M" in speed:
+            nic.speed=speed
+            nic.type="0"
+    # gateway
+    gate_info = commands.getoutput("cat /etc/sysconfig/network-scripts/ifcfg-%s|grep -v '#'|grep 'GATEWAY'"%(nic_name))
+    if 'GATEWAY=' in gate_info:
+        nic.gateway=gate_info.split('=')[-1].replace('"','')
+    if nic.net_type != "master":
+        # bus_info and slot
+        flag,bus_info = commands.getstatusoutput("ethtool -i %s"%(nic_name))
+        if flag == 0:
+            bus_info = re.search("bus-info:.*",bus_info).group()
+            nic.bus_info = bus_info.split()[1].strip()
+            bus_info_list[nic.bus_info]="0"
+        
+def sort_bus_info():
+    keys = bus_info_list.keys()
+    keys.sort()
+    for i in range(len(keys)):
+        bus_info_list[keys[i]]=str(i)
+    # set nic slot info
+    for nic in nic_list:
+        if nic.bus_info != "None":
+            nic.slot=bus_info_list[nic.bus_info]
+
+def query():
+    get_all_nic()
+    for nic in nic_list:
+        get_nic_info(nic)
+    #sort bus_info_list    
+    sort_bus_info()
+    #print result
+    for nic in nic_list:
+        if nic.net_type != "master":
+            if nic.net_type == "slave":
+                print "Name:"+nic.master+"/"+nic.name
+            else:
+                print "Name:"+nic.name
+            print "Slot:"+nic.slot
+            print "Health:"+nic.health
+            print "State:"+nic.state
+            print "MAC:"+nic.mac
+            print "MTU:"+nic.mtu
+            print "IP:"+nic.ip
+            print "Mask:"+nic.mask
+            print "Gateway:"+nic.gateway
+            print "Speed:"+nic.speed
+            if nic.net_type == "ib":
+                print "Type:2"
+            else:
+                print "Type:"+nic.type
+            print ""
+query()
+        

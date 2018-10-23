@@ -1,0 +1,157 @@
+#!/usr/bin/python
+#coding:utf-8
+# -*- copyright -*-
+
+import getopt,commands,re,sys
+
+cd_invalidInput         = 610
+cd_modifySnmpConfFailed = 1300
+cd_stopSnmpFailed       = 1301
+cd_startSnmpFailed      = 1302
+cd_getSnmpConfFailed    = 1303
+cd_unknownError         = 1399
+
+def exit(ec):
+    if ec == 0:
+        sys.exit(0)
+    elif ec == cd_invalidInput:
+        print "Error(%d):Invalid input!"%ec
+    elif ec == cd_modifySnmpConfFailed:
+        print "Error(%d):Modify snmp confuguration file failed"%ec
+    elif ec == cd_stopSnmpFailed:
+        print "Error(%d):Stop snmp server failed"%ec
+    elif ec == cd_startSnmpFailed:
+        print "Error(%d):Start snmp server failed"%ec
+    elif ec == cd_getSnmpConfFailed:
+        print "Error(%d):Get snmp confuguration failed"%ec
+    else:
+        print "Error(%d):Unknown error"%ec
+    sys.exit(1)
+    
+
+def usage():
+    print """Help(-h|--help)for icfs-snmp-conf:
+Usage:
+>> icfs-snmp-conf ----+ --get +----><
+                      ' --set '
+Functions: Get or set snmp configure
+Options:
+  --get:  Get snmp configure
+  --set:  Set snmp configure
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+icfs-snmp-conf --get:
+Usage:
+>> icfs-snmp-conf ---- --get ----><
+Functions: Get snmp configure
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+icfs-snmp-conf --set:
+Usage:
+>> icfs-snmp-conf ---- --set ---- securityName ---- authProtocol ---- authPassword ---- pirvProtocol ---- privPassword  ----><
+Functions: Set snmp configure
+Options:
+  securityName: Security name, length is 3 to 18, consist of English letter, number or underscore, must begin with a letter
+  authProtocol: Authentication protocol (MD5|SHA)
+  authPassword: Authentication protocol pass phrase, length is 8 to 32, consist of English letter, number or @%,?_
+  privProtocol: Privacy protocol (DES|AES)
+  privPassword: Privacy protocol pass phrase, length is 8 to 32, consist of English letter, number or @%,?_
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully"""
+
+
+def SetSnmpConf(userName, authType, authPw, privType, privPw): 
+    #输入校验
+    if not (re.match("^[a-zA-Z][a-zA-Z0-9]{2,17}$", userName)):
+        return cd_invalidInput
+    if authType != "MD5" and authType != "SHA":
+        return cd_invalidInput
+    if privType != "DES" and privType != "AES":
+        return cd_invalidInput
+    reStr = "^[\@A-Za-z0-9\%\?\_\,]{8,32}$"
+     
+    #print "--%s--%s--"%(authPw, privPw)
+    if not (re.match(reStr, authPw)):
+        return cd_invalidInput
+    if not (re.match(reStr, privPw)):
+        return cd_invalidInput
+
+    # 停止snmp服务，删除缓存配置文件
+    cmd = "service snmpd stop"
+    stat, rs = commands.getstatusoutput(cmd)
+    if (stat != 0):
+        return cd_stopSnmpFailed
+    cmd = "rm -f /var/net-snmp/snmpd.conf"
+    stat, rs = commands.getstatusoutput(cmd)
+    if (stat != 0):
+        cmd = "service snmpd start"
+        stat, rs = commands.getstatusoutput(cmd)
+        return cd_modifySnmpConfFailed
+    
+    # 修改配置文件
+    confFile = "/usr/local/share/snmp/snmpd.conf"
+    cmd = "/bin/sed -i -e 's/^\(\s*createUser\).*/createUser %s %s %s %s %s/g' '%s'"%(userName, authType, authPw, privType, privPw, confFile)
+    stat, rs = commands.getstatusoutput(cmd)
+    cmd = "/bin/sed -i -e 's/^\(\s*rwuser\).*/rwuser %s priv -V systemview/g' %s"%(userName, confFile)
+    stat1, rs = commands.getstatusoutput(cmd)
+    stat += stat1
+    if (stat != 0):
+        return cd_modifySnmpConfFailed
+    
+    # 启动snmp服务
+    cmd = "service snmpd start"
+    stat, rs = commands.getstatusoutput(cmd)
+    if (stat != 0 or  rs.find(" OK ") == -1):
+        return cd_startSnmpFailed
+    print "OK"
+    return 0
+
+def GetSnmpConf():
+    confFile = "/usr/local/share/snmp/snmpd.conf"
+    stat, rs = commands.getstatusoutput("cat " + confFile + " | grep -w ^createUser")
+    if (stat != 0):
+        return cd_getSnmpConfFailed
+    snmpInfo = re.split('\s+',rs)
+    if len(snmpInfo) != 6 :
+        return cd_getSnmpConfFailed
+    print "SecurityName\tAuthProtocol\tAuthPassword\tPrivProtocol\tPrivPassword"   
+    print "%s\t%s\t%s\t%s\t%s"%(snmpInfo[1],snmpInfo[2],snmpInfo[3],snmpInfo[4],snmpInfo[5])
+    return 0
+    
+
+if __name__ == '__main__':
+    stat = 0
+    try:
+        try:
+            options, args =getopt.getopt(sys.argv[1:],"h",["help","set","get"])
+#            print options
+#            print args
+        except getopt.GetoptError, err:
+            
+            exit(cd_invalidInput)
+        argLen = len(sys.argv[0:])
+        #print sys.argv
+        if argLen == 2:
+            if sys.argv[1] == "-h" or sys.argv[1] == "--help":
+                usage()
+            elif sys.argv[1] == "--get":
+                stat = GetSnmpConf()
+            else:
+                stat = cd_invalidInput
+        elif argLen == 7:
+            
+            if sys.argv[1] == "--set":
+                stat = SetSnmpConf(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6])
+            else:
+                stat = cd_invalidInput
+        else:
+            stat = cd_invalidInput
+    except Exception,e:  
+        stat = cd_unknownError
+        #print Exception,":",e
+    exit(stat)

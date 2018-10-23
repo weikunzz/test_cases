@@ -1,0 +1,1455 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+
+import sys
+import commands
+import re
+import OptParser
+from icfs_util import run_remote_copy, run_remote_cmd, run_local_cmd, error
+from icfs_util import get_remote_host_list
+import json
+import ConfigParser
+
+DEBUG = 0
+
+
+# get ssd pool crush rule name, return None if pool is not ssd pool
+def get_ssd_pool_rule(pool_name):
+    ret_dict = run_local_cmd("icfs osd pool get %s crush_ruleset -f json 2>/dev/null" % pool_name)
+    if ret_dict["retcode"] != 0:
+        if "unrecognized pool" in ret_dict["stderr"]:
+            ssd_rule_name = ""
+            return ssd_rule_name
+        else:
+            Error(1399, "Failed to get crush rule for pool %s" % pool_name)
+
+    try:
+        pool_info = json.loads(ret_dict["stdout"])
+        rule_id = pool_info["crush_ruleset"]
+    except Exception, err:
+        Error(1399, "get_ssd_pool_rule fail, fail info %s" % err)
+        sys.exit(1)
+
+    status, output = commands.getstatusoutput("icfs osd crush rule dump 2>/dev/null")
+    if status != 0:
+        Error(1399, "Failed to get crush rule list")
+
+    try:
+        rule_list = json.loads(output)
+    except:
+        Error(1399, "Failed to get crush rule list")
+        sys.exit(1)
+
+    ssd_rule_name = ""
+    for rule in rule_list:
+        if rule["rule_id"] != rule_id:
+            continue
+
+        rule_name = rule["rule_name"]
+        if rule_name == pool_name:
+            # erasure pool
+            if str(rule["type"]) == "3":
+                take_ssd_host = [item for item in rule['steps'] if item['op'] == 'take' and re.match("^ssd_\d$", item['item_name'])]
+                if not take_ssd_host:
+                    ssd_rule_name = None
+                else:
+                    ssd_rule_name = rule_name
+            else:
+                ssd_rule_name = rule_name
+            break
+
+    return ssd_rule_name
+
+
+def chang_unit(data):
+    data = data.upper()
+    try:
+        data = int(data)
+        return data
+    except (TypeError, ValueError):
+        if data[-1] == "B":
+            unit = 1
+        elif data[-1] == "K":
+            unit = 1024
+        elif data[-1] == "M":
+            unit = 1024 * 1024
+        elif data[-1] == "G":
+            unit = 1024 * 1024 * 1024
+        elif data[-1] == "T":
+            unit = 1024 * 1024 * 1024 * 1024
+        elif data[-1] == "P":
+            unit = 1024 * 1024 * 1024 * 1024 * 1024
+        elif data[-1] == "E":
+            unit = 1024 * 1024 * 1024 * 1024 * 1024 * 1024
+        else:
+            print "Error(610): Invalid input! " + str(data) + "  is error"
+            sys.exit(1)
+    try:
+        data = int(data[0:-1])
+    except (TypeError, ValueError):
+        print "Error(610): Invalid input!  type error"
+        sys.exit(1)
+    data *= unit
+    return data
+
+
+def unit_convert(n):
+    try:
+        symbols = ('KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB')
+        prefix = {}
+        for i, s in enumerate(symbols):
+            prefix[s] = 1 << (i + 1) * 10
+        for s in reversed(symbols):
+            if n >= prefix[s]:
+                value = float(n) / prefix[s]
+                return '%.1f%s' % (value, s)
+        return "%sB" % n
+    except (ValueError, TypeError), err:
+        print err
+        sys.exit(1)
+
+
+def sys_data_type():
+    osd_dump = commands.getoutput("icfs osd tree 2>/dev/null|grep _n1")
+    if osd_dump:
+        return 1
+    else:
+        return 0
+
+
+def p_value(pg, pgp):
+    try:
+        if int(pg) != int(pgp):
+            Error(2001)
+    except ValueError, e:
+        Error(2002)
+
+
+def check_int(num):
+    try:
+        num = int(num)
+    except ValueError, e:
+        Error(2002)
+    return num
+
+
+# def check_k_m(k, m):
+#     if k <= m:
+#         Error(2006)
+#     node_out = get_remote_host_list()
+#     node_num = len(node_out)
+#     if k+m > node_num:
+#         Error(2007)
+
+
+def check_k_m_n(k_str, m_str, n_str):
+    try:
+        k_num = int(k_str)
+        m_num = int(m_str)
+        n_num = int(n_str)
+    except ValueError, e:
+        print "Error(610):Invalid input!, k:%s m:%s n:%s" % (k_str, m_str, n_str)
+        sys.exit(1)
+
+    output1 = commands.getoutput("cat /etc/hosts|grep -E '([0-9]{1,3}[\.]){3}[0-9]{1,3}'|sed '1d'|awk '{print $2}'")
+    num1 = len(output1.split("\n"))
+    output2 = commands.getoutput("icfs osd tree 2>/dev/null|grep _n1$|wc -l")
+    num2 = int(output2)
+
+    if k_num < m_num or k_num > 16 or k_num <= 1 or m_num < 1:
+        print "Error(610):Invalid input!, k:%s m:%s n:%s" % (k_str, m_str, n_str)
+        sys.exit(1)
+
+    if n_num == 0:
+        if k_num + m_num > num2 * 2 and k_num + m_num > num1:
+            print "Error(610):Invalid input!, k:%s m:%s n:%s" % (k_str, m_str, n_str)
+            sys.exit(1)
+    elif n_num == 1:
+        if k_num + m_num > num1 * 2:
+            print "Error(610):Invalid input!, k:%s m:%s n:%s" % (k_str, m_str, n_str)
+            sys.exit(1)
+        if m_num != 2:
+            print "Error(610):Invalid input!,m:%s" % m_str
+            sys.exit(1)
+        if k_num % m_num != 0 or k_num < 2 or (k_num + m_num) / m_num > num1:
+            Error(610)
+            print "k:%s m:%s" % (k_str, m_str)
+            sys.exit(1)
+    else:
+        print "Error(610):Invalid input!, k:%s m:%s n:%s" % (k_str, m_str, n_str)
+        sys.exit(1)
+
+# def name_format(name):
+#     if re.findall('^[0-9a-zA-Z_]', name) == [] or re.findall('[^\w_]', name) != []:
+#         Error(2000)
+
+
+def add_pool_to_fs(pool_name):
+    status, output = commands.getstatusoutput("icfs fs ls -f json 2>/dev/null")
+    try:
+        fs_list = json.loads(output)
+        if len(fs_list) == 0:
+            print "Error(553): Unknown error: filesystem does not exist"
+            run_local_cmd("icfs osd pool delete %s %s --yes-i-really-really-mean-it" % pool_name)
+            sys.exit(1)
+        fs_name = fs_list[0]["name"]
+    except:
+        print "Error(553): Unknown error: get filesystem datapool failed"
+        run_local_cmd("icfs osd pool delete %s %s --yes-i-really-really-mean-it" % pool_name)
+        sys.exit(1)
+
+    status, output = commands.getstatusoutput("icfs fs add_data_pool %s %s" % (fs_name, pool_name))
+    if status != 0:
+        run_local_cmd("icfs osd pool delete %s %s --yes-i-really-really-mean-it" % pool_name)
+        Error(2008)
+
+
+def get_pool_strategy(pool_name_or_pool_id):
+    try:
+        int(pool_name_or_pool_id)
+        pool_info = commands.getoutput("icfs osd dump 2>/dev/null | grep pool | awk '{if($2==%s)print}' | "
+                                       "awk '{print $4\"\t\"$6\"\t\"$8\"\t\"$3}'" % pool_name_or_pool_id)
+    except Exception, e:
+        pool_info = commands.getoutput("icfs osd dump 2>/dev/null | grep -w %s | awk '{print $4\"\t\"$6\"\t\"$8\"\t\"$3}'"
+                                       % pool_name_or_pool_id)
+    if pool_info == "":
+        return "none"
+    pool_info = pool_info.split("\t")
+    if pool_info[0] == "replicated":
+        return pool_info[1]
+    if pool_info[0] == "erasure":
+        k = int(pool_info[2])
+        m = int(pool_info[1])-int(k)
+        b = sys_data_type()
+        return str(k)+"+"+str(m)+":"+str(b)
+
+
+def get_root_by_osd(osd_num):
+    root_name = ""
+    status, output = commands.getstatusoutput("icfs osd tree -f json 2>/dev/null")
+    if status != 0:
+        Error(1399, "Failed to get crush map")
+
+    try:
+        node_list = json.loads(output)["nodes"]
+        child_id = osd_num
+        while True:
+            parent_node = None
+            for node in node_list:
+                if "children" in node and child_id in node["children"]:
+                    parent_node = node
+                    break
+
+            if parent_node is not None and parent_node["type"] == "root":
+                root_name = parent_node["name"]
+                break
+            elif parent_node is None:
+                break
+            else:
+                child_id = parent_node["id"]
+    except Exception, err:
+        Error(1399, "Failed to get root by osd %s" % err)
+        sys.exit(1)
+
+    return root_name
+
+
+def get_osd_root_name():
+    osd_dict = {}
+    status, output = commands.getstatusoutput("icfs osd tree -f json 2>/dev/null")
+    if status != 0:
+        Error(1399, "Failed to get crush map")
+
+    try:
+        crush_map = json.loads(output)
+        node_list = crush_map["nodes"]
+        root_name = ""
+        for node in node_list:
+            node_type = node["type"]
+            if node_type == "root":
+                root_name = node["name"]
+            elif node_type == "osd":
+                osd_num = node["id"]
+                if node["depth"] == 0:
+                    osd_dict[osd_num] = ""
+                else:
+                    osd_dict[osd_num] = root_name
+
+        stray_list = crush_map["stray"]
+        for node in stray_list:
+            node_type = node["type"]
+            if node_type == "osd":
+                osd_num = node["id"]
+                osd_dict[osd_num] = ""
+    except Exception, err:
+        Error(1399, "Failed to get root by osd %s" % err)
+        sys.exit(1)
+
+    return osd_dict
+
+
+def create_pool(poolname, pgnum, pgpnum, disk, is_ssd_pool, rep):
+    eras_check = sys_data_type()
+    # osd_up = commands.getoutput("icfs osd tree|grep osd|grep -w up|awk '{print $4}'")
+    # osd_num = len(osd_up.split('\n'))
+    # pg = (osd_num * 100) / rep
+    # i = 0
+    # while pg > pow(2, i):
+    #     i += 1
+    # else:
+    #     pg = pow(2, i)
+    if eras_check == 0:
+        if is_ssd_pool:
+            ret = adjust_osd_tree(poolname, disk, "replicate")
+            if ret:
+                Error(1399, "adjust osd tree fail")
+            ret, max_ssd_num = get_next_ssd_rule_number()
+            if ret:
+                return 1
+            pool_status, pool_output = commands.getstatusoutput("icfs osd pool create %s %s %s replicated %s"
+                                                                % (poolname, pgnum, pgpnum, poolname))
+            if pool_status != 0:
+                # clear the crush rule
+                recovery_crush("replicated", poolname, poolname)
+                Error(1399, pool_output)
+            elif "already exists" in pool_output:
+                Error(2003, poolname)
+
+            # add the osd crush update on start=false to icfs.conf and sync to the hosts in cluster
+            osd_crush = commands.getoutput(
+                "cat /etc/icfs/icfs.conf | grep -E \"^osd crush update on start[ ]*=[ ]*false[ ]*$\" |awk -F '=' '{print $2}'")
+            if osd_crush.strip() == '' or osd_crush.strip() == 'true':
+                try:
+                    cf = ConfigParser.ConfigParser()
+                    cf.read("/etc/icfs/icfs.conf")
+                    cf.set("global", "osd crush update on start", "false")
+                    with open("/etc/icfs/icfs.conf", 'w') as configfile:
+                        cf.write(configfile)
+                except Exception, err:
+                    Error(1399, err)
+                osd_crush_saltcp = run_remote_copy("*", "/etc/icfs/icfs.conf", "/etc/icfs/icfs.conf")
+                fail_list = [name for name, ret in osd_crush_saltcp.items() if ret["retcode"] not in (0, -1)]
+                if fail_list:
+                    print "Error(703):Synchronization configuration file failed"
+                    sys.exit(1)
+        else:
+            pool_status, pool_output = commands.getstatusoutput("icfs osd pool create %s %s %s"
+                                                                % (poolname, pgnum, pgpnum))
+            if pool_status != 0:
+                Error(1399, pool_output)
+            elif "already exists" in pool_output:
+
+                Error(2003, poolname)
+        rep_status, rep_out = commands.getstatusoutput("icfs osd pool set %s size %s" % (poolname, rep))
+        if rep_status != 0:
+            Error(1399, rep_out)
+    else:
+        has_role = commands.getoutput("icfs osd tree 2>/dev/null|grep -E \"_n1 *$\" |wc -l")
+        if has_role:
+            rep_status, rep_output = commands.getstatusoutput("icfs_create_replicated_pool %s %s" % (poolname, pgnum))
+            if rep_status:
+                Error(1399, rep_output)
+            set_rep_status, set_rep_out = commands.getstatusoutput("icfs osd pool set %s size %s" % (poolname, rep))
+            if set_rep_status != 0:
+                Error(1399, set_rep_out)
+        else:
+            Error(510)
+    if has_fs:
+        add_pool_to_fs(poolname)
+    print "Create %s successful" % poolname
+
+
+def make_pool(disk, is_ssd_pool):
+    global poolname, datanum, codenum, n, pgnum, stripe_unit
+    # osd_up = commands.getoutput("icfs osd tree|grep osd|grep -w up|awk '{print $4}'")
+    # osd_num = len(osd_up.split('\n'))
+    if n == 0:
+        # create_erasure_pool(poolname, datanum, codenum, pgnum, stripe_unit)
+        # e = (osd_num * 100) / (datanum + codenum)
+        # i = 0
+        # while e > pow(2, i):
+        #     i += 1
+        # else:
+        #     e = pow(2, i)
+        if is_ssd_pool:
+            ret = adjust_osd_tree(poolname, disk, "erasure", datanum, codenum)
+            if ret:
+                Error(1399, "adjust osd tree fail")
+            ret, max_ssd_num = get_next_ssd_rule_number()
+            if ret:
+                return 1
+            era_status, era_output = commands.getstatusoutput("icfs osd pool create %s %s %s erasure %s"
+                                                              % (poolname, pgnum, pgnum, poolname))
+            if era_status != 0:
+                # clear the crush rule
+                recovery_crush("erasure", poolname, poolname)
+                Error(1399, era_output)
+            # add the osd crush update on start=false to icfs.conf and sync to the hosts in cluster
+            osd_crush = commands.getoutput(
+                "cat /etc/icfs/icfs.conf | grep -E \"^osd crush update on start[ ]*=[ ]*false[ ]*$\" |awk -F '=' '{print $2}'")
+            if osd_crush.strip() == '' or osd_crush.strip() == 'true':
+                try:
+                    cf = ConfigParser.ConfigParser()
+                    cf.read("/etc/icfs/icfs.conf")
+                    cf.set("global", "osd crush update on start", "false")
+                    with open("/etc/icfs/icfs.conf", 'w') as configfile:
+                        cf.write(configfile)
+                except Exception, err:
+                    Error(1399, err)
+                osd_crush_saltcp = run_remote_copy("*", "/etc/icfs/icfs.conf", "/etc/icfs/icfs.conf")
+                fail_list = [name for name, ret in osd_crush_saltcp.items() if ret["retcode"] not in (0, -1)]
+                if fail_list:
+                    print "Error(703):Synchronization configuration file failed"
+                    sys.exit(1)
+        else:
+            if not has_stripe:
+                if not has_fault:
+                    era_status, era_output = commands.getstatusoutput("icfs_create_erasure_pool -p %s -k %s -m %s -g %s"
+                                                                      % (poolname, datanum, codenum, pgnum))
+                else:
+                    era_status, era_output = commands.getstatusoutput("icfs_create_erasure_pool -p %s -k %s -m %s -g %s -r "
+                                                                      "osd" % (poolname, datanum, codenum, pgnum))
+            else:
+                # if chang_unit(stripe_unit) % 4096 == 0:
+                if not has_fault:
+                    era_status, era_output = commands.getstatusoutput("icfs_create_erasure_pool -p %s -k %s -m %s -g "
+                                                                      "%s -u %s" % (poolname, datanum, codenum, pgnum, chang_unit(stripe_unit)))
+                else:
+                    era_status, era_output = commands.getstatusoutput("icfs_create_erasure_pool -p %s -k %s -m %s -g "
+                                                                      "%s -u %s -r osd" % (poolname, datanum, codenum, pgnum, chang_unit(stripe_unit)))
+                # else:
+                #     if not has_fault:
+                #         era_status, era_output = commands.getstatusoutput("icfs_create_erasure_pool -p %s -k %s -m %s -g "
+                #                                                           "%s -u %s --force" % (poolname, datanum, codenum, pgnum, stripe_unit))
+                #     else:
+                #         era_status, era_output = commands.getstatusoutput("icfs_create_erasure_pool -p %s -k %s -m %s -g "
+                #                                                           "%s -u %s -r osd --force" % (poolname, datanum, codenum, pgnum, stripe_unit))
+            if era_status != 0:
+                Error(1399, era_output)
+        if has_fs:
+            add_pool_to_fs(poolname)
+        # mds_status, mds_out = commands.getstatusoutput("icfs mds add_data_pool %s" % poolname)
+        # if mds_status:
+        #     Error(1399, mds_out)
+    elif n == 1:
+        # e = (osd_num * 100) / (datanum + codenum)
+        # i = 0
+        # while e > pow(2, i):
+        #     i += 1
+        # else:
+        #     e = pow(2, i)
+        node_name1 = get_remote_host_list()
+        node_name = ''
+        for i in node_name1:
+            node_name = node_name + ' ' + i
+        k_m = datanum + codenum
+        if int(commands.getoutput("icfs osd tree 2>/dev/null|grep -E \"_n1 *$\" |wc -l")) * 2 < k_m:
+            status, output = commands.getstatusoutput("icfs_create_diskpool_rule -m %s %s" % (codenum, node_name))
+            if status:
+                Error(1399, output)
+
+        # if is_ssd_pool:
+        #     ret = adjust_osd_tree(poolname, disk, "replicate")
+        #     if ret:
+        #         Error(1399, "adjust osd tree fail")
+        #     ret, max_ssd_num = get_next_ssd_rule_number()
+        #     if ret:
+        #         return 1
+        #     pool_status, pool_output = commands.getstatusoutput("icfs osd pool create %s %s %s replicated %s"
+        #                                                         % (poolname, pgnum, pgpnum, poolname))
+        #     if pool_status != 0:
+        #         # clear the crush rule
+        #         recovery_crush("replicated", poolname, poolname)
+        #         Error(1399, pool_output)
+        #     elif "already exists" in pool_output:
+        #         Error(2003, poolname)
+
+        if not has_stripe:
+            if not has_fault:
+                era_status, era_output = commands.getstatusoutput("icfs_create_erasure_pool -p %s -k %s -m %s -g %s"
+                                                                  % (poolname, datanum, codenum, pgnum))
+            else:
+                era_status, era_output = commands.getstatusoutput("icfs_create_erasure_pool -p %s -k %s -m %s -g %s -r "
+                                                                  "osd" % (poolname, datanum, codenum, pgnum))
+        else:
+            # if chang_unit(stripe_unit) % 4096 == 0:
+            if not has_fault:
+                era_status, era_output = commands.getstatusoutput("icfs_create_erasure_pool -p %s -k %s -m %s -g "
+                                                                  "%s -u %s" % (poolname, datanum, codenum, pgnum, chang_unit(stripe_unit)))
+            else:
+                era_status, era_output = commands.getstatusoutput("icfs_create_erasure_pool -p %s -k %s -m %s -g "
+                                                                  "%s -u %s -r osd" % (poolname, datanum, codenum, pgnum, chang_unit(stripe_unit)))
+            # else:
+            #     if not has_fault:
+            #         era_status, era_output = commands.getstatusoutput("icfs_create_erasure_pool -p %s -k %s -m %s -g "
+            #                                                           "%s -u %s --force" % (poolname, datanum, codenum, pgnum, stripe_unit))
+            #     else:
+            #         era_status, era_output = commands.getstatusoutput("icfs_create_erasure_pool -p %s -k %s -m %s -g "
+            #                                                           "%s -u %s -r osd --force" % (poolname, datanum, codenum, pgnum, stripe_unit))
+        if era_status != 0:
+            Error(1399, era_output)
+        if has_fs:
+            add_pool_to_fs(poolname)
+        # create_erasure_pool(poolname, datanum, codenum, pgnum, stripe_unit)
+        # mds_status, mds_out = commands.getstatusoutput("icfs mds add_data_pool %s" % poolname)
+        # if mds_status:
+        #     Error(1399, mds_out)
+        osd_crush = commands.getoutput(
+            "cat /etc/icfs/icfs.conf | grep -E \"^osd crush update on start[ ]*=[ ]*false[ ]*$\" |awk -F '=' '{print $2}'")
+
+        if osd_crush.strip() == '' or osd_crush.strip() == 'true':
+            try:
+                cf = ConfigParser.ConfigParser()
+                cf.read("/etc/icfs/icfs.conf")
+                cf.set("global", "osd crush update on start", "false")
+                with open("/etc/icfs/icfs.conf", 'w') as configfile:
+                    cf.write(configfile)
+            except Exception, err:
+                Error(1399, err)
+            osd_crush_saltcp = run_remote_copy("*", "/etc/icfs/icfs.conf", "/etc/icfs/icfs.conf")
+            fail_list = [name for name, ret in osd_crush_saltcp.items() if ret["retcode"] != 0]
+            if fail_list:
+                print "Error(703):Synchronization configuration file failed"
+                sys.exit(1)
+    else:
+        Error(2005)
+
+    print "Create %s successful" % poolname
+
+
+def set_rep(poolname, rep):
+    rep_status, rep_out = commands.getstatusoutput("icfs osd pool set %s size %s" % (poolname, rep))
+    if rep_status:
+        Error(1399, rep_out)
+    print "Set rep successful"
+
+
+def set_pgs(poolname, pg_num, pgp_num):
+    pg_status, pg_output = commands.getstatusoutput("icfs osd pool set %s pg_num %s" % (poolname, pg_num))
+    if pg_status:
+        Error(1399, pg_output)
+    pgp_status, pgp_output = commands.getstatusoutput("icfs osd pool set %s pgp_num %s" % (poolname, pgp_num))
+    if pgp_status:
+        Error(1399, pgp_output)
+    print "Set PGs successful"
+
+
+def delete_pool(poolname):
+    rule = get_ssd_pool_rule(poolname)
+    status, output = commands.getstatusoutput("icfs fs ls -f json 2>/dev/null")
+    try:
+        fs_list = json.loads(output)
+        if len(fs_list) != 0:
+            fs_name = fs_list[0]["name"]
+            datapool_list = fs_list[0]["data_pools"]
+            if poolname in datapool_list:
+                status, output = commands.getstatusoutput("icfs fs rm_data_pool %s %s" % (fs_name, poolname))
+                if status != 0:
+                    print "Error(553): Unknown error: remove datapool from file system failed", output
+                    sys.exit(1)
+    except Exception, err:
+        print "Error(553): Unknown error: get filesystem datapool failed"
+        sys.exit(1)
+
+    pool_type = commands.getoutput("icfs osd dump 2>/dev/null|grep pool | grep -w %s |awk '{print $4}' " % poolname)
+    if pool_type == "replicated":
+        del_status, del_output = commands.getstatusoutput("icfs osd pool delete %s %s --yes-i-really-really-mean-it"
+                                                          % (poolname, poolname))
+        if del_status:
+            Error(1399, del_output)
+
+        elif 'not exist' in del_output:
+            Error(2004, poolname)
+    else:
+        del_status, del_output = commands.getstatusoutput("icfs_remove_erasure_pool -p %s -t %s -c "
+                                                          "yes_i_really_really_mean_it" % (poolname, poolname))
+        if del_status:
+            Error(1399, del_output)
+        elif 'not exist' in del_output:
+            Error(2004, poolname)
+        eras_check = sys_data_type()
+        if eras_check:
+            pool_type_check = commands.getoutput("icfs osd dump 2>/dev/null|grep pool|awk '{print $4}'")
+            era_list = pool_type_check.split('\n')
+            if "erasure" not in era_list:
+                node_name1 = get_remote_host_list()
+                node_name = ''
+                for i in node_name1:
+                    node_name = node_name + ' ' + i
+                role_status, role_output = commands.getstatusoutput("icfs_remove_diskpool_rule %s" % node_name)
+                if role_status:
+                    Error(1399, role_output)
+    if rule:
+        if recovery_crush(pool_type, poolname, rule):
+            Error(1399)
+    print "Delete %s successful" % poolname
+
+
+# pool detail information class
+class PoolInfo(object):
+    def __init__(self):
+        self.name = ""
+        self.id = ""
+        self.bytes_used = 0
+        self.bytes_available = 0
+        self.object_num = 0
+        self.type = ""
+        self.strategy = ""
+        self.rule_id = 0
+        self.rule_name = ""
+        self.is_fs_metapool = False
+        self.is_fs_datapool = False
+
+
+def pool_query():
+    pool_info_dict = {}
+
+    # get fs meta and data pool
+    meta_pool = ""
+    data_pool_list = []
+    status, output = commands.getstatusoutput("icfs fs ls -f json 2>/dev/null")
+    if status != 0:
+        Error(1399, "Failed to get file system information")
+
+    try:
+        fs_info = json.loads(output)
+        if len(fs_info) != 0:
+            meta_pool = fs_info[0]["metadata_pool"]
+            data_pool_list = fs_info[0]["data_pools"]
+    except Exception, err:
+        Error(1399, "Failed to get file system information %s" % err)
+        sys.exit(1)
+
+    # get pool usage information
+    status, output = commands.getstatusoutput("icfs df -f json 2>/dev/null")
+    if status != 0:
+        Error(1399, "Failed to get pool usage information")
+
+    try:
+        pool_usage_list = json.loads(output)["pools"]
+        for pool_usage in pool_usage_list:
+            pool_info = PoolInfo()
+            pool_info.name = pool_usage["name"]
+            pool_info.id = pool_usage["id"]
+            pool_info.bytes_used = pool_usage["stats"]["bytes_used"]
+            pool_info.bytes_available = pool_usage["stats"]["max_avail"]
+            pool_info.object_num = pool_usage["stats"]["objects"]
+            if pool_info.name == meta_pool:
+                pool_info.is_fs_metapool = True
+            if pool_info.name in data_pool_list:
+                pool_info.is_fs_datapool = True
+            pool_info_dict[pool_info.name] = pool_info
+    except Exception, err:
+        Error(1399, "Failed to get pool usage information %s" % err)
+        sys.exit(1)
+
+    # get all osd crush rule info
+    rule_dict = {}
+    is_ssd_rule = {}
+    status, output = commands.getstatusoutput("icfs osd crush rule dump 2>/dev/null")
+    if status != 0:
+        Error(1399, "Failed to get crush rule list")
+
+    try:
+        rule_list = json.loads(output)
+        for rule in rule_list:
+            rule_id = rule["rule_id"]
+            rule_name = rule["rule_name"]
+            rule_dict[rule_id] = rule_name
+            take_ssd_host = [item for item in rule['steps'] if
+                             item['op'] == 'take' and re.match("^ssd_\d$", item['item_name'])]
+            if take_ssd_host:
+                is_ssd_rule[rule_id] = True
+            else:
+                is_ssd_rule[rule_id] = False
+    except Exception, err:
+        Error(1399, "Failed to get crush rule list %s" % err)
+        sys.exit(1)
+
+    # get pool strategy and rule
+    status, output = commands.getstatusoutput("icfs osd dump -f json 2>/dev/null")
+    if status != 0:
+        Error(1399, "Failed to get pool strategy")
+
+    try:
+        b = sys_data_type()
+        pool_attr_list = json.loads(output)["pools"]
+        for pool_attr in pool_attr_list:
+            pool_name = pool_attr["pool_name"]
+            if pool_name not in pool_info_dict:
+                continue
+
+            pool_info = pool_info_dict[pool_name]
+            if pool_attr["type"] == 1:
+                pool_info.type = "replicated"
+                pool_info.strategy = str(pool_attr["size"])
+            else:
+                pool_info.type = "erasure"
+                k = pool_attr["min_size"]
+                m = pool_attr["size"] - k
+                pool_info.strategy = str(k) + "+" + str(m) + ":" + str(b)
+
+            pool_info.rule_id = pool_attr["crush_ruleset"]
+            if pool_info.rule_id in rule_dict:
+                pool_info.rule_name = rule_dict[pool_info.rule_id]
+    except Exception, err:
+        Error(1399, "Failed to get pool strategy %s" % err)
+
+    print "Pool Name".ljust(25, ' '), "Type".ljust(15, ' '), "Capacity".ljust(15, ' '), \
+        "Used".ljust(15, ' '), "Strategy".ljust(15, ' '), "Fs Pool".ljust(15, ' '), "Fast Pool"
+    for pool_name, pool_info in pool_info_dict.items():
+        if has_ui and pool_info.is_fs_metapool:
+            continue
+        if DEBUG:
+            print pool_info.rule_name
+            print is_ssd_rule[pool_info.rule_id]
+        ssd_pool = "Yes" if pool_name == pool_info.rule_name and is_ssd_rule[pool_info.rule_id] else "No"
+        fs_pool = "Yes" if pool_info.is_fs_datapool else "No"
+        pool_type = pool_info.type
+        capacity = unit_convert(pool_info.bytes_available+pool_info.bytes_used)
+        used = unit_convert(pool_info.bytes_used)
+        strategy = pool_info.strategy
+        print pool_name.ljust(25, ' '), pool_type.ljust(15, ' '), capacity.ljust(15, ' '), \
+            used.ljust(15, ' '), strategy.ljust(15, ' '), fs_pool.ljust(15, ' '), ssd_pool
+
+
+def get_next_ssd_rule_number():
+    ret = run_local_cmd("icfs osd tree 2>/dev/null | awk '/root/{print $4}' | grep ssd_")
+    if ret["retcode"] and not ret["stdout"]:
+        max_ssd_num = 0
+    elif not ret["retcode"]:
+        temp = ret["stdout"].split("\n")
+        ssd_num = [int(item.split("_")[1]) for item in temp]
+        max_ssd_num = max(ssd_num)
+    else:
+        print "get_next_ssd_rule_number fail, fail info %s" % (ret["stdout"]+ret["stderr"])
+        return 1, None
+    return 0, max_ssd_num
+
+
+def fail_handler(flag, node_path_osd=None, max_ssd_num=None, pool_name=None):
+    if flag == 1:
+        # fail in create bucket, try to delete the bucket
+        for host in node_path_osd.keys():
+            # try to delete the bucket which created
+            run_local_cmd("icfs osd crush remove %s-ssd_%d" % (host, max_ssd_num))
+        # delete the root bucket
+        run_local_cmd("icfs osd crush remove ssd_%d root" % max_ssd_num)
+    elif flag == 2:
+        # fail to move osd, try to move to original position
+        for host in node_path_osd.keys():
+            osds = [item.values()[0] for item in node_path_osd[host]]
+            for item in osds:
+                # get osd weight
+                ret = run_remote_cmd(host, "icfs-disk list 2>/dev/null | awk '/osd.%s/{print$1}'" % item)
+                path = "%s:/var/lib/icfs/osd/icfs-%s" % (ret[host]["stdout"], item)
+                if DEBUG:
+                    print path
+                ret = run_remote_cmd(host, "icfs-system-disk --disksize %s" % path)
+                if ret[host]["retcode"]:
+                    print "get osd weight fail on node %s" % host
+                    return 1
+                weight = ret[host]["stdout"]
+                if DEBUG:
+                    print weight
+                print "icfs osd crush add osd.%s %s root=default host=%s" % (item, weight, host)
+                run_local_cmd("icfs osd crush add osd.%s %s root=default host=%s"
+                              % (item, weight, host))
+    elif flag == 3:
+        # try to remove the root bucket
+        ret = run_local_cmd("icfs osd crush remove ssd_%d" % max_ssd_num)
+        print ret
+    elif flag == 4:
+        run_local_cmd("icfs osd crush rule rm %s" % pool_name)
+    elif flag == 5:
+        run_local_cmd("icfs osd erasure-code-profile rm %s" % pool_name)
+    elif flag == 6:
+        # fail to add osd, try to move to original position
+        for host in node_path_osd.keys():
+            osds = [item.values()[0] for item in node_path_osd[host]]
+            for item in osds:
+                # get osd weight
+                ret = run_remote_cmd(host, "icfs-disk list 2>/dev/null | awk '/osd.%s/{print$1}'" % item)
+                path = "%s:/var/lib/icfs/osd/icfs-%s" % (ret[host]["stdout"], item)
+                if DEBUG:
+                    print path
+                ret = run_remote_cmd(host, "icfs-system-disk --disksize %s" % path)
+                if ret[host]["retcode"]:
+                    print "get osd weight fail on node %s" % host
+                    return 1
+                weight = ret[host]["stdout"]
+                if DEBUG:
+                    print weight
+                # remove the osd
+                run_local_cmd("icfs osd crush remove osd.%s" % item)
+                # add the the osd
+                run_local_cmd("icfs osd crush add osd.%s %s root=default host=%s"
+                              % (item, weight, host))
+
+
+def adjust_osd_tree(pool_name, paths, pool_type, erasure_k=None, erasure_m=None):
+    node_path = {}
+    node_path_osd = {}
+    try:
+        for path in paths.split(","):
+            path = path.strip()
+            if not re.match("^.*:.*$", path):
+                print "Error(610): Invalid input! %s " % path
+                sys.exit(1)
+            host = path.split(":")[0]
+            node_path[host] = []
+            node_path_osd[host] = []
+
+        for path in paths.split(","):
+            host = path.split(":")[0]
+            query_path = path.split(":")[1]
+            node_path[host].append(query_path)
+
+        for host in node_path.keys():
+            paths_osd = []
+            # get ssd disk
+            ret = run_local_cmd("icfs-system-disk --disk --checktype --node %s | grep -i ssd | awk '{print $1}'"
+                                % host)
+            if ret["retcode"]:
+                # ssd_err(2009, host, (ret[host]["stdout"] + ret[host]["stderr"]))
+                ssd_err(2009, host, (ret["stdout"] + ret["stderr"]))
+                sys.exit(1)
+            if not ret["stdout"]:
+                ssd_err(2010, host)
+                sys.exit(1)
+            node_ssds = ret["stdout"].split("\n")
+
+            # get the osd number
+            ret = run_remote_cmd(host, "icfs-disk list --format json 2>/dev/null")
+            if ret[host]["retcode"]:
+                ssd_err(2012, host, ret[host]["stdout"] + ret[host]["stderr"])
+                sys.exit(1)
+
+            for path in node_path[host]:
+                path_osd = {}
+                # check if the path is on ssd
+                ssd_check = [item for item in node_ssds if item in path]
+                if not ssd_check:
+                    # the path is not on ssd disk in this node
+                    ssd_err(2011, path, host)
+                    sys.exit(1)
+                # find match the path item
+                have_partition_items = [item for item in json.loads(ret[host]["stdout"]) if re.match("^%s\d*$" % item["path"], path)]
+                if not have_partition_items:
+                    ssd_err(2013, path, host)
+                    sys.exit(1)
+                if DEBUG:
+                    print have_partition_items
+                if len(have_partition_items) > 1:
+                    ssd_err(2014, path, host)
+                    sys.exit(1)
+                # check whoami
+                osd_items = [item["whoami"] for item in have_partition_items[0]["partitions"] if item["path"] == path and "whoami" in item.keys()]
+                if not osd_items:
+                    ssd_err(2015, path, host)
+                    sys.exit(1)
+                path_osd[have_partition_items[0]["path"]] = osd_items[0]
+                paths_osd.append(path_osd)
+            node_path_osd[host] = paths_osd
+        if DEBUG:
+            print node_path_osd
+        # check if partitions on same ssd disk
+        for host in node_path_osd.keys():
+            disks = [item.keys()[0] for item in node_path_osd[host]]
+            for item in disks:
+                if disks.count(item) > 1:
+                    ssd_err(2016, item, host)
+                    sys.exit(1)
+        # check if the osd was occupied
+        for host in node_path_osd.keys():
+            osds = [item.values()[0] for item in node_path_osd[host]]
+            for item in osds:
+                root_name = get_root_by_osd(int(item))
+                if DEBUG:
+                    print "root name is %s" % root_name
+                if root_name and root_name != "default":
+                    ssd_err(2017, item)
+                    sys.exit(1)
+
+        # create ssd root bucket
+        ret, max_ssd_num = get_next_ssd_rule_number()
+        if ret:
+            return 1
+        max_ssd_num += 1
+        # check if have existed ssd and get rule number
+        if DEBUG:
+            print "icfs osd crush add-bucket ssd_%d root" % max_ssd_num
+        ret = run_local_cmd("icfs osd crush add-bucket ssd_%d root" % max_ssd_num)
+        # for test
+        # ret["retcode"] = 1
+        if ret["retcode"]:
+            # try to delete the bucket which created
+            fail_handler(3, max_ssd_num=max_ssd_num)
+            ssd_err(2018, max_ssd_num, (ret["stdout"] + ret["stderr"]))
+            sys.exit(1)
+        for host in node_path_osd.keys():
+            # create host_ssd host bucket
+            ret = run_local_cmd("icfs osd crush add-bucket %s-ssd_%d host" % (host, max_ssd_num))
+            # for test
+            # ret["retcode"] = 1
+            if ret["retcode"]:
+                fail_handler(1, node_path_osd, max_ssd_num)
+                fail_handler(3, max_ssd_num=max_ssd_num)
+                ssd_err(2019, host, max_ssd_num, (ret["stdout"] + ret["stderr"]))
+                sys.exit(1)
+            # move the host to ssd root
+            ret = run_local_cmd("icfs osd crush move  %s-ssd_%d root=ssd_%d" % (host, max_ssd_num, max_ssd_num))
+            # for test
+            # ret["retcode"] = 1
+            if ret["retcode"]:
+                fail_handler(1, node_path_osd, max_ssd_num)
+                fail_handler(3, max_ssd_num=max_ssd_num)
+                ssd_err(2020, host, max_ssd_num, (ret["stdout"] + ret["stderr"]))
+                sys.exit(1)
+            osds = [item.values()[0] for item in node_path_osd[host]]
+            if DEBUG:
+                print osds
+            for item in osds:
+                # get osd weight
+                ret = run_remote_cmd(host, "cat /proc/mounts | grep -w '/var/lib/icfs/osd/icfs-%s' | awk '{print $1}'" % item)
+                if ret[host]["retcode"]:
+                    fail_handler(1, node_path_osd, max_ssd_num)
+                    fail_handler(3, max_ssd_num=max_ssd_num)
+                    ssd_err(2021, item, (ret[host]["stdout"]+ret[host]["stderr"]))
+                    sys.exit(1)
+                if DEBUG:
+                    print ret
+                path = "%s:/var/lib/icfs/osd/icfs-%s" % (ret[host]["stdout"], item)
+                if DEBUG:
+                    print path
+
+                if DEBUG:
+                    print "icfs-system-disk --disksize %s" % path
+                ret = run_remote_cmd(host, "icfs-system-disk --disksize %s" % path)
+                # for test
+                # ret[host]["retcode"] = 1
+                if ret[host]["retcode"]:
+                    fail_handler(1, node_path_osd, max_ssd_num)
+                    fail_handler(3, max_ssd_num=max_ssd_num)
+                    ssd_err(2021, item, "call icfs-system-disk --disksize return %s"
+                            % (ret[host]["stderr"]+ret[host]["stdout"]))
+                    sys.exit(1)
+                weight = ret[host]["stdout"]
+                if DEBUG:
+                    print weight
+
+                # remove the osd from old crush tree
+                ret = run_local_cmd("icfs osd crush remove osd.%s" % item)
+                # for test
+                # ret["retcode"] = 1
+                if ret["retcode"]:
+                    fail_handler(2, node_path_osd)
+                    fail_handler(1, node_path_osd, max_ssd_num)
+                    fail_handler(3, max_ssd_num=max_ssd_num)
+                    ssd_err(2022, item, (ret["stdout"] + ret["stderr"]))
+                    sys.exit(1)
+
+                # add the osd to ssd root
+                ret = run_local_cmd("icfs osd crush add osd.%s %s root=ssd_%d host=%s-ssd_%d"
+                                    % (item, weight, max_ssd_num, host, max_ssd_num))
+                # for test
+                # ret["retcode"] = 1
+                if ret["retcode"]:
+                    fail_handler(6, node_path_osd)
+                    fail_handler(1, node_path_osd, max_ssd_num)
+                    fail_handler(3, max_ssd_num=max_ssd_num)
+                    ssd_err(2023, item, (ret["stdout"] + ret["stderr"]))
+                    sys.exit(1)
+
+        # add the crush role
+        if pool_type == "replicate":
+            if DEBUG:
+                print "icfs osd crush rule create-simple %s ssd_%d host firstn" % (pool_name, max_ssd_num)
+            ret = run_local_cmd("icfs osd crush rule create-simple %s ssd_%d host firstn"
+                                % (pool_name, max_ssd_num))
+            # for test
+            # ret["retcode"] = 1
+            if ret["retcode"]:
+                # print "max_ssd_num %s" % max_ssd_num
+                # print "create replicate rule fail, fail info %s" % (ret["stdout"] + ret["stderr"])
+                fail_handler(6, node_path_osd)
+                fail_handler(1, node_path_osd, max_ssd_num)
+                # time.sleep(1)
+                fail_handler(4, pool_name=pool_name)
+                fail_handler(3, max_ssd_num=max_ssd_num)
+                ssd_err(2024, pool_name, (ret["stdout"] + ret["stderr"]))
+                sys.exit(1)
+        elif pool_type == "erasure":
+            # for test
+            # erasure_k = None
+            # erasure_m = None
+            if not erasure_k or not erasure_m:
+                fail_handler(6, node_path_osd)
+                fail_handler(1, node_path_osd, max_ssd_num)
+                fail_handler(3, max_ssd_num=max_ssd_num)
+                fail_handler(5, pool_name=pool_name)
+                ssd_err(2025)
+                sys.exit(1)
+            # create the erasure profile
+            ret = run_local_cmd("icfs osd erasure-code-profile set %s k=%s m=%s plugin=isa "
+                                "ruleset-failure-domain=host ruleset-root=ssd_%d"
+                                % (pool_name, erasure_k, erasure_m, max_ssd_num))
+            # for test
+            # ret["retcode"] = 1
+            if ret["retcode"]:
+                fail_handler(6, node_path_osd)
+                fail_handler(1, node_path_osd, max_ssd_num)
+                fail_handler(3, max_ssd_num=max_ssd_num)
+                fail_handler(5, pool_name=pool_name)
+                ssd_err(2026, pool_name, (ret["stdout"] + ret["stderr"]))
+                sys.exit(1)
+    except Exception, err:
+        print "There is something error info: %s" % err
+        return 1
+
+
+def recovery_crush(pool_type, pool_name, rule):
+    if DEBUG:
+        print "in recovery_crush"
+    if pool_type == "erasure":
+        ret = run_local_cmd("icfs osd erasure-code-profile rm %s" % pool_name)
+        if ret["retcode"]:
+            print "delete the erasure profile ssd_erasure_profile fail, fail info %s" % (ret["stderr"] + ret["stdout"])
+        # recovery the osd tree
+        if recovery_osd_tree(rule, pool_name):
+            return 1
+    elif pool_type == "replicated":
+        # recovery the osd tree
+        if recovery_osd_tree(rule, pool_name):
+            return 1
+    else:
+        print "please check the pool type %s" % pool_type
+        return 1
+
+
+def recovery_osd_tree(rule, pool_name):
+    # get ssd osd
+    ret = run_local_cmd("icfs osd tree -f json 2>/dev/null")
+    if ret["retcode"]:
+        print "get icfs osd tree fail, fail info %s" % (ret["stderr"] + ret["stdout"])
+    # get the buckets which used by pool
+    if not rule:
+        print "get rule fail"
+        return 1
+    crush_ret = run_local_cmd("icfs osd crush rule dump -f json 2>/dev/null")
+    if crush_ret["retcode"]:
+        print "execute icfs osd crush rule dump -f json fail, fail info %s" \
+              % (crush_ret["stdout"] + crush_ret["stderr"])
+        return 1
+    rule_info = [item for item in json.loads(crush_ret["stdout"]) if item["rule_name"] == rule]
+    if not rule_info:
+        print "can't find any rule match %s in crush map" % rule
+        return 1
+    temp = [item for item in rule_info[0]["steps"] if item["op"] == "take"]
+    root = temp[0]["item_name"]
+
+    # delete the rule from crush
+    if DEBUG:
+        print "icfs osd crush rule rm %s" % pool_name
+    rm_crush_ret = run_local_cmd("icfs osd crush rule rm %s" % pool_name)
+    if rm_crush_ret["retcode"]:
+        print "delete the replicate crush rule %s fail, fail info %s" \
+              % (pool_name, (rm_crush_ret["stderr"] + rm_crush_ret["stdout"]))
+        return 1
+    # get ssd root
+    ssd_roots = [item for item in json.loads(ret["stdout"])["nodes"] if item["name"] == root and item["type"] == "root"]
+    if not ssd_roots:
+        print "there is no ssd root, maybe have been removed"
+    else:
+        ssd_hosts = []
+        node_osd = {}
+        ssd_root = ssd_roots[0]
+        # get ssd hosts
+        for node in ssd_root["children"]:
+            ssd_hosts.append([item for item in json.loads(ret["stdout"])["nodes"] if item["id"] == node])
+        if not ssd_roots:
+            print "there is no ssd host in ssd root"
+            ret = run_local_cmd("icfs osd crush remove %s" % root)
+            if ret["retcode"]:
+                print "delete the bucket ssd root fail, fail info %s" % (ret["stderr"] + ret["stdout"])
+                return 1
+        # get osds from host
+        for item_host in ssd_hosts:
+            node_osds = []
+            for node in item_host[0]["children"]:
+                node_osds.append([item for item in json.loads(ret["stdout"])["nodes"] if item["id"] == node and item["type"] == "osd"])
+            node_osd[item_host[0]["name"]] = node_osds
+        # move ssd osd to default root
+        for item in node_osd.items():
+            for temp in item[1]:
+                # move the osd to original position
+                if DEBUG:
+                    print "icfs osd crush set %s %s root=default host=%s" % (temp[0]["name"], temp[0]["crush_weight"], item[0].split("-ssd")[0])
+                ret = run_local_cmd("icfs osd crush set %s %s root=default host=%s"
+                                    % (temp[0]["name"], temp[0]["crush_weight"], item[0].split("-ssd")[0]))
+                if ret["retcode"]:
+                    print "recovery osd tree fail, fail info %s" % (ret["stderr"] + ret["stdout"])
+                    continue
+        # remove the ssd hosts bucket
+        for item in node_osd.keys():
+            if DEBUG:
+                print "icfs osd crush remove %s" % item
+            ret = run_local_cmd("icfs osd crush remove %s" % item)
+            if ret["retcode"]:
+                print "remove ssd host bucket %s fail, fail info %s" % (item, (ret["stderr"] + ret["stdout"]))
+                continue
+        # remove the ssd root bucket
+        if DEBUG:
+            print "icfs osd crush remove %s" % root
+        ret = run_local_cmd("icfs osd crush remove %s" % root)
+        if ret["retcode"]:
+            print "remove ssd root bucket %s fail, fail info %s" % (root, (ret["stderr"] + ret["stdout"]))
+
+
+# def query_fast_pool_usage1(node_name):
+#     disk_list = []
+#     osd_list = []
+#     ssd_disk_list = []
+#     disk_num = run_remote_cmd(node_name, "lsblk -o NAME,ROTA -l |grep -v ROTA")
+#     if disk_num[node_name]["retcode"]:
+#         print "get disk list fail, fail info %s" % (disk_num[node_name]["stderr"] + disk_num[node_name]["stdout"])
+#         return 1
+#     disk_line = disk_num[node_name]["stdout"].split("\n")
+#     for lines in disk_line:
+#         disk_list.append(lines.split())
+#     # get ssd disk name
+#     for disk_name, disk_type in disk_list:
+#         # if type = '0' the disk is ssd else is sata
+#         if disk_type == '1':
+#             ssd_disk_list.append(disk_name)
+#     osd_disk = run_remote_cmd(node_name, "icfs-disk list |grep osd|awk '{print $1,$7}'")
+#     if osd_disk[node_name]["retcode"]:
+#         print "get osd list fail, fail info %s" % (osd_disk[node_name]["stderr"] + osd_disk[node_name]["stdout"])
+#         return 1
+#     osd_line = osd_disk[node_name]["stdout"].split("\n")
+#     # get osd disk name
+#     for lines in osd_line:
+#         osd_list.append(lines.split())
+#
+#     osd_root_name_dict = get_osd_root_name()
+#     print "Disk".ljust(15, ' '), "Usage"
+#     for osd_disk, osd_name in osd_list:
+#         disk_name = osd_disk.split("/")[-1]
+#         if disk_name not in ssd_disk_list:
+#             continue
+#
+#         ssd_disk_usage = 'Unavailable'
+#         osd_num = int(osd_name.split('.')[-1])
+#         root_name = osd_root_name_dict[osd_num]
+#         if not root_name.startswith("ssd"):
+#             ssd_disk_usage = 'available'
+#         print osd_disk.ljust(15, ' '), ssd_disk_usage
+
+
+def query_fast_pool_usage():
+    disk_list = []
+    ret_dict = run_remote_cmd("*", "icfs-disk list 2>/dev/null |grep osd|awk '{print $1,$7}'")
+    for node_name, node_ret in ret_dict.items():
+        if node_ret["retcode"]:
+            print "get osd list failed on %s: %s" % (node_name, node_ret["stderr"] + node_ret["stdout"])
+            return 1
+        lines = node_ret["stdout"].split("\n")
+        # get osd disk name
+        for line in lines:
+            disk_osd = line.split()
+            if len(disk_osd) != 2:
+                continue
+
+            disk_name = disk_osd[0]
+            osd_name = disk_osd[1].strip(",")
+            osd_num = int(osd_name.split(".")[-1])
+            disk_list.append({"node_name": node_name, "disk_name": disk_name,
+                              "osd_num": osd_num, "disk_type": "UNKOWN"})
+
+    ret_dict = run_remote_cmd("*", "icfs-system-disk --disk --checktype |awk '{print $1, $3}'")
+    for node_name, node_ret in ret_dict.items():
+        if node_ret["retcode"] != 0:
+            print "Get disk list fail on %s: %s" % (node_name, node_ret["stderr"] + node_ret["stdout"])
+            return 1
+
+        lines = node_ret["stdout"].split("\n")
+        for line in lines:
+            disk_type = line.split()
+            if len(disk_type) != 2:
+                continue
+
+            disk_name = disk_type[0]
+            disk_type = disk_type[1]
+            for disk_info in disk_list:
+                if node_name == disk_info["node_name"] and disk_info["disk_name"].startswith(disk_name):
+                    disk_info["disk_type"] = disk_type
+
+    osd_root_name_dict = get_osd_root_name()
+    print "Node".ljust(15), "Disk".ljust(15), "Type".ljust(15), "Availability"
+    for disk_info in disk_list:
+        node_name = disk_info["node_name"]
+        disk_name = disk_info["disk_name"]
+        disk_type = disk_info["disk_type"]
+
+        ssd_disk_usage = 'No'
+        osd_num = disk_info["osd_num"]
+        root_name = osd_root_name_dict[osd_num]
+        if root_name == "default" or root_name == "":
+            ssd_disk_usage = 'Yes'
+        print node_name.ljust(15), disk_name.ljust(15), disk_type.ljust(15), ssd_disk_usage
+
+
+def ssd_err(num, *description):
+    if num == 2009:
+        print "Error(2009): check if path on ssd fail on node %s, fail info: %s" % (description[0], description[-1])
+    elif num == 2010:
+        print "Error(2010): there have no ssd disk on node %s" % description[0]
+    elif num == 2011:
+        print "Error(2011): the partition type specified %s on node %s is not on ssd, please check" \
+              % (description[0], description[-1])
+    elif num == 2012:
+        print "Error(2012): get osd number on node %s fail, fail info: %s" % (description[0], description[-1])
+    elif num == 2013:
+        print "Error(2013): here is no such partition %s in this node %s, please check" \
+              % (description[0], description[-1])
+    elif num == 2014:
+        print "Error(2014): There is more than one partition %s in this node %s, please specify in detail" \
+              % (description[0], description[-1])
+    elif num == 2015:
+        print "Error(2015): There have no such partition %s in this node %s, please check carefully" \
+              % (description[0], description[-1])
+    elif num == 2016:
+        print "Error(2016): there have two partitions on same ssd disk %s on node %s, please check" \
+              % (description[0], description[-1])
+    elif num == 2017:
+        print "Error(2017): the osd.%s has been occupied" % description[0]
+    elif num == 2018:
+        print "Error(2018): create ssd_%d root bucket fail, fail info %s" % (description[0], description[-1])
+    elif num == 2019:
+        print "Error(2019): create host bucket %s-ssd_%d fail, fail info %s" \
+              % (description[0], description[1], description[2])
+    elif num == 2020:
+        print "Error(2020): move host bucket %s-ssd_%d fail, fail info %s" \
+              % (description[0], description[1], description[2])
+    elif num == 2021:
+        print "Error(2021): get weight of osd.%s fail, fail info %s" % (description[0], description[1])
+    elif num == 2022:
+        print "Error(2022): remove osd.%s fail, fail info %s" % (description[0], description[1])
+    elif num == 2023:
+        print "Error(2023): add osd.%s fail, fail info %s" % (description[0], description[1])
+    elif num == 2024:
+        print "Error(2024): create replicate rule %s fail, fail info %s" % (description[0], description[1])
+    elif num == 2025:
+        print "Error(2025): erasure pool not specify k or m, please check"
+    elif num == 2026:
+        print "Error(2026): create erasure profile %s fail, fail info %s" % (description[0], description[1])
+
+
+def Error(num, *description):
+    if num == 510:
+        print "Error(510): The type of pool clash in system, operation Failed"
+    elif num == 610:
+        print "Error(610): Invalid input! "
+    elif num == 2000:
+        print "Error(2000): The pool or image name .Only letters,numbers,_ is allowed",
+    elif num == 2001:
+        print "Error(2001):The pgnum should equal to the pgpnum"
+    elif num == 2002:
+        print "Error(2002):The type of the number should be int"
+    elif num == 2003:
+        print "Error(2003):The pool %s has already exists" % description
+    elif num == 2004:
+        print "Error(2004):The pool %s is not exists" % description
+    elif num == 2005:
+        print "Error(2005):The value of 'n' is just '0' and '1'"
+    elif num == 2006:
+        print "Error(2006):The value of parity block should less-than that of data block"
+    elif num == 2007:
+        print "Error(2007):The sum of parity block and data block should not bigger than the number of nodes"
+    elif num == 2008:
+        print "Error(2008):Failed to add the pool to the file system"
+    elif num == 1399:
+        print "Error(1399):Unkown error %s" % description
+    sys.exit(1)
+
+
+def usage():
+    print '''Help(-h|--help)for icfs-admin-pool:
+Usage:
+>> icfs-admin-pool ---- --create ---- --pool poolname ---- --pgnum pgnum ----- --pgpnum pgpnum ---- --replicated rep--->
+>----+-------------------------------+----+-------+-----><
+     ' --fast ---- --disk disk_list  '    ' --fs  '
+Functions: Create rep pool
+Options:
+  --create: create rep pool 
+  --pool: the rep pool name
+  --fs: file system pool
+  --fast: fast pool
+  --replicated: rep number
+  --pgnum: pg number
+  --pgpnum: pgp number
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+Usage:
+>> icfs-admin-pool ---- --create ---- --pool poolname ---- -k datanum ---- -m codenum ---------- --pgnum pgnum  ------->
+>-------------------- -n role ----+------------------------------+-----+-------+----------><
+                                  ' --fast ---- --disk disk_list '     ' --fs  '
+
+Functions: Create earsure pool
+Options:
+  --create: create earsure pool 
+  --pool: the rep pool name
+  -k: the data number
+  -m: the code number
+  --pgnum: the pg number
+  -n: erasure role
+  --fs: file system pool
+  --fast: fast pool
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+Usage:
+>> icfs-admin-pool ------ --modify ---- --pool poolname ---- --pgnum pgnum ---- --pgpnum pgpnum-----------><
+Functions: Set the PGs of the pool 
+Options:
+  --modify: set the PGs 
+  --pool: the rep pool name
+  --pgnum: the pg-num
+  --pgpnum: the pgp-num
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+Usage:
+>> icfs-admin-pool ------ --delete ---- --pool poolname ---------><
+
+Functions: Delete the pool 
+Options:
+  --delete: delete rep/era pool 
+  --pool: the pool name
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+Usage:
+>> icfs-admin-pool ------ --set ---- --pool poolname ---- --rep rep -----------><
+Functions: Set the number of replicated
+Options:
+  --set: set rep pool 
+  --pool: the rep pool name
+  --rep: the number of the replicated
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+Usage:
+>> icfs-admin-pool ------ --query ---- --list ----------------------------><
+Functions: Query pool info
+Options:
+  --query:  query pool status
+  --list:   list
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0)
+
+if __name__ == '__main__':    
+    pgnum = None
+    pgpnum = None
+    filename = None
+    poolname = None
+    operation = None
+    rep = None
+    datanum = None
+    codenum = None
+    n = None
+    has_ui = False
+    has_stripe = False
+    stripe_unit = None
+    has_fault = False
+    is_rep_pool = True
+    disk = None
+    is_ssd_pool = None
+    has_fs = False
+    try:
+        parser = OptParser.OptParser()
+        parser.append("help", "{-h|--help}")
+        # create replicated pool
+        parser.append("create_rep", "--create,--pool=,--pgnum=,--pgpnum=,--replicated=[--fast,--disk=][--fs]")
+        # create erasure pool
+        parser.append("create_era", "--create,--pool=,-k=,-m=,--pgnum=[-s=]-n=,[--fast,--disk=][--fs]")
+        # modify pool PGs
+        parser.append("modify_PG", "--modify,--pool=,--pgnum=,--pgpnum=")
+        # set rep
+        parser.append("set_rep", "--set,--pool=,--rep=")
+        # delete pool
+        parser.append("delete_pool", "--delete,--pool=")
+        # query pool
+        parser.append("query", "--query,--list[--ui]")
+        # query pool
+        parser.append("query_fast_pool_usage", "--list")
+        m_name, m_opts = parser.parse(sys.argv[1:])
+    except Exception, e:
+        print e
+        print "Error(610): Invalid input! "
+        sys.exit(1)
+
+    for k, v in m_opts:
+        if k == "--pool":
+            poolname = v
+            # name_format(poolname)
+        elif k == "--pgnum":
+            pgnum = v
+        elif k == "--pgpnum":
+            pgpnum = v
+        elif k == "--rep" or k == "--replicated":
+            rep = v
+            rep = check_int(rep)
+        elif k == "-k":
+            datanum = v
+            datanum = check_int(datanum)
+        elif k == "-m":
+            codenum = v
+            codenum = check_int(codenum)
+        elif k == "-n":
+            n = v
+            n = check_int(n)
+        elif k == "--fs":
+            has_fs = True
+        elif k == "--ui":
+            has_ui = True
+        elif k == "-s":
+            stripe_unit = v
+            has_stripe = True
+        elif k == "--fast":
+            is_ssd_pool = True
+        elif k == "--disk":
+            disk = v
+
+    if m_name == "help":
+        usage()
+    elif m_name == "create_rep":
+        p_value(pgnum, pgpnum)
+        create_pool(poolname, pgnum, pgpnum, disk, is_ssd_pool, rep)
+    elif m_name == "create_era":
+        check_k_m_n(datanum, codenum, n)
+        eras_check = sys_data_type()
+        status, output = commands.getstatusoutput("icfs osd dump 2>/dev/null |grep replicated")
+        if status:
+            if output:
+                Error(1399, output)
+        if output != "":
+            if n == 1 and eras_check == 0:
+                Error(510)
+            if n == 0 and eras_check == 1:
+                Error(510)
+        make_pool(disk, is_ssd_pool)
+    elif m_name == "modify_PG":
+        set_pgs(poolname, pgnum, pgpnum)
+    elif m_name == "delete_pool":
+        delete_pool(poolname)
+    elif m_name == "query":
+        pool_query()
+    elif m_name == "query_fast_pool_usage":
+        query_fast_pool_usage()
+    else:
+        Error(610)

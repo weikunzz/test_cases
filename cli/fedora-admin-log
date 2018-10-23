@@ -1,0 +1,370 @@
+#!/usr/bin/python
+# coding:utf-8
+
+# change log list
+# 20170209 shaoning (__main__) command line parse method changed 
+
+import sys
+import commands
+import re
+import time
+import datetime
+import OptParser
+
+
+def usage():
+    print """Help(-h|--help)for icfs-admin-log:
+Usage:
+>> icfs-admin-log ---- --download ---- --config ----><
+Functions: Download config file on mon node
+Options:
+  --download:   download file
+  --mon:        download monitor log
+  --config:     download config file
+  --week:       recent week number
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+Usage:
+>> icfs-admin-log ---- --download ---- --message ---- --node node_name ---- --week week ----><
+Functions: Download message log on specific nodes
+Options:
+  --download:   download file
+  --mon:        download monitor log
+  --config:     download config file
+  --week:       recent week number
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+Usage:
+>> icfs-admin-log ---- --download --+-- --mon     --+-- --node node_name ---- --date date ----><
+                                    '-- --osd     --'
+Functions: Download mon/osd log on specific nodes
+Options: 
+  --download:   download file
+  --osd:        download osd log
+  --message:    download message log
+  --node:       node name
+  --week:       recent week number
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully  """
+
+
+def error(num, *description):
+    if num == 610:
+        print "Error(610): Invalid input! "
+    elif num == 2100:
+        print "Error(2100): week must be number greater than 0"
+    elif num == 2101:
+        print "Error(2101): Create directory failed"
+    elif num == 2102:
+        print "Error(2102): Invalid node name %s" % description
+    elif num == 2103:
+        print "Error(2103): Copy file failed"
+    elif num == 2104:
+        print "Error(2104): Pack and compress file failed"
+    elif num == 2105:
+        print "Error(2105): No files found"
+    elif num == 2106:
+        print "Error(2106): Invalid date format"
+
+    sys.exit(1)
+
+
+def log_download_config():
+    # make directory
+    status, output = commands.getstatusoutput("mkdir -p /var/log/icfs/download/config")
+    if status != 0:
+        error(2101)
+    
+    # clear directory
+    status, output = commands.getstatusoutput("rm -rf /var/log/icfs/download/config/*")
+    if status != 0:
+        print output
+        sys.exit(1)
+
+    # copy file(only mon config)
+    status, output = commands.getstatusoutput("cp -f /etc/icfs/icfs.conf /var/log/icfs/download/config/")
+    if status != 0:
+        error(2103)
+    
+    # finish copy, start compress
+    status, output = commands.getstatusoutput("tar zcvf /var/log/icfs/download/config.tar.gz"
+                                              " -C /var/log/icfs/download config")
+    if status != 0:
+        error(2104)
+
+
+def log_download_mon():
+    # make directory
+    status, output = commands.getstatusoutput("mkdir -p /var/log/icfs/download/mon")
+    if status != 0:
+        error(2101)
+
+    # clear directory
+    status, output = commands.getstatusoutput("rm -rf /var/log/icfs/download/mon/*")
+    if status != 0:
+        print output
+        sys.exit(1)
+
+    # check if node is valid
+    status, output = commands.getstatusoutput("salt-key -l acc | grep -v 'Accepted Keys:'")
+    if status != 0:
+        print output
+        sys.exit(1)
+
+    nodes = output.split('\n')
+    for node in node_list:
+        if node not in nodes:
+            error(2102, node)
+
+    count = 0
+    for node in node_list:
+        # make sub directory
+        status, output = commands.getstatusoutput("mkdir -p /var/log/icfs/download/mon/%s" % node)
+        if status != 0:
+            error(2101)
+
+        # filter salt stderror so that output can be parsed correctly
+        status, output = commands.getstatusoutput("salt '%s' cmd.run 'ls /var/log/icfs/' 2>/dev/null" % node)
+        if status != 0:
+            print output
+            sys.exit(1)
+
+        file_list = output.split("\n")
+        file_list.pop(0)
+        for file_name in file_list:
+            file_name = file_name.strip()
+            # check whether file need to copy
+            need_copy = False
+            current_pattern = re.compile(r"^icfs-mon.*log$")
+            m = current_pattern.match(file_name)
+            if m is not None and date == datetime.date.today():
+                need_copy = True
+
+            backup_pattern = re.compile(r"^icfs-mon.*log-(\d*).gz$")
+            m = backup_pattern.match(file_name)
+            if m is not None and m.group(1) == date.strftime("%Y%m%d"):
+                need_copy = True
+
+            if not need_copy:
+                continue
+
+            # copy file
+            status, output = commands.getstatusoutput("scp %s:/var/log/icfs/%s /var/log/icfs/download/mon/%s/"
+                                                      % (node, file_name, node))
+            if status != 0:
+                error(2103)
+
+            count += 1
+
+    if count == 0:
+        error(2105)
+
+    # finish copy, start compress
+    status, output = commands.getstatusoutput("tar zcvf /var/log/icfs/download/mon.tar.gz"
+                                              " -C /var/log/icfs/download mon")
+    if status != 0:
+        error(2104)
+
+
+def log_download_osd():
+    # make directory
+    status, output = commands.getstatusoutput("mkdir -p /var/log/icfs/download/osd")
+    if status != 0:
+        error(2101)
+    
+    # clear directory
+    status, output = commands.getstatusoutput("rm -rf /var/log/icfs/download/osd/*")
+    if status != 0:
+        print output
+        sys.exit(1)
+    
+    # check if node is valid
+    status, output = commands.getstatusoutput("salt-key -l acc | grep -v 'Accepted Keys:'")
+    if status != 0:
+        print output
+        sys.exit(1)
+    
+    nodes = output.split('\n')
+    for node in node_list:
+        if node not in nodes:
+            error(2102, node)
+
+    count = 0
+    for node in node_list:
+        # make sub directory
+        status, output = commands.getstatusoutput("mkdir -p /var/log/icfs/download/osd/%s" % node)
+        if status != 0:
+            error(2101)
+
+        # filter salt stderror so that output can be parsed correctly
+        status, output = commands.getstatusoutput("salt '%s' cmd.run 'ls /var/log/icfs/' 2>/dev/null" % node)
+        if status != 0:
+            print output
+            sys.exit(1)
+        
+        file_list = output.split("\n")
+        file_list.pop(0)
+        for file_name in file_list:
+            file_name = file_name.strip()
+            # check whether file need to copy
+            need_copy = False
+            current_pattern = re.compile(r"^icfs-osd.*log$")
+            m = current_pattern.match(file_name)
+            if m is not None and date == datetime.date.today():
+                need_copy = True
+
+            backup_pattern = re.compile(r"^icfs-osd.*log-(\d*).gz$")
+            m = backup_pattern.match(file_name)
+            if m is not None and m.group(1) == date.strftime("%Y%m%d"):
+                need_copy = True
+
+            if not need_copy:
+                continue
+            
+            # copy file
+            status, output = commands.getstatusoutput("scp %s:/var/log/icfs/%s /var/log/icfs/download/osd/%s/"
+                                                      % (node, file_name, node))
+            if status != 0:
+                error(2103)
+
+            count += 1
+
+    if count == 0:
+        error(2105)
+    
+    # finish copy, start compress
+    status, output = commands.getstatusoutput("tar zcvf /var/log/icfs/download/osd.tar.gz"
+                                              " -C /var/log/icfs/download osd")
+    if status != 0:
+        error(2104)
+
+
+def log_download_message():
+    # make directory
+    status, output = commands.getstatusoutput("mkdir -p /var/log/icfs/download/message")
+    if status != 0:
+        error(2101)
+    
+    # clear directory
+    status, output = commands.getstatusoutput("rm -rf /var/log/icfs/download/message/*")
+    if status != 0:
+        print output
+        sys.exit(1)
+    
+    # pre date string
+    min_date = datetime.date.today() - datetime.timedelta(week*7)
+    max_date = datetime.date.today() - datetime.timedelta((week-1)*7)
+    
+    # check if node is valid
+    status, output = commands.getstatusoutput("salt-key -l acc | grep -v 'Accepted Keys:'")
+    if status != 0:
+        print output
+        sys.exit(1)
+    
+    nodes = output.split('\n')
+    for node in node_list:
+        if node not in nodes:
+            error(2102, node)
+
+    count = 0
+    for node in node_list:
+        # make sub directory
+        status, output = commands.getstatusoutput("mkdir -p /var/log/icfs/download/message/%s" % node)
+        if status != 0:
+            error(2101)
+
+        # filter salt stderror so that output can be parsed correctly
+        status, output = commands.getstatusoutput("salt '%s' cmd.run 'ls /var/log/' 2>/dev/null" % node)
+        if status != 0:
+            print output
+            sys.exit(1)
+        
+        file_list = output.split("\n")
+        file_list.pop(0)
+        for file_name in file_list:
+            file_name = file_name.strip()
+            # check whether file need to copy
+            need_copy = False
+            if file_name == "messages" and min_date < datetime.date.today() <= max_date:
+                need_copy = True
+
+            pattern = re.compile(r"^messages-(\d*)$")
+            m = pattern.match(file_name)
+            if m is not None and min_date.strftime("%Y%m%d") < m.group(1) <= max_date.strftime("%Y%m%d"):
+                need_copy = True
+
+            if not need_copy:
+                continue
+            
+            # copy file
+            status, output = commands.getstatusoutput("scp %s:/var/log/%s /var/log/icfs/download/message/%s/"
+                                                      % (node, file_name, node))
+            if status != 0:
+                error(2103)
+
+            count += 1
+
+    if count == 0:
+        error(2105)
+    
+    # finish copy, start compress
+    status, output = commands.getstatusoutput("tar zcvf /var/log/icfs/download/message.tar.gz"
+                                              " -C /var/log/icfs/download message")
+    if status != 0:
+        error(2104)
+
+
+if __name__ == "__main__":
+    node_list = None
+    date = None
+    week = 1
+
+    try:
+        parser = OptParser.OptParser()
+        parser.append("help", "{-h|--help}")
+        parser.append("download_config", "--download,--config")
+        parser.append("download_mon", "--download,--mon,--node=,--date=")
+        parser.append("download_osd", "--download,--osd,--node=,--date=")
+        parser.append("download_message", "--download,--message,--node=,--week=")
+        m_name, m_opts = parser.parse(sys.argv[1:])
+    except Exception, e:
+        print e
+        print "Error(610): Invalid input! "
+        sys.exit(1)
+
+    for x, y in m_opts:
+        if x == "--node":
+            node_list = y.split(",")
+        elif x == "--week":
+            try:
+                week = int(y)
+                if week <= 0:
+                    error(2100)
+            except ValueError, e:
+                error(2100)
+        elif x == "--date":
+            try:
+                t = time.strptime(y, "%Y%m%d")
+                date = datetime.date(t[0], t[1], t[2])
+                if date > datetime.date.today():
+                    error(2105)
+            except ValueError, e:
+                error(2106)
+
+    if m_name == "help":
+        usage()
+    elif m_name == "download_config":
+        log_download_config()
+    elif m_name == "download_mon":
+        log_download_mon()
+    elif m_name == "download_osd":
+        log_download_osd()
+    elif m_name == "download_message":
+        log_download_message()
+    else:
+        error(610)

@@ -1,0 +1,294 @@
+#!/usr/bin/python
+# coding:utf-8
+
+import os
+import sys
+import math
+import commands
+import json
+import OptParser
+import salt.client
+
+
+def usage():
+    print '''Help(-h|--help)for icfs-admin-locate:
+Usage:
+>> icfs-admin-locate ---- -f file_path ---- --page page_num ---- --num-per-page number --><
+Functions: Query file storage location
+Options:
+  -f:               specify file path
+  --page:           page number
+  --num_per_page:   number per page
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0)
+
+
+def error(num, *description):
+    if num == 100:
+        print "Error(100): Can not find path in cluster file system!"
+    elif num == 110:
+        print "Error(110): Failed to mount icfs-fuse for %s" % description
+    elif num == 299:
+        print "Error(299): Invalid salt service"
+    elif num == 307:
+        print "Error(307): Salt service down in %s" % description
+    elif num == 308:
+        print "Error(308): Invalid salt-key"
+    elif num == 310:
+        print "Error(310): Failed to get ADC server name/ip"
+    elif num == 610:
+        print "Error(610): Invalid input!"
+    elif num == 721:
+        print "Error(721): Invalid path"
+    elif num == 504:
+        print "Error(504): File system not mount! "
+    elif num == 500:
+        print "Error(500): Can not get cluster version! "
+    sys.exit(1)
+
+
+# Checking salt service : running , up
+def salt_stat_check():
+    salt_ck = commands.getoutput("service salt-master status")
+    if "unrecognized service" in salt_ck:
+        error(299)
+    elif "stopped" in salt_ck:
+        salt_rst = commands.getoutput("service salt-master start")
+        if not salt_rst or "FAILED" in salt_rst:
+            error(299)
+    salt_down = commands.getoutput("salt-run manage.down")
+    if "YPBINDPROC_DOMAIN: Domain not bound" in salt_down:
+        salt_yp = salt_down.lstrip("YPBINDPROC_DOMAIN: Domain not bound")
+    else:
+        salt_yp = salt_down
+    if salt_yp:
+        salt_dd = salt_yp.replace("\n", ",")
+        salt_dl = salt_dd.lstrip(',')
+        error(307, salt_dl)
+    salt_key = commands.getoutput("salt-key -l acc")
+    salt_key_l = salt_key.split('\n')
+    if "Accepted Keys:" in salt_key_l:
+        salt_key_l.remove("Accepted Keys:")
+    if "YPBINDPROC_DOMAIN: Domain not bound" in salt_key_l:
+        salt_key_l.remove("YPBINDPROC_DOMAIN: Domain not bound")
+    if not salt_key_l:
+        error(308)
+
+
+# check icfs-fuse, mount it if currently not mount
+def check_fuse():
+    status, output = commands.getstatusoutput("mount |grep -w icfs-fuse |grep -w /mnt/icfs")
+    if status != 0:
+        status, output = commands.getstatusoutput("icfs-fuse /mnt/icfs")
+        if "fuse failed to start" in output:
+            return False
+
+    return True
+
+
+def sys_data_type():
+    osd_dump = commands.getoutput("/usr/bin/icfs osd tree 2>/dev/null|grep _n1")
+    if osd_dump:
+        return 1
+    else:
+        return 0
+
+
+def get_pool_strategy(pool_name):
+    status, output = commands.getstatusoutput("icfs osd dump --format json 2>/dev/null")
+    if status != 0:
+        return "none"
+
+    try:
+        osd_dump_info = json.loads(output)
+        pool_list = osd_dump_info["pools"]
+        for pool in pool_list:
+            if pool["pool_name"] != pool_name:
+                continue
+
+            pool_type = pool["type"]
+            if pool_type == 1:
+                rep_num = pool["size"]
+                return "replicated %d" % rep_num
+            elif pool_type == 3:
+                k_num = pool["min_size"]
+                m_num = pool["size"] - k_num
+                n_num = sys_data_type()
+                return "erasure %d+%d:%d" % (k_num, m_num, n_num)
+            else:
+                return "none"
+    except Exception, err_info:
+        return "none"
+
+    return "none"
+
+
+# get disk info from all nodes
+def get_osd_map():
+    # get fsid
+    status, fsid = commands.getstatusoutput("icfs fsid 2>/dev/null")
+    if status != 0:
+        print "get fsid failed"
+        sys.exit(1)
+
+    # get disk info
+    osd_map = {}
+    client = salt.client.LocalClient()
+    ret = client.cmd("*", "cmd.run", ["icfs-disk list --format json 2>/dev/null"])
+    for node_name, node_output in ret.items():
+        try:
+            disk_list = json.loads(node_output)
+        except Exception, err_info:
+            print "failed to get disk info from node " + node_name + ":" + err_info.__str__()
+            sys.exit(1)
+
+        for disk_info in disk_list:
+            try:
+                if "partitions" in disk_info:
+                    # check partition osd
+                    partition_list = disk_info["partitions"]
+                    for partition_info in partition_list:
+                        if partition_info["type"] == "data" and partition_info["icfs_fsid"] == fsid:
+                            osd_num = int(partition_info["whoami"])
+                            osd_map[osd_num] = node_name + ":" + disk_info["path"]
+                else:
+                    # check disk osd
+                    if disk_info["type"] == "data" and disk_info["icfs_fsid"] == fsid:
+                        osd_num = int(disk_info["whoami"])
+                        osd_map[osd_num] = node_name + ":" + disk_info["path"]
+            except StandardError:
+                continue
+
+    return osd_map
+
+
+def locate_file(f_path, page_number, number_per_page):
+    salt_stat_check()
+
+    if not check_fuse():
+        print "Error(504): File system not mount"
+        sys.exit(1)
+
+    abs_path = os.path.abspath(f_path)
+    if not abs_path.startswith("/mnt/icfs/"):
+        error(610)
+
+    if not os.path.isfile(abs_path):
+        print "Error(401): No exists"
+        sys.exit(1)
+
+    # get osd map
+    osd_map = get_osd_map()
+
+    # get file inode number and size
+    file_stat = os.stat(abs_path)
+    file_ino = file_stat.st_ino
+    file_size = file_stat.st_size
+
+    # get pool name
+    status, output = commands.getstatusoutput("getfattr --only-values -n icfs.file.layout.pool %s "
+                                              "2>/dev/null" % abs_path)
+    if status != 0:
+        print "get pool failed:", output
+        sys.exit(1)
+
+    pool_name = output
+    strategy = get_pool_strategy(pool_name)
+
+    # get object size
+    status, output = commands.getstatusoutput("getfattr --only-values -n icfs.file.layout.object_size %s "
+                                              "2>/dev/null" % abs_path)
+    if status != 0:
+        print "get object size failed:", output
+        sys.exit(1)
+
+    object_size = int(output)
+
+    # calculate object number
+    object_num = int(math.ceil(float(file_size) / float(object_size)))
+    if object_num == 0:
+        total_page_num = 1
+    else:
+        total_page_num = (object_num + number_per_page - 1) / number_per_page
+
+    if total_page_num < page_number:
+        print "Page number out of range, max page number is: %d" % total_page_num
+        sys.exit(1)
+
+    start_num = number_per_page * (page_number - 1)
+
+    message = list()
+    message.append("PoolName:       %s" % pool_name)
+    message.append("Strategy:       %s" % strategy)
+    message.append("ObjectSize:     %s" % object_size)
+    message.append("ObjectNumber:   %s" % object_num)
+    message.append("CurrentPage:    %s/%s" % (page_number, total_page_num))
+    message.append("%-23s %s" % ("OBJECT_NAME", "LOCATION"))
+
+    # get object name list
+    for i in range(start_num, min(start_num+number_per_page, object_num)):
+        object_name = "%x.%08x" % (file_ino, i)
+        status, output = commands.getstatusoutput("icfs osd map %s %s --format json 2>/dev/null" % (pool_name, object_name))
+        if status != 0:
+            print "get object %s location failed: %s" % (object_name, output)
+            sys.exit(1)
+
+        try:
+            osd_map_info = json.loads(output)
+            osd_list = osd_map_info["acting"]
+            disk_list = []
+            for osd_num in osd_list:
+                if osd_num == 2147483647:
+                    disk_list.append("NONE")
+                else:
+                    disk_list.append(osd_map[osd_num])
+            location = ",".join(disk_list)
+            message.append("%-23s %s" % (object_name, location))
+        except Exception, err_info:
+            print "get object %s location failed: %s" % (object_name, err_info)
+            sys.exit(1)
+
+    for line in message:
+        print line
+
+
+if __name__ == '__main__':
+    file_path = None
+    page_num = None
+    num_per_page = None
+    try:
+        parser = OptParser.OptParser()
+        parser.append("help", "{-h|--help}")
+        parser.append("locate", "-f=,--page=,--num-per-page=")
+        m_name, m_opts = parser.parse(sys.argv[1:])
+    except Exception, err:
+        print err
+        error(610)
+        sys.exit(1)
+
+    for k, v in m_opts:
+        if "-f" == k:
+            file_path = v
+        elif "--page" == k:
+            try:
+                page_num = int(v)
+                if page_num <= 0:
+                    error(610)
+            except ValueError, err:
+                error(610)
+        elif "--num-per-page" == k:
+            try:
+                num_per_page = int(v)
+                if num_per_page <= 0:
+                    error(610)
+            except ValueError, err:
+                error(610)
+    
+    if m_name == "help":
+        usage()
+    elif m_name == "locate":
+        locate_file(file_path, page_num, num_per_page)
+    else:
+        error(610)

@@ -1,0 +1,619 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+
+import getopt
+import sys
+import re
+import commands
+import os
+from icfs_util import get_remote_host_list, run_remote_copy
+
+
+class IpsanTarget:
+
+    param = None
+    operation = None
+    args = None
+    options = None
+    target_name = None
+    node_name = None
+    target_id = None
+    push_mode = None
+    option = []
+
+    def __init__(self, parameter):
+        self.param = parameter
+
+
+    def error(self, error_number):
+        if 935 == error_number:
+            print "Error(935): Repeat arguments"
+        elif 902 == error_number:
+            print "Error(902): Name of the target. Only lowercase letters, numbers and '.' ':' '-' is allowed!"
+        elif 903 == error_number:
+            print "Error(903): This target already exists!"
+        elif 904 == error_number:
+            print "Error(904): Target num limit: 1<=&&<=64!"
+        elif 905 == error_number:
+            print "Error(905): Target target_name is connecting!"
+        elif 610 == error_number:
+            print "Error(610): Invalid input!"
+        elif 907 == error_number:
+            print "Error(907): No target named target_name!"
+        elif 908 == error_number:
+            print "Error(908): No target operation!"
+        elif 910 == error_number:
+            print "Error(910): Target delete fail!"
+        elif 939 == error_number:
+            print "Error(939): Request node can't be accessed"
+        elif 942 == error_number:
+            print "Error(942): No IP information in configure file"
+
+    def usage(self):
+        print '''Help(-h|--help) for icfs-admin-nfs:
+Usage:
+>> icfs-san-target----+ --new    +----><
+                      + --delete +
+                      ' --query  '
+Functions: Create/Delete/Query target of IPSAN
+Options:
+  --new:     create a new target
+  --delete:  delete existed target
+  --query:   query existed target
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-san-target --new:
+Usage:
+>> icfs-san-target ---- --new ---- --name target name --+ --node node name +---+-----------+-- ----><
+                                                      ' --all            '   ' --tid tid '
+Functions: Create a new target which used to provide IPSAN service
+Options:
+  --new:   crete a new target
+  --name:  the name of create target
+  --node:  the name of which node you want to create target on
+  --all:   optional keyword, will create specified target on all nodes of cluster
+  --tid:   optional keyword, the id of specified target, this value can't be same with the exited target,
+           if not specified will allocated by system
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-san-target --delete:
+Usage:
+>> icfs-san-target ---- --delete ---- --name target name ----+ --node node +--------------------><
+                                                             ' --all       '
+Functions: Delete created target
+Options:
+  --name the name of target which you want to delete
+  --node:  the name of which node you want to delete target from
+  --all:   optional keyword, will delete specified target from all nodes of cluster
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-san-target --query:
+Usage:
+icfs-san-target ---- --query ----+ --node node +----><
+                                 ' --list      '
+Functions: Query the information of specified or all targets
+Options:
+  --node:  the name of which node or nodes you want to query
+  --list:  query the information of all targets in cluster
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+  '''
+
+    def decode_param(self):
+        # check input parameter
+        try:
+            self.options, self.args = getopt.getopt(self.param, "h",
+                                                    ["help", "new", "delete", "query", "name=", "node=", "all",
+                                                     "tid=", "list"])
+        except getopt.GetoptError, err:
+            self.error(610)
+            sys.exit(1)
+        if len(sys.argv[0:]) == 1:
+            self.error(610)
+            sys.exit(1)
+        elif "[]" == self.options:
+            self.error(610)
+            sys.exit(1)
+        elif len(self.args) != 0:
+            self.error(610)
+            sys.exit(1)
+
+        # decode the keyword
+        for o, a in self.options:
+            if o in ("-h", "--help"):
+                self.usage()
+                sys.exit(0)
+            elif "--name" == o:
+                result = re.search("[^a-z0-9.:-]", a, re.U)
+                if result is not None:
+                    self.error(902)
+                    sys.exit(1)
+                else:
+                    self.target_name = a
+            elif "--node" == o:
+                self.node_name = a.split(",")
+            elif "--tid" == o:
+                if int(a) < 1 or int(a) > 64:
+                    self.error(904)
+                    exit(1)
+                self.target_id = a
+            elif "--all" == o:
+                self.operation = "push"
+            elif "--new" == o:
+                self.option.append("create")
+            elif "--delete" == o:
+                self.option.append("delete")
+            elif "--query" == o:
+                self.option.append("query")
+            elif "--list" == o:
+                self.operation = "query_push"
+            # has duplicate keys ?
+            key_list = [k for k, v in self.options]
+            if len(key_list) != len(set(key_list)):
+                self.error(935)
+                sys.exit(1)
+            elif 1 != len(self.option):
+                self.error(610)
+                sys.exit(1)
+
+    def check_config(self):
+        if os.path.exists("/etc/tgt/configure/info.conf"):
+            has_config = commands.getoutput("cat /etc/tgt/configure/info.conf|grep -v '#'")
+            if has_config == '':
+                self.write_configure()
+        else:
+            print "Error:config file not exist or destroyed"
+            sys.exit(1)
+
+    def write_configure(self):
+        if os.path.exists("/etc/tgt/configure/info.conf"):
+            ip_list = []
+            line_list = []
+            host = get_remote_host_list()
+            config_file = open("/etc/tgt/configure/info.conf", "r")
+            for lines in config_file.readlines():
+                line = lines.strip()
+                line_list.append(line)
+            config_file.close()
+            for hostname in host:
+                host_ip = self.get_ip_by_hostname(hostname)
+                ip_list.append(host_ip)
+            content_list = line_list + ip_list
+            for x in content_list:
+                if content_list.count(x) > 1:  # delete the duplicate item
+                    content_list.remove(x)
+            content = "\n".join(content_list)
+            f = open("/etc/tgt/configure/info.conf", "w")
+            f.write(content)
+            f.close()
+            run_remote_copy("*", "/etc/tgt/configure/info.conf", "/etc/tgt/configure/info.conf")
+        else:
+            print "Error:config file not exist or destroyed"
+            sys.exit(1)
+
+    def get_ip_by_hostname(self, hostname):
+        ip = ""
+        pattern = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(.*?)(?:#.*)?$")
+        try:
+            with open("/etc/hosts", "r") as fp:
+                lines = fp.readlines()
+        except IOError:
+            return ip
+
+        for line in lines:
+            m = pattern.match(line)
+            if m is None:
+                continue
+
+            hostname_list = m.group(2).split()
+            if hostname in hostname_list:
+                ip = m.group(1)
+                break
+
+        return ip
+
+    def do_operation(self):
+        if "create" == self.option[0]:
+            if self.node_name is not None and self.operation is None:
+                if self.target_id is not None:
+                    return_result = 0
+                    for node in self.node_name:
+                        if self.checktargetid(self.target_id, node):
+                            return_result = 1
+                            continue
+                        if "-" == self.target_name[0]:
+                            # filter salt stderror so that output can be parsed correctly
+                            cmd = "salt '%s' cmd.run \"icfs-san-deploy target new --targetname \\\"'%s'\\\" --tid %s\" 2>/dev/null"\
+                                  % (node, self.target_name, self.target_id)
+                        else:
+                            # filter salt stderror so that output can be parsed correctly
+                            cmd = "salt \"" + node + "\" cmd.run 'icfs-san-deploy target new --targetname " \
+                                  + self.target_name + " --tid " + self.target_id + "' 2>/dev/null"
+                        result, cmd_output = commands.getstatusoutput(cmd)
+                        if result:
+                            return_result = 1
+                            print cmd_output
+                        else:
+                            # reorgnize the output result
+                            cmd_output = re.sub(r"\?\[92m", " ", cmd_output)
+                            cmd_output = re.sub(r"\?\[0m", " ", cmd_output)
+                            print cmd_output
+                            if "Error" in cmd_output:
+                                return_result = 1
+                    if 1 == return_result:
+                        sys.exit(1)
+                else:
+                    return_result = 0
+                    check_output = ""
+                    for node in self.node_name:
+                        if "-" == self.target_name[0]:
+                            # filter salt stderror so that output can be parsed correctly
+                            cmd = "salt \"" + node + "\" cmd.run \"icfs-san-deploy target new --targetname \\\"'" \
+                                  + self.target_name + "'\\\"\" 2>/dev/null"
+                        else:
+                            # filter salt stderror so that output can be parsed correctly
+                            cmd = "salt \"" + node + "\" cmd.run 'icfs-san-deploy target new --targetname " \
+                                  + self.target_name + "' 2>/dev/null"
+                        result, cmd_output = commands.getstatusoutput(cmd)
+                        if result:
+                            print cmd_output
+                            return_result = 1
+                        else:
+                            # reorgnize the output result
+                            cmd_output = re.sub(r"\?\[92m", " ", cmd_output)
+                            cmd_output = re.sub(r"\?\[0m", " ", cmd_output)
+                            print cmd_output
+                            check_output += cmd_output
+                    if "Error" in check_output:
+                        return_result = 1
+                    if 1 == return_result:
+                        sys.exit(1)
+            elif self.node_name is None and "push" == self.operation:
+                self.write_configure()
+                if self.target_id is not None:
+                    if "-" == self.target_name[0]:
+                        cmd = "icfs-san-deploy target new --targetname \"'" + self.target_name \
+                              + "'\" --tid " + self.target_id + " --push"
+                    else:
+                        cmd = "icfs-san-deploy target new --targetname " + self.target_name\
+                               + " --tid " + self.target_id + " --push"
+
+                    result, cmd_output = commands.getstatusoutput(cmd)
+                    if 1 == result:
+                        print cmd_output
+                        sys.exit(1)
+                    else:
+                        if "Error" in cmd_output:
+                            print cmd_output
+                            sys.exit(1)
+                        elif "No IP information" in cmd_output:
+                            self.error(942)
+                            sys.exit(1)
+                        print cmd_output
+                else:
+                    if "-" == self.target_name[0]:
+                        cmd = "icfs-san-deploy target new --targetname \"'" + self.target_name \
+                              + "'\" --push"
+                    else:
+                        cmd = "icfs-san-deploy target new --targetname " + self.target_name\
+                               + " --push"
+                    result, cmd_output = commands.getstatusoutput(cmd)
+                    if 1 == result:
+                        print cmd_output
+                        sys.exit(1)
+                    else:
+                        print cmd_output
+                        if "Error" in cmd_output:
+                            sys.exit(1)
+                        elif "No IP information" in cmd_output:
+                            self.error(942)
+                            sys.exit(1)
+            else:
+                self.error(908)
+                sys.exit(1)
+        elif "delete" == self.option[0]:
+            if self.node_name is not None and self.operation is None:
+                check_output = ""
+                return_result = 0
+                for node in self.node_name:
+                    if self.checknodeaccess(node):
+                        continue
+                    if "-" == self.target_name[0]:
+                        # filter salt stderror so that output can be parsed correctly
+                        result, cmd_output = commands.getstatusoutput("salt \"%s\" cmd.run \"icfs-san-deploy target\
+                         delete -T \\\"'%s'\\\"\" 2>/dev/null" % (node, self.target_name))
+                    else:
+                        # filter salt stderror so that output can be parsed correctly
+                        result, cmd_output = commands.getstatusoutput("salt \"%s\" cmd.run 'icfs-san-deploy target\
+                                            delete -T %s' 2>/dev/null" % (node, self.target_name))
+                    if result:
+                        print cmd_output
+                        return_result = 1
+                    else:
+                        # recognise the output result
+                        cmd_output = re.sub(r"\?\[92m", " ", cmd_output)
+                        cmd_output = re.sub(r"\?\[0m", " ", cmd_output)
+                        print cmd_output
+                        check_output += cmd_output
+                if "Error" in check_output:
+                    return_result = 1
+                if 1 == return_result:
+                    sys.exit(1)
+            elif self.node_name is None and "push" == self.operation:
+                self.check_config()
+                if "-" == self.target_name[0]:
+                    result, cmd_output = commands.getstatusoutput("icfs-san-deploy target delete -T \"'%s'\" --push" \
+                                                                  % self.target_name)
+                else:
+                    result, cmd_output = commands.getstatusoutput("icfs-san-deploy target delete -T %s --push"\
+                                                                  % self.target_name)
+                if 1 == result:
+                    print cmd_output
+                    sys.exit(1)
+                else:
+                    if "Error" in cmd_output:
+                        print cmd_output
+                        sys.exit(1)
+                    elif "No IP information" in cmd_output:
+                        self.error(942)
+                        sys.exit(1)
+                    print cmd_output
+            else:
+                self.error(908)
+                exit(1)
+        elif "query" == self.option[0]:
+            target_name = None
+            state = None
+            if self.node_name is not None and self.operation is None:
+                targets = []
+                nodenum = 0
+                return_result = 0
+                for node in self.node_name:
+                    if self.checknodeaccess(node):
+                        continue
+                    # filter salt stderror so that output can be parsed correctly
+                    result, cmd_output = commands.getstatusoutput("salt \"%s\" cmd.run 'icfs-san-deploy target\
+                                    show ' 2>/dev/null" % node)
+                    if result:
+                        print cmd_output
+                        sys.exit(1)
+                    else:
+                        if "Error" in cmd_output:
+                            print cmd_output
+                            return_result = 1
+                            print ("---------------------------------------")
+                            continue
+                        if len(self.node_name) > 1:
+                            print ("%s: " % node)
+                        # division the output
+                        print("Name                    State          Account          ACL")
+                        for target_count in range(cmd_output.count("Target")):
+                            targets.append(cmd_output.split("Target")[target_count+1])
+                            for temp in targets[target_count].split("\n"):
+                                # extract Stat
+                                if "State" in temp:
+                                    state = temp.split(": ")[1]
+                            # extract name
+                            target_name = targets[target_count].split("\n")[targets[target_count].split("\n").index('        System information:') -
+                                                                            1].split(": ")[1]
+                            # extract Account
+                            account = targets[target_count].split("\n")[targets[target_count].split("\n").index('        Account information:')
+                                                                        + 1:targets[target_count].split("\n").index('        ACL information:')]
+                            if len(account) is not 0:
+                                for count in range(len(account)):
+                                    account[count] = account[count].split("\t")[2]
+                            # extract ACL
+                            ACL = targets[target_count].split("\n")[targets[target_count].split("\n").index('        ACL information:') + 1:]
+                            if len(ACL) is not 0:
+                                if '    ' in ACL:
+                                    ACL.pop(ACL.index('    '))
+                                for num in range(len(ACL)):
+                                    if '    ' == ACL[num]:
+                                        ACL.pop(num)
+                                    else:
+                                        ACL[num] = ACL[num].split()[0]
+
+                            if len(account) - len(ACL) > 0:
+                                if len(ACL) == 0:
+                                    for row in range(len(account)):
+                                        if 0 == row:
+                                            print("%-24s%-15s%-15s%-15s" % (target_name, state, account[row], " "))
+                                        else:
+                                            print("%-24s%-15s%-15s%-15s" % (" ", " ", account[row], " "))
+                                else:
+                                    for row in range(len(account)):
+                                        if 0 == row:
+                                            print("%-24s%-15s%-15s%-15s" % (target_name, state, account[row], ACL[row]))
+                                        elif len(ACL) <= row:
+                                            print("%-24s%-15s%-15s%-15s" % (" ", " ", account[row], " "))
+                                        else:
+                                            print("%-24s%-15s%-15s%-15s" % (" ", " ", account[row], ACL[row]))
+
+                            elif len(account) - len(ACL) == 0:
+                                if len(account) == 0:
+                                    print("%-24s%-15s%-15s%-15s" % (target_name, state, " ", " "))
+                                else:
+                                    for row in range(len(ACL)):
+                                        if 0 == row:
+                                            print("%-24s%-15s%-15s%-15s" % (target_name, state, account[row], ACL[row]))
+                                        else:
+                                            print("%-24s%-15s%-15s%-15s" % (" ", " ", account[row], ACL[row]))
+
+                            elif len(ACL) - len(account) > 0:
+                                if len(account) == 0:
+                                    for row in range(len(ACL)):
+                                        if 0 == row:
+                                            print("%-24s%-15s%-15s%-15s" % (target_name, state, " ", ACL[row]))
+                                        else:
+                                            print("%-24s%-15s%-15s%-15s" % (" ", " ", " ", ACL[row]))
+                                else:
+                                    for row in range(len(ACL)):
+                                        if 0 == row:
+                                            print("%-24s%-15s%-15s%-15s" % (target_name, state, account[row], ACL[row]))
+                                        elif len(account) <= row:
+                                            print("%-24s%-15s%-15s%-15s" % (" ", " ", " ", ACL[row]))
+                                        else:
+                                            print("%-24s%-15s%-15s%-15s" % (" ", " ", account[row], ACL[row]))
+                    if len(self.node_name) >= 2 and nodenum != len(self.node_name) - 1:
+                        print ("---------------------------------------")
+                    nodenum += 1
+                if 1 == return_result:
+                    sys.exit(1)
+            elif self.node_name is None and "query_push" == self.operation:
+                nodes = []
+                targets = []
+                self.check_config()
+                result, cmd_output = commands.getstatusoutput("icfs-san-deploy target show --push")
+                if 1 == result:
+                    print cmd_output
+                    sys.exit(1)
+                else:
+                    if "No IP information" in cmd_output:
+                        self.error(942)
+                        sys.exit(1)
+                    # get node info
+                    nodes = cmd_output.split("---------------------------------------")
+                    for node_count in range(cmd_output.count("---------------------------------------")+1):
+                        targets = []
+                        pattern = re.compile(r"^.+\(((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)\):$")
+                        m = pattern.match(nodes[node_count].strip().split("\n")[0])
+                        if None != m:
+                            print("Node%d %s" % (node_count + 1, nodes[node_count].strip().split("\n")[0]))
+                        else:
+                            print("Node%d %s" % (node_count + 1, ":"))
+                        print("Name                    State          Account          ACL")
+                        for target_count in range(nodes[node_count].count("Target")):
+                            targets.append(nodes[node_count].split("Target")[target_count + 1])
+
+                            for temp in targets[target_count].split("\n"):
+                                # extract Stat
+                                if "State" in temp:
+                                    state = temp.split(": ")[1]
+                            # extract name
+                            target_name = targets[target_count].split("\n")[
+                                targets[target_count].split("\n").index('    System information:') -
+                                1].split(": ")[1]
+                            # extract Account
+                            account = targets[target_count].split("\n")[
+                                      targets[target_count].split("\n").index('    Account information:')
+                                      + 1:targets[target_count].split("\n").index('    ACL information:')]
+
+                            if len(account) is not 0:
+                                for count in range(len(account)):
+                                    account[count] = account[count].split("\t")[2]
+                            # extract ACL
+                            ACL = targets[target_count].split("\n")[targets[target_count].split("\n").index('    ACL information:') + 1:]
+                            if len(ACL) is not 0:
+                                if '' in ACL:
+                                    ACL.pop(ACL.index(''))
+                                for num in range(len(ACL)):
+                                    if '' == ACL[num]:
+                                        ACL.pop(num)
+                                    else:
+                                        ACL[num] = ACL[num].split()[0]
+
+                            if len(account) - len(ACL) > 0:
+                                if len(ACL) == 0:
+                                    for row in range(len(account)):
+                                        if 0 == row:
+                                            print(
+                                                "%-24s%-15s%-15s%-15s" % (target_name, state, account[row], " "))
+                                        else:
+                                            print("%-24s%-15s%-15s%-15s" % (" ", " ", account[row], " "))
+                                else:
+                                    for row in range(len(account)):
+                                        if 0 == row:
+                                            print("%-24s%-15s%-15s%-15s" % (
+                                                  target_name, state, account[row], ACL[row]))
+                                        elif len(ACL) <= row:
+                                            print("%-24s%-15s%-15s%-15s" % (" ", " ", account[row], " "))
+                                        else:
+                                            print("%-24s%-15s%-15s%-15s" % (" ", " ", account[row], ACL[row]))
+
+                            elif len(account) - len(ACL) == 0:
+                                if len(account) == 0:
+                                    print("%-24s%-15s%-15s%-15s" % (target_name, state, " ", " "))
+                                else:
+                                    for row in range(len(ACL)):
+                                        if 0 == row:
+                                            print("%-24s%-15s%-15s%-15s" % (
+                                                  target_name, state, account[row], ACL[row]))
+                                        else:
+                                            print("%-24s%-15s%-15s%-15s" % (" ", " ", account[row], ACL[row]))
+
+                            elif len(ACL) - len(account) > 0:
+                                if len(account) == 0:
+                                    for row in range(len(ACL)):
+                                        if 0 == row:
+                                            print("%-24s%-15s%-15s%-15s" % (target_name, state, " ", ACL[row]))
+                                        else:
+                                            print("%-24s%-15s%-15s%-15s" % (" ", " ", " ", ACL[row]))
+                                else:
+                                    for row in range(len(ACL)):
+                                        if 0 == row:
+                                            print("%-24s%-15s%-15s%-15s" % (
+                                                  target_name, state, account[row], ACL[row]))
+                                        elif len(account) <= row:
+                                            print("%-24s%-15s%-15s%-15s" % (" ", " ", " ", ACL[row]))
+                                        else:
+                                            print("%-24s%-15s%-15s%-15s" % (" ", " ", account[row], ACL[row]))
+                        if node_count != cmd_output.count("---------------------------------------"):
+                            print ("---------------------------------------")
+
+                    if "Error" in cmd_output:
+                        sys.exit(1)
+
+            else:
+                self.error(908)
+                sys.exit(1)
+        else:
+            self.error(908)
+            sys.exit(1)
+
+    def checktargetid(self, target_id, node_name):
+        cmd = "icfs-san-target "
+        if self.checknodeaccess(node_name):
+            return 1
+        # filter salt stderror so that output can be parsed correctly
+        cmd = "salt \"" + node_name + "\" cmd.run 'icfs-san-deploy target show' 2>/dev/null"
+        result = commands.getoutput(cmd)
+        # check existed target_id in request node
+        exist_target_id = re.findall("Target\d*", result, re.U)
+        target_id = "Target" + target_id
+        if target_id in exist_target_id:
+            self.error(903)
+            return 2
+
+    def checknodeaccess(self, node_name):
+        result = commands.getoutput("salt-key -L")
+        accepted_node = result.split("\n")[1:result.split("\n").index('Unaccepted Keys:')]
+        live_minion = commands.getoutput("salt-run manage.up")
+        live_node = live_minion.split("\n")
+        for i in range(len(live_node)):
+            live_node[i] = live_node[i].split("- ")[1]
+        if node_name not in accepted_node:
+            self.error(939)
+            return 1
+        elif node_name not in live_node:
+            self.error(939)
+            return 1
+
+if __name__ == '__main__':
+
+    # instance a object
+    target = IpsanTarget(sys.argv[1:])
+    # decode input parameter
+    target.decode_param()
+    # do operation
+    target.do_operation()
+
+
+

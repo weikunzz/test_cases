@@ -1,0 +1,589 @@
+#!/usr/bin/env python
+# -*- copyright -*-
+# coding:utf-8
+
+import sys
+import getopt
+import commands
+import os
+import re
+import sqlite3
+import json
+
+
+def con_db():  # get database conn and cur , when you work is done , close conn and cur .
+    commands.getoutput("mkdir -p /usr/local/db/")
+    connect_db = sqlite3.connect('/usr/local/db/tasks.db')  # if not exists so ,create it!
+    cur_db = connect_db.cursor()
+    cur_db.execute("""CREATE TABLE IF NOT EXISTS task(
+        id integer primary key,
+        name varchar,
+        state varchar,
+        process varchar,
+        username varchar,
+        start_time varchar)""")
+    return connect_db, cur_db
+
+
+# update progress
+def update_progress(con, cur, process, starttime, task_name):
+    cur.execute("UPDATE task SET process='%d' WHERE start_time='%s' and name='%s'" % (int(process), starttime, task_name))
+    con.commit()
+
+
+def delete_task(con, cur, starttime, name):
+    cur.execute("DELETE FROM task WHERE start_time='%s' and name='%s'" % (starttime, name))
+    con.commit()
+
+
+def close_conn(con, cur):
+    try:
+        cur.close()
+    except Exception:
+        pass
+    try:
+        con.close()
+    except Exception:
+        pass
+
+
+def write_log(level, info):
+    try:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level %s "
+                           "--module 'icfs-fs-snap' --info '%s'" % (level, info))
+    except Exception:
+        pass
+
+
+def usage():
+    print"""Help(-h|--help) for icfs-fs-snap:
+Usaeg:
+>---icfs-fs-snap----+---------------- --on -------------------------------+---><
+                    +---------------- --off ------------------------------+
+                    +--------------- --status-----------------------------+
+                    +-- --create --path path --snap snapname--------------+
+                    +-- --delete --path path --snap snapname--------------+
+                    +-- --recover --path path --snap snapname-------------+
+                    +-- --copy --path path --snap snapname --------------->
+                    >-----------file filename --dest destpath-------------+
+                    +--list --path path--+--+-----------------------------+
+                                            '--snap snapname--+----------+'
+                                                              '--dir  dir'
+parameters:
+  --on        turn on snapshot
+  --off       turn off snapshot
+  --status    check snapshot status
+  --path      directory path
+  --list      list all the snapshots of the path, or the list of the files in snaphost
+  --create    create new snaphost
+  --recover   recover path from snaphost
+  --delete    delete snaphost, if --snap="_ALL" delete all snaphost
+  --copy      copy file from snap
+  --dir       query directory
+  --dest      destination path
+values:
+  path        path name
+  snapname    snapname
+  dir         directory name
+  destpath    copy file to destpath"""
+
+
+# check icfs-fuse, mount it if currently not mount
+def check_fuse():
+    status, output = commands.getstatusoutput("mount |grep -w icfs-fuse |grep -w /mnt/icfs")
+    if status != 0:
+        status, output = commands.getstatusoutput("icfs-fuse /mnt/icfs")
+        if "fuse failed to start" in output:
+            return False
+
+    return True
+
+
+def icfs_snap_host_status(operation):
+    """
+    turn on , turn off or check status
+    :param operation: on | off | status
+    :return: code, info
+    """
+    if operation == "on":
+        error, info = commands.getstatusoutput("icfs mds set allow_new_snaps true --yes-i-really-mean-it")
+    elif operation == "off":
+        error, info = commands.getstatusoutput("icfs mds set allow_new_snaps false --yes-i-really-mean-it")
+    elif operation == "status":
+        error, info = commands.getstatusoutput("icfs mds get allow_new_snaps")
+        if "false" in info:
+            code = 1
+            info = "off"
+        elif "true" in info:
+            code = 0
+            info = "on"
+        else:
+            code = 1
+            info = "unknow"
+        return code, info
+    else:
+        error = 1
+        info = "Error(610): unknow operation" + str(operation)
+    if not error:
+        info = "success"
+    return error, info
+
+
+def create_snap(path, snap):
+    """
+    create snap
+    :param path: path name
+    :param snap: snap name
+    :return: code, info
+    """
+    snap_path = path+"/.snap/"+snap
+    if os.path.exists(snap_path):
+        return 1, "Error(3300): snap already exists. snap "+snap+" is exist"
+    error, info = commands.getstatusoutput("mkdir %s" % snap_path)
+    if not error:
+        info = "success"
+    else:
+        error = 1
+        if "Invalid request descriptor" in info:
+            info = "Error(3304): Can not create snapshot for nested directories."
+        elif "Invalid request code" in info:
+            info = "Error(3306): Can not create snapshot for subtree root directories."
+        else:
+            info = "Error(1399): Unknown error: " + str(info)
+    return error, info
+
+
+def delete_snap(path, snap):
+    """
+    delete snaphost
+    :param path: path name
+    :param snap: snaphost name or "_ALL". if snap="_ALL" , delete all snaphost
+    :return: code, info
+    """
+    snap_name = path+"/.snap/"
+    if snap == "_ALL":
+        snap_name += "*"
+    else:
+        snap_name += snap
+    error, info = commands.getstatusoutput("rmdir %s" % snap_name)
+    if not error:
+        info = 'success'
+    else:
+        error = 1
+        info = "Error(1399): Unknown error: " + str(info)
+    return error, info
+
+
+def recover_from_snap(path, snap):
+    """
+    recover file from snap
+    :param path: path name
+    :param snap: snaphost name
+    :return: code, info
+    """
+    import datetime
+    import random
+    con, cur = con_db()
+    starttime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+    task_name = "recover_dir:" + path
+    # only one recover work on the same path
+    result = cur.execute("SELECT * FROM task where name=?", (task_name,))
+    tasks = result.fetchall()
+    if len(tasks) != 0:
+        # there is one task is running
+        info = "Error(3303): there is one recover progress is running on path: " + path
+        error = 1
+        write_log(0, info)
+        close_conn(con, cur)
+        return error, info
+    cur.execute("INSERT INTO task (name,state,process,username,start_time) VALUES (?,?,?,?,?)",
+                (task_name, 'running', '0', 'root', starttime))
+    con.commit()
+    snap_name = path+"/.snap/"+snap+"/"
+    recover_path = path+"/"
+    if not os.path.exists(snap_name):
+        error = 1
+        info = "Error(3301): snap is not exist. " + snap + " is not exists"
+        delete_task(con, cur, starttime, task_name)
+        write_log(0, info)
+        close_conn(con, cur)
+        return error, info
+    if not os.path.exists(path):
+        error = 1
+        info = "Error(3302): path is not exist. " + path + " is not exist"
+        delete_task(con, cur, starttime, task_name)
+        write_log(0, info)
+        close_conn(con, cur)
+        return error, info
+    commands.getstatusoutput("rm -rf %s" % (path + "/.*"))
+    error, info = commands.getstatusoutput("rm -rf %s" % (path+"/*"))
+    update_progress(con, cur, random.randint(20, 30), starttime, task_name)
+    error, filelist = commands.getstatusoutput("ls -A --color=never %s" % snap_name)
+    if filelist != "":
+        error, info = commands.getstatusoutput("cp -a %s/. %s" % (snap_name, recover_path))
+    update_progress(con, cur, 100, starttime, task_name)
+    delete_task(con, cur, starttime, task_name)
+    if not error:
+        write_log(2, "recover success")
+        info = "success"
+    else:
+        error = 1
+        info = "Error(1399): Unknown error: " + str(info)
+        write_log(0, info)
+    close_conn(con, cur)
+    return error, info
+
+
+def get_all_snap(path):
+    """
+    list all snaphost
+    :param path:
+    :return: code, info
+    """
+    snaps = path + "/.snap/"
+    if not os.path.exists(path):
+        error = 1
+        info = "Error(3302): path is not exist. " + path + " is not exist"
+        return error, info
+    error, info = commands.getstatusoutput("ls %s" % snaps)
+    if error:
+        error = 1
+        info = "Error(1399): Unknown error: " + str(info)
+        return error, info
+    snaps_list = info.splitlines()
+    result_info = []
+    for snap in snaps_list:
+        error, create_time = commands.getstatusoutput("stat "+snaps+snap+"|grep Change")
+        if error:
+            create_time = "unknow"
+        else:
+            try:
+                create_time = re.match("Change: (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\..*", create_time).group(1)
+            except Exception:
+                pass
+        result_info.append((snap, create_time))
+        result_info = sorted(result_info, key=lambda result: result[1])
+    return 0, result_info
+
+
+def get_file_list_by_snap(path, snap, dir=None):
+    """
+    get file list in snaphost
+    :param path: path name
+    :param snap: snaphost name
+    :param dir: dir name
+    :return: code, info
+    """
+    snap_name = path + "/.snap/" + snap
+    if dir:
+        snap_name += "/"+dir
+    if not os.path.exists(snap_name):
+        error = 1
+        info = "Error(3301): snap is not exist. " + snap + " is not exist"
+        return error, info
+    error, info = commands.getstatusoutput("ls -a %s" % snap_name)
+    if error:
+        error = 1
+        info = "Error(1399): Unknown error: " + str(info)
+        return error, info
+    # remove . and ..
+    file_list = info.splitlines()[2:]
+    return 0, file_list
+
+
+def copy_file_from_snap(path, snap, filename, dest):
+    """
+    recover file from snap to dist
+    :param path: path
+    :param snap: snap name
+    :param filename: filename or dir name
+    :param dest: dist path
+    :return: code, info
+    """
+
+    import datetime
+    import random
+    con, cur = con_db()
+    starttime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+    task_name = "copy_dir:" + dest
+    # only one recover work on the same path
+    result = cur.execute("SELECT * FROM task where name=?", (task_name,))
+    tasks = result.fetchall()
+    if len(tasks) != 0:
+        # there is one task is running
+        info = "Error(3303): there is one copy progress is running on path: " + path
+        error = 1
+        write_log(0, info)
+        close_conn(con, cur)
+        return error, info
+    cur.execute("INSERT INTO task (name,state,process,username,start_time) VALUES (?,?,?,?,?)",
+                (task_name, 'running', '0', 'root', starttime))
+    con.commit()
+    update_progress(con, cur, random.randint(20, 30), starttime, task_name)
+    snap_path = path + "/.snap/" + snap + "/"
+    filepath = snap_path + "/" + filename
+    if not os.path.exists(snap_path):
+        error = 1
+        info = "Error(3301): snap is not exist. " + snap + " is not exists"
+        delete_task(con, cur, starttime, task_name)
+        write_log(0, info)
+        close_conn(con, cur)
+        return error, info
+    else:
+        if not os.path.exists(filepath):
+            error = 1
+            info = "Error(1704): File not exist"
+            delete_task(con, cur, starttime, task_name)
+            write_log(2, info)
+            close_conn(con, cur)
+            return error, info
+    if not os.path.exists(dest):
+        error = 1
+        info = "Error(3302): path is not exist. " + dest + " is not exist"
+        delete_task(con, cur, starttime, task_name)
+        write_log(0, info)
+        close_conn(con, cur)
+        return error, info
+    if filename == "*":
+        filepath = snap_path
+        error, info = commands.getstatusoutput("for file in `ls -A1 --color=never %s`; do cp -r %s/$file %s ; done" % (filepath, filepath, dest))
+    else:
+        error, info = commands.getstatusoutput("cp -r %s %s" % (filepath, dest))
+    update_progress(con, cur, 100, starttime, task_name)
+    delete_task(con, cur, starttime, task_name)
+    if not error:
+        write_log(2, "copy success")
+        info = "success"
+    else:
+        error = 1
+        info = "Error(1399): Unknown error: " + str(info)
+        write_log(0, info)
+    close_conn(con, cur)
+    return error, info
+
+
+def error(code, info=None):
+    # start = '\033[1;31;40m'
+    # end = "\033[0m"
+    mess = ""
+    if not info:
+        info = ""
+    if code == 610:
+        mess = "Error(610): Invalid input !"
+    print mess, info
+
+
+def mutex_judg(mutex, action):
+    if mutex is None:
+        return action
+    else:
+        error(610, "--" + action + " cannot use with --" + mutex)
+        sys.exit(1)
+
+
+def _change_path(path):
+    path = os.path.abspath(path)
+    if path.endswith("/"):
+        return path[0:-1]
+    else:
+        return path
+
+
+def _ori_check(path, snap):
+    if not path:
+        error(610, info="need --path")
+        sys.exit(1)
+    if not snap:
+        error(610, info="need --snap")
+        sys.exit(1)
+    if not _check_snap(snap):
+        error(610, info="snap name is invalid ")
+        sys.exit(1)
+
+
+def _check_snap(snap):
+    patt = "^[0-9a-zA-Z\x80-\xff][\w\x80-\xff-]*$"
+    if re.match(patt, snap):
+        return True
+    else:
+        return False
+
+
+if __name__ == "__main__":
+    operation = None
+    operation_mutex = None
+    path = None
+    snap = None
+    filename = None
+    dest = None
+    dir = None
+    bg = False
+    try:
+        options, agrs = getopt.getopt(sys.argv[1:], "h", ["help", "on", "off", "status",
+                                                          "create", "delete", "recover",
+                                                          "list", "copy", "path=", "snap=",
+                                                          "file=", "dest=", "dir=", "bg"])
+        if not options:
+            usage()
+            sys.exit(1)
+        for key, value in options:
+            if key in ("-h", "--help"):
+                usage()
+                sys.exit(0)
+            elif key == "--on":
+                operation = mutex_judg(operation_mutex, "on")
+                operation_mutex = "on"
+            elif key == "--off":
+                operation = mutex_judg(operation_mutex, "off")
+                operation_mutex = "off"
+            elif key == "--status":
+                operation = mutex_judg(operation_mutex, "status")
+                operation_mutex = "status"
+            elif key == "--create":
+                operation = mutex_judg(operation_mutex, "create")
+                operation_mutex = "create"
+            elif key == "--delete":
+                operation = mutex_judg(operation_mutex, "delete")
+                operation_mutex = "delete"
+            elif key == "--recover":
+                operation = mutex_judg(operation_mutex, "recover")
+                operation_mutex = "recover"
+            elif key == "--list":
+                operation = mutex_judg(operation_mutex, "list")
+                operation_mutex = "list"
+            elif key == "--copy":
+                operation = mutex_judg(operation_mutex, "copy")
+                operation_mutex = "copy"
+            elif key == "--path":
+                path = _change_path(value)
+            elif key == "--snap":
+                snap = value
+            elif key == "--file":
+                filename = value
+            elif key == "--dest":
+                dest = value
+            elif key == "--dir":
+                dir = value
+            elif key == "--bg":
+                bg = True
+
+        if operation in ("on", "off", "status"):
+            error, info = icfs_snap_host_status(operation)
+        elif operation == "create":
+            if re.findall(u"[\u4e00-\u9fa5]", unicode(path, 'utf-8')) != []:
+                print "Error(781): Don't support creating snapshot for Chinese path"
+                sys.exit(1)
+            _ori_check(path, snap)
+            # check icfs-fuse
+            if not check_fuse():
+                print "Error(504): File system not mount"
+                sys.exit(1)
+            # check path
+            if not path.startswith("/mnt/icfs"):
+                error(610, info=path)
+                sys.exit(1)
+            error, info = create_snap(path, snap)
+        elif operation == "delete":
+            if not path:
+                error(610, info="need --path")
+                sys.exit(1)
+            if not snap:
+                error(610, info="need --snap")
+                sys.exit(1)
+            if (snap.startswith("_") and snap != "_ALL") or snap.startswith(".") :
+                error(610, info="snap can not start with '_' and '.'")
+                sys.exit(1)
+            # check icfs-fuse
+            if not check_fuse():
+                print "Error(504): File system not mount"
+                sys.exit(1)
+            # check path
+            if not path.startswith("/mnt/icfs"):
+                error(610, info=path)
+                sys.exit(1)
+            error, info = delete_snap(path, snap)
+        elif operation == "recover":
+            _ori_check(path, snap)
+            if bg:
+                import subprocess
+                parameters = " --path %s --snap %s" % (path, snap)
+                subprocess.call("icfs-fs-snap --recover %s > /dev/null &" % parameters, shell=True)
+                error = 0
+                info = "recover is in background"
+            else:
+                # check icfs-fuse
+                if not check_fuse():
+                    print "Error(504): File system not mount"
+                    sys.exit(1)
+                # check path
+                if not path.startswith("/mnt/icfs"):
+                    error(610, info=path)
+                    sys.exit(1)
+                error, info = recover_from_snap(path, snap)
+        elif operation == "list":
+            if not path:
+                error(610, "need --path")
+                sys.exit(1)
+            # check icfs-fuse
+            if not check_fuse():
+                print "Error(504): File system not mount"
+                sys.exit(1)
+            # check path
+            if not path.startswith("/mnt/icfs"):
+                error(610, info=path)
+                sys.exit(1)
+            if not snap:
+                error, info = get_all_snap(path)
+                if not error:
+                    print "snaphost\tcreateTime"
+                    for i in info:
+                        print i[0], '\t', i[1]
+            elif _check_snap(snap):
+                error, info = get_file_list_by_snap(path, snap, dir=dir)
+                if not error:
+                    for i in info:
+                        print i
+            else:
+                error = 1
+                info = "--snap can not start with '_'"
+                print "Error(610): Invalid input !", info
+        elif operation == "copy":
+            _ori_check(path, snap)
+            if not filename:
+                error(610, "need --file")
+                sys.exit(1)
+            if not dest:
+                error(610, "need --dest")
+                sys.exit(1)
+            if bg:
+                import subprocess
+                parameters = " --path %s --snap %s --file '%s' --dest %s" % (path, snap, filename, dest)
+                subprocess.call("icfs-fs-snap --copy %s > /dev/null &" % parameters, shell=True)
+                error = 0
+                info = "copy is in background"
+            else:
+                # check icfs-fuse
+                if not check_fuse():
+                    print "Error(504): File system not mount"
+                    sys.exit(1)
+                # check path
+                if not path.startswith("/mnt/icfs"):
+                    error(610, info=path)
+                    sys.exit(1)
+                error, info = copy_file_from_snap(path, snap, filename, dest)
+        else:
+            error = 1
+            info = "unknow operation"
+
+        # sys.exit()
+        if error:
+            print info
+            sys.exit(1)
+        else:
+            if operation == "list":
+                pass
+            else:
+                print info
+    except Exception, e:
+        print e
+        sys.exit(1)

@@ -1,0 +1,1444 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+
+# change log list
+# 20161214 shaoning (nfs_path_query) Do not restart ganesha any more after query nfs share list
+# 20161213 shizonghua  Add NFS access audit function
+# 20161126 shaoning (__main__) ganesha only support directories consist of letters and numbers
+# 20161227 shaoning (nfs_online_number_query) update method to query online client number
+# 20161227 shaoning (nfs_online_ip_query) update method to query online client ip
+# 20161229 shaoning (groupname_check) update regular expression to check net group name
+
+import os
+import sys
+import re
+import commands
+import platform
+import ganesha_parse
+import signal
+from ganesha_parse import StringElement
+from ganesha_parse import ListElement
+from icfs_util import get_remote_host_list, run_remote_ping, is_rack
+# from icfs_util import run_remote_cmd, run_remote_copy, run_local_cmd, error
+from icfs_util import run_remote_copy, run_local_cmd, error
+import subprocess
+import OptParser
+import time
+import multiprocessing
+import signal
+
+DEBUG = 0
+
+
+def usage():
+    print '''Help(-h|--help) for icfs-admin-nfs:
+Usage:
+>> icfs-admin-nfs ----+ --create +----><
+                      + --set    +
+                      + --delete +
+                      + --query  +
+                      + --start  +
+                      + --stop   +
+                      ' --audit  '
+Functions: Create/Set/Delete/Query NFS service
+Options: 
+  --create:  create nfs-ganesha service
+  --set:     modify nfs-ganesha service
+  --delete:  delete nfs-ganesha service
+  --query:   query nfs-ganesha service
+  --start:   start nfs-ganesha service
+  --stop:    stop nfs-ganesha service
+  --audit:   nfs-ganesha access audit
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-nfs --create:
+Usage: 
+>> ics-admin-nfs ---- --create ---- -p path ---- -a acl_value --+-----------------+----><
+                                                                ' --squash squash '
+Functions: Create NFS service, set share path, default acl and squash policy
+Options:
+  -p:       path of nfs service
+  -a:       acl of user/group(values: r---, rw--, rw-d)
+  --squash: squash policy(values: no_root_squash root_squash all_squash)
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+Usage:
+>> ics-admin-nfs ---- --create ---- -p path --+ --host ip_address +-- -a acl_value ----><
+                                              ' -g netgroup_name  '
+Functions: Create NFS service, set share path or add user with acl at the same time
+Options:
+  -p:      path of nfs service
+  --host:  the user's type is host
+  -g:      the user's type is netgroup
+  -a:      acl of user/group(values: r---, rw--, rw-d)
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-nfs --set:
+Usage:
+>> icfs-admin-nfs ---- --set ---- -p path --+--------------+--+------------------------+----><
+                                            ' -a acl_value '  ' --squash squash_policy '
+Functions: Set NFS service default acl or squash policy
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>> icfs-admin-nfs ---- --set ---- -p path --+ --host ip_address +-- -a acl_value ----><
+                                            ' -g netgroup_name  '
+Functions: Set NFS user's acl
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-nfs --delete:
+Usage:
+>> icfs-admin-nfs ---- --delete ---- -p path ----+-------------------+--+------------------+----><
+                                                 ' --host ip_address '  ' -g netgroup_name ' 
+Functions: Delete NFS service, delete user
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-nfs --query:
+Usage:
+icfs-admin-nfs ---- --query ----+---------------+----><
+                                '-- -p -- path -'
+Functions: Query the nfs-ganesha path in cluster, or query user information in nfs-ganesha path
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-nfs --stop\start:
+Usage:
+icfs-admin-nfs ----+ --start +--><
+                   ' --stop  '
+Functions: Start or stop the ganesha service.
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-admin-nfs --audit --query:
+Usage:
+icfs-admin-nfs --- --audit ------ --query ------------><
+Functions: Query the ganesha service audit info
+Options:
+--query :   query the ganesha service audit info
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+icfs-admin-nfs --audit --setlevel --level:
+Usage:
+icfs-admin-nfs --- --audit ----- --setlevel --level -----><
+Functions: Set audit level of the ganesha service
+Options:
+--setlevel :   Set audit level of the ganesha service
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+  '''
+
+
+class OsInfo(object):
+    def __init__(self, os_name, os_version, os_edtion):
+        self.os_name = os_name
+        self.os_version = os_version
+        self.os_edtion = os_edtion
+
+
+class Worker(multiprocessing.Process):
+    def __init__(self, host, queue):
+        super(Worker, self).__init__()
+        self._host = host
+        self._queue = queue
+        self._stat = ""
+        self._id_num = ""
+        self._sn_output = ""
+        self._version_output = ""
+        self._success = ""
+
+    def get_host(self): return self._host
+
+    def get_stat(self): return self._stat
+
+    def get_id_num(self): return self._id_num
+
+    def get_sn_output(self): return self._sn_output
+
+    def get_version_output(self): return self._version_output
+
+    def get_success(self): return self._success
+
+    def run(self):
+        os_type = get_os_type()
+        if os_type.os_version.startswith("7."):
+            ret_list = run_remote_cmd(self._host, "systemctl status ganesha | grep Active")
+        else:
+            ret_list = run_remote_cmd(self._host, "service ganesha status")
+
+        stat = ret_list[self._host]["retcode"]
+        output = ret_list[self._host]["stdout"]
+        if has_version:
+            if stat == -1 or stat == 255:
+                msg = (self.get_host() + ":").ljust(15) + " " + "unknown".ljust(15) + " " + \
+                      "Nodeid:".ljust(15) + " " + "None".ljust(15) + " " + "Version:".ljust(15) + " " + \
+                      "None".ljust(15) + " " + "Device SN:".ljust(15) + " " + "None"
+                self._queue.put(msg)
+                return
+            ret_list = run_remote_cmd(self._host, "ganesha.nfsd -v |sed -n '2p'| awk '{print \\$3}'")
+            version_status = ret_list[self._host]["retcode"]
+            version_out = ret_list[self._host]["stdout"]
+            if version_status != 0:
+                print version_out
+                sys.exit(1)
+            self._version_output = version_out
+
+            sn_status, sn_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o "
+                                                            "PasswordAuthentication=no -o StrictHostKeyChecking=no "
+                                                            "'root@%s' 'dmidecode -t system| grep Serial'|"
+                                                            " awk -F ':' '{print $2}'" % self._host)
+            if sn_status != 0:
+                Error(1399, sn_output)
+            elif "Not Specified" in sn_output:
+                self._sn_output = "None"
+            else:
+                self._sn_output = sn_output
+            if is_rack():
+                try:
+                    with open("/usr/local/ism/Agent/src/Cache/rack_info.txt", "r") as f:
+                        ip = get_ip_by_hostname(self._host)
+                        content = f.read()
+                        node_info = re.split('\n\s*\n', content)
+                        for line in node_info:
+                            if 'NodeID' in line and 'ProductName' in line and "SN" in line and "CPU" in line:
+                                node_line = line.splitlines()
+                                for line in node_line[2:]:
+                                    info = line.split()
+                                    if ip == info[5]:
+                                        self._id_num = info[0]
+                except IOError:
+                    error('3005')
+            else:
+                self._id_num = "None"
+        if stat == -1 or stat == 255:
+            self._stat = "unknown"
+        elif "running" in output:
+            self._stat = "running"
+            self._success = True
+        else:
+            self._stat = "dead"
+            self._success = True
+
+        if has_version:
+            msg = (self.get_host() + ":").ljust(15) + " " + self.get_stat().ljust(15) + " " + \
+                  "Nodeid:".ljust(15) + " " + self.get_id_num().ljust(15) + " " + "Version:".ljust(15) + " " + \
+                  self.get_version_output().strip().ljust(15) + " " + "Device SN:".ljust(15) + " " + self.get_sn_output()
+        else:
+            msg = (self.get_host() + ":").ljust(15) + ' ' + self.get_stat()
+
+        self._queue.put(msg)
+
+
+def get_os_type():
+    os_info = platform.linux_distribution()
+    return OsInfo(os_info[0], os_info[1], os_info[2])
+
+
+def Error(num, *description):
+    if num == 021:
+        print "Error(021): This type of Tasks is maximizing",
+    elif num == 701:
+        print "Error(701): No such path"
+    elif num == 702:
+        print "Error(702): Invalid ACL input!"
+    elif num == 703:
+        print "Error(703): Synchronization configuration file failed"
+    elif num == 705:
+        print "Error(705): The Path already exists"
+    elif num == 706:
+        print "Error(706): This NFS-Path not exists"
+    elif num == 707:
+        print "Error(707): User not exists"
+    elif num == 708:
+        print "Error(708): User is exists"
+    elif num == 610:
+        print "Error(610): Invalid input!"
+    elif num == 715:
+        print "Error(715): Host not exists"
+    elif num == 716:
+        print "Error(716): Invalid ip address"
+    elif num == 717:
+        print "Error(717): Invalid groupname"
+    elif num == 721:
+        print "Error(721): Invalid path"
+    elif num == 728:
+        print "Error(728): disable ganesha access audit fail, info %s" % description
+    elif num == 729:
+        print "Error(729): enable ganesha access audit fail, info %s" % description
+    elif num == 743:
+        print "Error(743): Failed to restart ganesha for %s" % description
+    elif num == 753:
+        print "Error(753): Invalid squash policy"
+    elif num == 763:
+        print "Error(763): The new export path can not nest with existing export paths"
+    elif num == 299:
+        print "Error(299): Invalid salt service"
+    elif num == 3006:
+        print "Error(3006):This type of Tasks is maximizing"
+    elif num == 764:
+        print "Error(764): get access audit status fail, info %s" % description
+    elif num == 765:
+        print "Error(765): get access audit level fail, info %s" % description
+    elif num == 766:
+        print "Error(766): set access audit fail, info %s" % description
+    elif num == 780:
+        print "Error(780): Don't support creating share for Chinese path"
+    else:
+        print "Error(553): Unknown error"
+
+
+# check ip address
+def ip_check(ip_address):
+    pattern = (
+        r"^([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-4])\."
+        "([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\."
+        "([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\."
+        "([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])($|/[1-9]$|/1[0-9]$|/2[0-9]$|/3[0-2]$)"
+    )
+    if not re.match(pattern, ip_address) and not re.match(r"\*", ip_address):
+        Error(716)
+        sys.exit(1)
+
+
+# check net group name
+def groupname_check(net_group_name):
+    if re.match(r"^[a-zA-Z_][a-zA-Z0-9_-]{0,31}$", net_group_name) is None:
+        Error(717)
+        sys.exit(1)
+
+
+def get_ip_by_hostname(hostname):
+    ip = ""
+    pattern = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(.*?)(?:#.*)?$")
+    try:
+        with open("/etc/hosts", "r") as fp:
+            lines = fp.readlines()
+    except IOError:
+        return ip
+
+    for line in lines:
+        m = pattern.match(line)
+        if m is None:
+            continue
+
+        hostname_list = m.group(2).split()
+        if hostname in hostname_list:
+            ip = m.group(1)
+            break
+
+    return ip
+
+
+# return True if path1 nested with path2, return False otherwise.
+def check_nest(path1, path2):
+    if path1 in ("/", "/.") or path2 in ("/", "/."):
+        return False
+
+    part_list1 = path1.split("/")
+    part_list2 = path2.split("/")
+    part_list1 = [i for i in part_list1 if i != ""]
+    part_list2 = [i for i in part_list2 if i != ""]
+
+    min_len = min(len(part_list1), len(part_list2))
+    same_part_list = []
+    for i in range(min_len):
+        if part_list1[i] != part_list2[i]:
+            break
+
+        same_part_list.append(part_list1[i])
+
+    if len(same_part_list) == len(part_list1) or len(same_part_list) == len(part_list2):
+        return True
+
+    return False
+
+
+def nfs_path_create():
+    # whether or not nfsd and icfs-fuse exist
+    if not commands.getstatusoutput('mount|grep -w /mnt/icfs')[1]:
+        commands.getstatusoutput('icfs-fuse /mnt/icfs')
+    if not os.path.exists('/mnt/icfs%s' % path):
+        Error(701)
+        sys.exit(1)
+    
+    # read and parse ganesha.conf
+    try:
+        root = ganesha_parse.parse_file("/etc/ganesha/ganesha.conf")
+    except (IOError, SyntaxError), e:
+        print e
+        sys.exit(1)
+    
+    # whether or not exist a path
+    # if not exist, build a new export_id
+    export_id = 77
+    exports = root.group("EXPORT")
+    for export in exports:
+        export_path = export.get_string_value("Path")
+        if export_path is None:
+            continue
+
+        # path already exists
+        if export_path == path:
+            Error(705)
+            sys.exit(1)
+
+        # path nested with existing path
+        if check_nest(path, export_path):
+            Error(763)
+            sys.exit(1)
+        
+        id_str = export.get_string_value("Export_Id")
+        if export_id <= int(id_str):
+            export_id = int(id_str) + 1
+    
+    # build EXPORT
+    fsal_element = ListElement()
+    fsal_element.append("Name", StringElement("ICFS"))
+    
+    export_element = ListElement()
+    export_element.append("Export_Id", StringElement(str(export_id)))
+    export_element.append("Path", StringElement(path))
+    export_element.append("Pseudo", StringElement(path))
+    # support mac os, add "PrivelegedPort = true;"
+    export_element.append("PrivilegedPort", StringElement("true"))
+    export_element.append("Access_Type", StringElement(aclval))
+    if aclval == "RW":
+        export_element.append("Disable_RM", StringElement("true" if disable_rm else "false"))
+    if squash_policy is None:
+        export_element.append("Squash", StringElement("no_root_squash"))
+    else:
+        export_element.append("Squash", StringElement(squash_policy))
+    export_element.append("FSAL", fsal_element)
+    
+    root.append("EXPORT", export_element)
+    
+    # write ganesha.conf
+    try:
+        ganesha_parse.dump_file("/etc/ganesha/ganesha.conf", root)
+    except (ValueError, IOError), e:
+        print e
+        sys.exit(1)
+
+    # synchonize config file
+    ret_dict = run_remote_copy("*", "/etc/ganesha/ganesha.conf", "/etc/ganesha/ganesha.conf")
+    fail_list = [name for name, ret in ret_dict.items() if ret["retcode"] not in (0, -1)]
+    if fail_list:
+        Error(703)
+        sys.exit(1)
+
+    # run_remote_cmd("*", "service ganesha restart")
+    run_remote_cmd("*", "ganesha_mgr add_export /etc/ganesha/ganesha.conf 'EXPORT(Export_ID=%s)' " % export_id)
+    # os.system("python /usr/bin/task-manage %s > /dev/null &" % 'Nfs_create')
+
+
+def nfs_user_create():
+    # whether or not nfsd and icfs-fuse exist
+    if not commands.getstatusoutput('mount|grep -w icfs-fuse')[1]:
+        commands.getstatusoutput('icfs-fuse /mnt/icfs')
+    if not os.path.exists('/mnt/icfs%s' % path):
+        Error(701)
+        sys.exit(1)
+
+    if ipval is None and groupname is None:
+        Error(610)
+        sys.exit(1)
+
+    # split users
+    if ipval is not None:
+        user = ipval
+    else:
+        user = groupname
+    user = user.split(',')
+    user_list = list(set(user))
+    user_list.sort(key=user.index)
+    
+    # read and parse ganesha.conf
+    try:
+        root = ganesha_parse.parse_file("/etc/ganesha/ganesha.conf")
+    except (IOError, SyntaxError), e:
+        print e
+        sys.exit(1)
+    
+    # whether or not exist a path
+    export_exist = False
+    export_id = None
+    exports = root.group("EXPORT")
+    for export in exports:
+        if export.get_string_value("Path") != path:
+            continue
+        
+        export_exist = True
+        export_id = export.get_string_value("Export_Id")
+        # whether or not exist a client
+        clients = export.group("CLIENT")
+        for client in clients:
+            client_name = client.get_string_value("Clients")
+            if client_name is None:
+                continue
+            name_list = client_name.split(",")
+            user_exist_list = [user for user in user_list if user in name_list]
+            if user_exist_list:
+                print "Error(708): User %s is exists" % ",".join(user_exist_list)
+                sys.exit(1)
+        
+        # add new clients
+        for user in user_list:
+            client_element = ListElement()
+            client_element.append("Clients", StringElement(user))
+            client_element.append("Access_Type", StringElement(aclval))
+            if aclval == "RW":
+                client_element.append("Disable_RM", StringElement("true" if disable_rm else "false"))
+            if squash_policy is None:
+                client_element.append("Squash", StringElement("no_root_squash"))
+            else:
+                client_element.append("Squash", StringElement(squash_policy))
+
+            export.append("CLIENT", client_element)
+        
+        break
+    
+    # path not exist
+    if not export_exist or export_id is None:
+        Error(706)
+        sys.exit(1)
+    
+    # write ganesha.conf
+    try:
+        ganesha_parse.dump_file("/etc/ganesha/ganesha.conf", root)
+    except (ValueError, IOError), e:
+        print e
+        sys.exit(1)
+
+    # synchonize config file
+    ret_dict = run_remote_copy("*", "/etc/ganesha/ganesha.conf", "/etc/ganesha/ganesha.conf")
+    fail_list = [name for name, ret in ret_dict.items() if ret["retcode"] not in (0, -1)]
+    if fail_list:
+        Error(703)
+        sys.exit(1)
+
+    # run_remote_cmd("*", "service ganesha restart")
+    run_remote_cmd("*", "ganesha_mgr reload_export /etc/ganesha/ganesha.conf 'EXPORT(Export_ID=%s)' " % export_id)
+    # os.system("python /usr/bin/task-manage %s > /dev/null &" % 'Nfs_create')
+
+
+def nfs_path_query():
+    # read and parse ganesha.conf
+    try:
+        root = ganesha_parse.parse_file("/etc/ganesha/ganesha.conf")
+    except (IOError, SyntaxError), e:
+        print e
+        sys.exit(1)
+    
+    print "%-15s %-15s %s" % ("NFS_path", "acl", "squash")
+    exports = root.group("EXPORT")
+    for export in exports:
+        export_path = export.get_string_value("Path")
+        export_acl = export.get_string_value("Access_Type")
+        export_disable_rm = export.get_string_value("Disable_RM")
+        export_squash = export.get_string_value("Squash")
+        if export_squash is None:
+            # default squash policy
+            export_squash = "root_squash"
+        if export_path == "/.":
+            export_path = "/"
+
+        acl = "r---"
+        if export_acl == "RW":
+            acl = "rw--" if export_disable_rm == "true" else "rw-d"
+
+        print "%-15s %-15s %s" % (export_path, acl, export_squash)
+
+
+# query online client number
+class nfs_online_number_query(multiprocessing.Process):
+
+    def __init__(self):
+        super(nfs_online_number_query, self).__init__()
+
+    def run(self):
+        # line format
+        # tcp6  0  0  1.1.1.1:2049  2.2.2.2:888  ESTABLISHED  88888/ganesha.nfs
+        online_num = 0
+        pattern_connect = re.compile(r"^\s*\S+\s+\S+\s+\S+\s+(\S+):(\S+)\s+(\S+):(\S+)\s+.*$")
+        ret_dict = run_remote_cmd("*", "netstat -tanlp | grep ESTABLISHED | grep 2049")
+        for name, ret in ret_dict.items():
+            lines = ret["stdout"].split("\n")
+            for line in lines:
+                m = pattern_connect.match(line)
+                if m is not None and m.group(2) == "2049":
+                    online_num += 1
+
+        print "NFS_Online:", online_num
+
+
+def do_nfs_online_number_query():
+    def timeout_handler(signum, frame):
+        worker.terminate()
+        print "timeout"
+        sys.exit(1)
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(25)
+    worker = nfs_online_number_query()
+    worker.start()
+    worker.join()
+
+
+# query online client ip
+def nfs_online_ip_query():
+    # line format
+    # tcp6  0  0  1.1.1.1:2049  2.2.2.2:888  ESTABLISHED  88888/ganesha.nfs
+    online_num = 0
+    pattern_connect = re.compile(r"^\s*\S+\s+\S+\s+\S+\s+(\S+):(\S+)\s+(\S+):(\S+)\s+.*$")
+    print "%-15s %-15s %s" % ("CLIENT", "NUMBER", "SERVER")
+    ret_dict = run_remote_cmd("*", "netstat -tanlp | grep ESTABLISHED | grep 2049")
+    for name, ret in ret_dict.items():
+        lines = ret["stdout"].split("\n")
+        for line in lines:
+            m = pattern_connect.match(line)
+            if m is not None and m.group(2) == "2049":
+                online_num += 1
+                client_ip = m.group(3)
+                print "%-15s %-15s %s" % (client_ip, online_num, name)
+
+
+def nfs_user_query():
+    # read and parse ganesha.conf
+    try:
+        root = ganesha_parse.parse_file("/etc/ganesha/ganesha.conf")
+    except (IOError, SyntaxError), e:
+        print e
+        sys.exit(1)
+    
+    export_exist = False
+    exports = root.group("EXPORT")
+    for export in exports:
+        if export.get_string_value("Path") != path:
+            continue
+        
+        export_exist = True
+        print "%-32s %-15s %-15s %s" % ("Client", "type", "acl", "squash")
+        clients = export.group("CLIENT")
+        for client in clients:
+            client_name = client.get_string_value("Clients")
+            client_acl = client.get_string_value("Access_Type")
+            client_disable_rm = client.get_string_value("Disable_RM")
+            client_squash = client.get_string_value("Squash")
+            if client_squash is None:
+                # default squash policy
+                client_squash = "root_squash"
+            acl = "r---"
+            if client_acl == "RW":
+                acl = "rw--" if client_disable_rm == "true" else "rw-d"
+            
+            name_list = client_name.split(",")
+            for name in name_list:
+                if re.match("\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", name) is not None:
+                    print "%-32s %-15s %-15s %s" % (name, "host", acl, client_squash)
+                elif name == "*":
+                    print "%-32s %-15s %-15s %s" % (name, "host", acl, client_squash)
+                else:
+                    name = name.replace("@", "")
+                    print '%-32s %-15s %-15s %s' % (name, "group", acl, client_squash)
+        
+        break
+    
+    # path not exist
+    if not export_exist:
+        Error(706)
+        sys.exit(1)
+
+
+def nfs_path_delete():
+    # read and parse ganesha.conf
+    try:
+        root = ganesha_parse.parse_file("/etc/ganesha/ganesha.conf")
+    except (IOError, SyntaxError), e:
+        print e
+        sys.exit(1)
+    
+    export_exist = False
+    export_id = None
+    exports = root.group("EXPORT")
+    for export in exports:
+        if export.get_string_value("Path") == path:
+            export_exist = True
+            export_id = export.get_string_value("Export_Id")
+            root.remove_key_value("EXPORT", export)
+            break
+    
+    # path not exist
+    if not export_exist or export_id is None:
+        Error(706)
+        sys.exit(1)
+    
+    # write ganesha.conf
+    try:
+        ganesha_parse.dump_file("/etc/ganesha/ganesha.conf", root)
+    except (ValueError, IOError), e:
+        print e
+        sys.exit(1)
+
+    run_remote_copy("*", "/etc/ganesha/ganesha.conf", "/etc/ganesha/ganesha.conf")
+    run_remote_cmd("*", "ganesha_mgr remove_export %s " % export_id)
+    # run_remote_cmd("*", "service ganesha restart")
+
+
+def nfs_user_delete():
+    # read and parse ganesha.conf
+    try:
+        root = ganesha_parse.parse_file("/etc/ganesha/ganesha.conf")
+    except (IOError, SyntaxError), e:
+        print e
+        sys.exit(1)
+
+    if ipval is None and groupname is None:
+        Error(610)
+        sys.exit(1)
+
+    # split users
+    if ipval is not None:
+        user = ipval
+    else:
+        user = groupname
+    user = user.split(',')
+    user_list = list(set(user))
+    del_user_list = []
+    
+    # traverse export
+    export_exist = False
+    export_id = None
+    exports = root.group("EXPORT")
+    for export in exports:
+        if export.get_string_value("Path") != path:
+            continue
+        
+        export_exist = True
+        export_id = export.get_string_value("Export_Id")
+        clients = export.group("CLIENT")
+        for client in clients:
+            client_name = client.get_string_value("Clients")
+            name_list = client_name.split(",")
+            for user in user_list:
+                if user in name_list:
+                    del_user_list.append(user)
+                    name_list.remove(user)
+            
+            if len(name_list) == 0:
+                export.remove_key_value("CLIENT", client)
+            else:
+                client.set_string_value("Clients", ",".join(name_list))
+        
+        break
+    
+    # path not exist
+    if not export_exist or export_id is None:
+        Error(706)
+        sys.exit(1)
+    
+    # client not exist
+    for user in user_list:
+        if user not in del_user_list:
+            print "Error(707): User %s not exists" % user
+            sys.exit(1)
+    
+    # write ganesha.conf
+    try:
+        ganesha_parse.dump_file("/etc/ganesha/ganesha.conf", root)
+    except (ValueError, IOError), e:
+        print e
+        sys.exit(1)
+
+    run_remote_copy("*", "/etc/ganesha/ganesha.conf", "/etc/ganesha/ganesha.conf")
+    run_remote_cmd("*", "ganesha_mgr reload_export /etc/ganesha/ganesha.conf 'EXPORT(Export_ID=%s)' " % export_id)
+    # run_remote_cmd("*", "service ganesha restart")
+
+
+def nfs_path_set():
+    # read and parse ganesha.conf
+    try:
+        root = ganesha_parse.parse_file("/etc/ganesha/ganesha.conf")
+    except (IOError, SyntaxError), e:
+        print e
+        sys.exit(1)
+    
+    export_exist = False
+    export_id = None
+    exports = root.group("EXPORT")
+    for export in exports:
+        if export.get_string_value("Path") != path:
+            continue
+        
+        export_exist = True
+        export_id = export.get_string_value("Export_Id")
+        # set default acl
+        if aclval is not None:
+            export.set_string_value("Access_Type", aclval)
+            if aclval == "RO":
+                export.remove_key("Disable_RM")
+            else:
+                export.set_string_value("Disable_RM", "true" if disable_rm else "false")
+
+        # set squash policy
+        if squash_policy is not None:
+            export.set_string_value("Squash", squash_policy)
+        
+        break
+    
+    # path not exist
+    if not export_exist or export_id is None:
+        Error(706)
+        sys.exit(1)
+    
+    # write ganesha.conf
+    try:
+        ganesha_parse.dump_file("/etc/ganesha/ganesha.conf", root)
+    except (ValueError, IOError), e:
+        print e
+        sys.exit(1)
+
+    run_remote_copy("*", "/etc/ganesha/ganesha.conf", "/etc/ganesha/ganesha.conf")
+    run_remote_cmd("*", "ganesha_mgr reload_export /etc/ganesha/ganesha.conf 'EXPORT(Export_ID=%s)' " % export_id)
+    # run_remote_cmd("*", "service ganesha restart")
+
+
+def nfs_user_set():
+    # read and parse ganesha.conf
+    try:
+        root = ganesha_parse.parse_file("/etc/ganesha/ganesha.conf")
+    except (IOError, SyntaxError), e:
+        print e
+        sys.exit(1)
+
+    if ipval is None and groupname is None:
+        Error(610)
+        sys.exit(1)
+
+    # split users
+    if ipval is not None:
+        user = ipval
+    else:
+        user = groupname
+    user = user.split(',')
+    user_list = list(set(user))
+    set_user_list = []
+    
+    # traverse export
+    export_exist = False
+    export_id = None
+    exports = root.group("EXPORT")
+    for export in exports:
+        if export.get_string_value("Path") != path:
+            continue
+        
+        export_exist = True
+        export_id = export.get_string_value("Export_Id")
+        clients = export.group("CLIENT")
+        for client in clients:
+            client_name = client.get_string_value("Clients")
+            client_acl = client.get_string_value("Access_Type")
+            client_disable_rm = client.get_string_value("Disable_RM")
+            client_squash = client.get_string_value("Squash")
+            name_list = client_name.split(",")
+            if (aclval is None or (client_acl == aclval and disable_rm == (client_disable_rm == "true"))) and \
+                    (squash_policy is None or client_squash == squash_policy):
+                for user in user_list:
+                    if user in name_list:
+                        set_user_list.append(user)
+            else:
+                independent_user_list = []
+                for user in user_list:
+                    if user in name_list:
+                        set_user_list.append(user)
+                        independent_user_list.append(user)
+                        name_list.remove(user)
+                
+                if len(name_list) == 0:
+                    export.remove_key_value("CLIENT", client)
+                else:
+                    client.set_string_value("Clients", ",".join(name_list))
+                
+                if len(independent_user_list) != 0:
+                    independent_user_names = ",".join(independent_user_list)
+                    new_client_element = ListElement()
+                    new_client_element.append("Clients", StringElement(independent_user_names))
+                    if aclval is not None:
+                        new_client_element.append("Access_Type", StringElement(aclval))
+                        if aclval == "RW":
+                            new_client_element.append("Disable_RM", StringElement("true" if disable_rm else "false"))
+                    else:
+                        if client_acl is not None:
+                            new_client_element.append("Access_Type", StringElement(client_acl))
+                        if client_disable_rm is not None:
+                            new_client_element.append("Disable_RM", StringElement(client_disable_rm))
+
+                    # set squash policy
+                    if squash_policy is not None:
+                        new_client_element.append("Squash", StringElement(squash_policy))
+                    elif client_squash is not None:
+                        new_client_element.append("Squash", StringElement(client_squash))
+                    
+                    export.append("CLIENT", new_client_element)
+        
+        break
+    
+    # path not exist
+    if not export_exist or export_id is None:
+        Error(706)
+        sys.exit(1)
+    
+    # client not exist
+    user_not_exist_list = [user for user in user_list if user not in set_user_list]
+    if user_not_exist_list:
+        print "Error(707): User %s not exists" % ",".join(user_not_exist_list)
+        sys.exit(1)
+    
+    # write ganesha.conf
+    try:
+        ganesha_parse.dump_file("/etc/ganesha/ganesha.conf", root)
+    except (ValueError, IOError), e:
+        print e
+        sys.exit(1)
+
+    run_remote_copy("*", "/etc/ganesha/ganesha.conf", "/etc/ganesha/ganesha.conf")
+    run_remote_cmd("*", "ganesha_mgr reload_export /etc/ganesha/ganesha.conf 'EXPORT(Export_ID=%s)' " % export_id)
+    # run_remote_cmd("*", "service ganesha restart")
+
+
+def remote_host_stat_check():
+    host_list = get_remote_host_list()
+    if not host_list:
+        print "Error(056): Remote hosts list is empty"
+        sys.exit(1)
+
+    ret_dict = run_remote_ping("*")
+    fail_list = [name for name, ret in ret_dict.items() if ret["status"] is False]
+    if fail_list:
+        print "Error(057): Remote hosts %s is not accessable" % ",".join(fail_list)
+        sys.exit(1)
+
+
+def nfs_start():
+    # start nfs on all nodes
+    # start success return 1
+    # start error return 0
+    status = 0
+    os_type = get_os_type()
+    if os_type.os_version.startswith("7."):
+        run_remote_cmd("*", "systemctl start ganesha")
+        ret_dict = run_remote_cmd("*", "systemctl status ganesha | grep Active")
+    else:
+        run_remote_cmd("*", "service ganesha start")
+        ret_dict = run_remote_cmd("*", "service ganesha status")
+
+    running_list = [name for name, ret in ret_dict.items() if "running" in ret["stdout"]]
+    if running_list:
+        status = 1
+
+    return status
+
+
+def nfs_status():
+    # timeout event handler
+    def timeout_handler(signum, frame):
+        for worker in worker_list:
+            # os.kill(worker.pid, signal.SIGKILL)
+            worker.terminate()
+        Error(553)
+        print "timeout"
+        sys.exit(1)
+
+    # auto exit after 30s
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(30)
+
+    msg_queue = multiprocessing.Queue()
+    # check nfs status
+    host_list = get_remote_host_list()
+    worker_list = []
+    for host in host_list:
+        worker_list.append(Worker(host, msg_queue))
+    for worker in worker_list:
+        worker.start()
+    for worker in worker_list:
+        worker.join()
+
+    for i in range(msg_queue.qsize()):
+        msg = msg_queue.get()
+        print msg
+    # while True:
+    #     if msg_queue.qsize() == len(host_list):
+    #         for i in range(msg_queue.qsize()):
+    #             msg = msg_queue.get()
+    #             print msg
+    #         sys.exit(0)
+    #     else:
+    #         time.sleep(1)
+
+
+def nfs_health():
+    success = False
+    ret_dict = run_remote_cmd("*", "showmount -e")
+    for node_name, ret in ret_dict.items():
+        if ret["retcode"] == 255:
+            state = "unknown"
+        else:
+            state = "running" if ret["retcode"] == 0 else "dead"
+        print (node_name + ":").ljust(15, " "), state
+        success = True
+    sys.exit(0 if success else 1)
+
+
+def nfs_stop():
+    # stop all nfs
+    # stop success return 1
+    # stop error return 0
+    status = 1
+    os_type = get_os_type()
+    if os_type.os_version.startswith("7."):
+        run_remote_cmd("*", "systemctl stop ganesha")
+        ret_dict = run_remote_cmd("*", "systemctl status ganesha | grep Active")
+    else:
+        run_remote_cmd("*", "service ganesha stop")
+        ret_dict = run_remote_cmd("*", "service ganesha status")
+
+    running_list = [name for name, ret in ret_dict.items() if "running" in ret["stdout"]]
+    if running_list:
+        status = 0
+
+    return status
+
+
+def run_remote_cmd(tgt, cmd):
+    processes = []
+    ret_dict = {}
+    hosts_in_cluster = get_remote_host_list()
+    if tgt == '*':
+        hosts = hosts_in_cluster
+    else:
+        hosts = tgt.strip().split(',')
+        host_not_in_cluster = [host for host in hosts if host not in hosts_in_cluster]
+        if host_not_in_cluster:
+            print "Error(610): Invalid input, %s not in cluster." % host_not_in_cluster
+            sys.exit(1)
+
+    # if execute time out kill the subprocess
+    def timeout_handler(signum, frame):
+        for p in processes:
+            if p['po'].returncode is None:
+                p['po'].terminate()
+        print "Execute remote cmd timeout!"
+        sys.exit(1)
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(30)
+    # execute remote action
+    for host in hosts:
+        process = {}
+        command = "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  'root@%s' \"%s\"" % (host, cmd)
+        process['po'] = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+        process['host'] = host
+        processes.append(process)
+    # wait the subprocess execute end
+    for process in processes:
+        process['stdout'], process['stderr'] = process['po'].communicate()
+    # get execute result
+    for process in processes:
+        ret_dict[process['host']] = {"retcode": process['po'].returncode, "stdout": process['stdout'],
+                                     "stderr": process['stderr']}
+    return ret_dict
+
+
+def nfs_query_audit_info():
+    if not get_access_audit_status():
+        print "Status: disable"
+        sys.exit(0)
+    print "Status: enable"
+    print "Level: %s" % get_access_audit_level()
+
+
+def disable_access_audit():
+    ret = run_remote_cmd("*", "ganesha_mgr set_switch access_audit false")
+    for item in ret.iteritems():
+        if item[1]['retcode'] == 255:
+            print "Error(784): %s is not reachable" % item[0]
+            break
+        if item[1]['retcode']:
+            Error(728, "[%s] " % (item[0]) + item[1]['stdout'] + item[1]['stderr'])
+            break
+        if "Returns: status = True, Done" not in item[1]["stdout"]:
+            Error(728, "[%s] " % (item[0]) + item[1]['stdout'])
+            break
+    else:
+        return 0
+    sys.exit(1)
+
+
+def enable_access_audit():
+    ret = run_remote_cmd("*", "ganesha_mgr set_switch access_audit true")
+    for item in ret.iteritems():
+        if item[1]['retcode'] == 255:
+            print "Error(784): %s is not reachable" % item[0]
+            break
+        if item[1]['retcode']:
+            Error(729, "[%s] " % (item[0]) + item[1]['stdout'] + item[1]['stderr'])
+            break
+        if "Returns: status = True, Done" not in item[1]["stdout"]:
+            Error(729, "[%s] " % (item[0]) + item[1]['stdout'])
+            break
+    else:
+        return 0
+    sys.exit(1)
+
+
+def get_access_audit_status():
+    audit_stat = []
+    ret = run_remote_cmd("*", "ganesha_mgr get_switch access_audit | awk -F ':' '/switch value is/{print \$2}'")
+    for item in ret.iteritems():
+        if item[1]['retcode'] == 255:
+            print "Error(784): %s is not reachable" % item[0]
+            break
+        if item[1]['retcode']:
+            Error(764, "[%s] " % (item[0]) + item[1]['stdout'] + item[1]['stderr'])
+            break
+        if not item[1]['stdout'].strip():
+            Error(764, "[%s] get audit acess status fail" % item[0])
+            sys.exit(1)
+        audit_stat.append(int(item[1]['stdout'].strip()))
+    else:
+        if len(set(audit_stat)) != 1:
+            Error(764, "the status of access audit is not conformity in cluster")
+            sys.exit(1)
+        return bool(audit_stat[0])
+    sys.exit(1)
+
+
+def get_access_audit_level():
+    get_audit_level = []
+    ret = run_remote_cmd("*", "ganesha_mgr get_log COMPONENT_AUDIT | awk -F ':' '/Log level/{print \$2}'")
+    for item in ret.iteritems():
+        if item[1]['retcode'] == 255:
+            print "Error(784): %s is not reachable" % item[0]
+            break
+        if item[1]['retcode']:
+            Error(765, "[%s] " % (item[0]) + item[1]['stdout'] + item[1]['stderr'])
+            break
+        get_audit_level.append(item[1]['stdout'].strip())
+        if not item[1]['stdout'].strip():
+            Error(765, "[%s] get aceess audit level fail" % item[0])
+            sys.exit(1)
+    else:
+        if len(set(get_audit_level)) != 1:
+            Error(765, "the level of access audit is not conformity in cluster")
+            sys.exit(1)
+        return "middle" if get_audit_level[0].split('_')[-1].lower() == "mid" else \
+            get_audit_level[0].split('_')[-1].lower()
+    sys.exit(1)
+
+
+def set_access_audit_level(level, level_map):
+    ret = run_remote_cmd("*", "ganesha_mgr set_log COMPONENT_AUDIT %s" % level_map[level])
+    for item in ret.iteritems():
+        if item[1]['retcode'] == 255:
+            print "Error(784): %s is not reachable" % item[0]
+            break
+        if item[1]['retcode']:
+            Error(766, "[%s] " % (item[0]) + item[1]['stdout'] + item[1]['stderr'])
+            break
+        if "Returns: status = True, Done" not in item[1]["stdout"]:
+            Error(766, "[%s] " % (item[0]) + item[1]['stdout'])
+            break
+    else:
+        return 0
+    sys.exit(1)
+
+
+def nfs_get_access_audit_status():
+    audit_stat = []
+    ret = run_remote_cmd("*", "ganesha_mgr get_switch access_audit | awk -F ':' '/switch value is/{print \$2}'")
+    for item in ret.iteritems():
+        if item[1]['retcode'] == 255:
+            print "Error(784): %s is not reachable" % item[0]
+            break
+        if item[1]['retcode']:
+            Error(766, "[%s] " % (item[0]) + item[1]['stdout'] + item[1]['stderr'])
+            break
+        if not item[1]['stdout'].strip():
+            Error(764, "[%s] get audit acess status fail" % item[0])
+            break
+        audit_stat.append(int(item[1]['stdout'].strip()))
+    else:
+        if len(set(audit_stat)) != 1:
+            return 1, "ERROR"
+        return 0, bool(audit_stat[0])
+    sys.exit(1)
+
+
+def nfs_get_access_audit_level():
+    get_audit_level = []
+    ret = run_remote_cmd("*", "ganesha_mgr get_log COMPONENT_AUDIT | awk -F ':' '/Log level/{print \$2}'")
+    for item in ret.iteritems():
+        if item[1]['retcode'] == 255:
+            print "Error(784): %s is not reachable" % item[0]
+            break
+        if item[1]['retcode']:
+            Error(766, "[%s] " % (item[0]) + item[1]['stdout'] + item[1]['stderr'])
+            break
+        get_audit_level.append(item[1]['stdout'].strip())
+        if not item[1]['stdout'].strip():
+            Error(765, "[%s] get aceess audit level fail" % item[0])
+            break
+    else:
+        if len(set(get_audit_level)) != 1:
+            Error(765, "the level of access audit is not conformity in cluster")
+            return 1, "ERROR"
+        return 0, "middle" if get_audit_level[0].split('_')[-1].lower() == "mid" else \
+            get_audit_level[0].split('_')[-1].lower()
+    sys.exit(1)
+
+
+def nfs_set_auditlevel(set_level):
+    level_map = {"low": "NIV_AUDIT_LOW", "middle": "NIV_AUDIT_MID", "high": "NIV_AUDIT_HIGH"}
+    if set_level == "disable":
+        # disable the offset
+        disable_access_audit()
+        print "set nfs-audit %s success" % set_level
+        sys.exit(0)
+    else:
+        for level in level_map.iteritems():
+            if set_level == level[0]:
+                retcode, current_level = nfs_get_access_audit_level()
+                if not retcode:
+                    if current_level == set_level:
+                        # check the audit offset
+                        retcode, current_status = nfs_get_access_audit_status()
+                        if not retcode:
+                            if not current_status:
+                                # enable the offset
+                                enable_access_audit()
+                                print "set nfs-audit %s success" % set_level
+                                sys.exit(0)
+                        else:
+                            # get status fail but need to enable the offset
+                            enable_access_audit()
+                        print "set nfs-audit %s success" % set_level
+                        sys.exit(0)
+                # set the level
+                set_access_audit_level(set_level, level_map)
+                # check the audit offset
+                retcode, current_status = nfs_get_access_audit_status()
+                if not retcode:
+                    if not current_status:
+                        # enable the offset
+                        enable_access_audit()
+                        print "set nfs-audit %s success" % set_level
+                        sys.exit(0)
+                else:
+                    # get status fail but need to enable the offset
+                    enable_access_audit()
+                print "set nfs-audit %s success" % set_level
+                sys.exit(0)
+        else:
+            print "Error(783): unknown audit level: %s" % set_level
+            sys.exit(1)
+
+
+# This function is usually used to add, modify key-value in file ("/etc/ganesha/ganesha.conf")'s field (NFS_CORE_PARAM)
+def set_nfscoreparam(key, value, filename="/etc/ganesha/ganesha.conf"):
+    try:
+        root = ganesha_parse.parse_file(filename)    # ListElement
+    except (IOError, SyntaxError), e:
+        print e
+        sys.exit(1)
+
+    rootNewList = []
+    for keyRoot, valueRoot in root:
+        rootNewList.append({keyRoot: valueRoot})
+    assert len(root.group("NFS_CORE_PARAM")) == 1
+    nfsCoreParam = root.group("NFS_CORE_PARAM")[0]   # ListElement
+
+    nfsCoreParam.set_string_value(str(key), str(value))
+
+    for keyValue in rootNewList:
+        if "NFS_CORE_PARAM" in keyValue.keys():
+            keyValue["NFS_CORE_PARAM"] = nfsCoreParam
+
+    rootNew = ListElement()
+    for keyValue in rootNewList:
+        for keyI, valueI in keyValue.items():
+            rootNew.append(keyI, valueI)
+
+    try:
+        ganesha_parse.dump_file(filename, rootNew)
+    except (IOError, ValueError), e:
+        print e
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    operation = None
+    if_audit_query = False
+    path = None
+    aclval = None
+    ipval = None
+    groupname = None
+    audit_level = None
+    disable_rm = False
+    has_version = False
+    squash_policy = None
+    try:
+        opt_parser = OptParser.OptParser()
+        # help information
+        opt_parser.append("help", "{-h|--help}")
+        # create commands
+        opt_parser.append("create_path", "--create,-p=,-a=[--squash=]")
+        opt_parser.append("create_user", "--create,-p={--host=|-g=}-a=[--squash=]")
+        # set commands
+        opt_parser.append("set_path", "--set,-p={-a=|--squash=|-a=,--squash=}")
+        opt_parser.append("set_user", "--set,-p={--host=|-g=}{-a=|--squash=|-a=,--squash=}")
+        # delete commands
+        opt_parser.append("delete_path", "--delete,-p=")
+        opt_parser.append("delete_user", "--delete,-p={--host=|-g=}")
+        # query commands
+        opt_parser.append("query_path", "--query")
+        opt_parser.append("query_user", "--query,-p=")
+        opt_parser.append("query_on", "--query,--on")
+        opt_parser.append("query_clients", "--query,--clients")
+        # service management
+        opt_parser.append("start", "--start")
+        opt_parser.append("stop", "--stop")
+        opt_parser.append("status", "--status[--version]")
+        opt_parser.append("health", "--list")
+        # audit information
+        opt_parser.append("set_audit", "--audit,--setlevel=")
+        opt_parser.append("query_audit", "--audit,--query")
+        # parse arguments
+        m_name, m_opts = opt_parser.parse(sys.argv[1:])
+    except Exception, err:
+        print "Error(610): Invalid input!", err
+        sys.exit(1)
+
+    for o, a in m_opts:
+        if o == "-p":
+            path = a
+            if path == "/":
+                path = "/."
+            elif re.match(u"^(/[\w\u4e00-\u9fa5.-]+)*/?$", unicode(path, "utf-8")) is None:
+                Error(721)
+                sys.exit(1)
+            path = path.rstrip("/")
+        elif o == "--host":
+            ipval = a
+            ipval_check = ipval.split(",")
+            for x in ipval_check:
+                ip_check(x)
+        elif o == "-g":
+            group_list = a.split(",")
+            group_name_list = []
+            for group in group_list:
+                groupname_check(group)
+                group_name_list.append("@" + group)
+            groupname = ",".join(group_name_list)
+        elif o == "-a":
+            if a == 'r---':
+                aclval = 'RO'
+            elif a == 'rw-d':
+                aclval = 'RW'
+            elif a == 'rw--':
+                aclval = 'RW'
+                disable_rm = True
+            else:
+                Error(702)
+                sys.exit(1)
+        elif o == "--setlevel":
+            if a in ("low", "middle", "high", "disable"):
+                audit_level = a
+        elif o == "--version":
+            has_version = True
+        elif o == "--squash":
+            if a not in ("no_root_squash", "root_squash", "all_squash"):
+                Error(753)
+                sys.exit(1)
+            squash_policy = a
+
+    if m_name == "help":
+        usage()
+    elif m_name == "create_path":
+        # remote_host_stat_check()
+        nfs_path_create()
+    elif m_name == "create_user":
+        # remote_host_stat_check()
+        nfs_user_create()
+    elif m_name == "set_path":
+        # remote_host_stat_check()
+        nfs_path_set()
+    elif m_name == "set_user":
+        # remote_host_stat_check()
+        nfs_user_set()
+    elif m_name == "delete_path":
+        # remote_host_stat_check()
+        nfs_path_delete()
+    elif m_name == "delete_user":
+        # remote_host_stat_check()
+        nfs_user_delete()
+    elif m_name == "query_path":
+        nfs_path_query()
+    elif m_name == "query_user":
+        nfs_user_query()
+    elif m_name == "query_on":
+        do_nfs_online_number_query()
+    elif m_name == "query_clients":
+        nfs_online_ip_query()
+    elif m_name == "start":
+        # remote_host_stat_check()
+        flag = nfs_start()
+        if flag == 1:
+            print "start nfs success"
+            sys.exit(0)
+        else:
+            print "start nfs error"
+            sys.exit(1)
+    elif m_name == "stop":
+        # remote_host_stat_check()
+        flag = nfs_stop()
+        if flag:
+            print "stop nfs success"
+            sys.exit(0)
+        else:
+            print "stop nfs error"
+            sys.exit(1)
+    elif m_name == "status":
+        nfs_status()
+    elif m_name == "health":
+        nfs_health()
+    elif m_name == "set_audit":
+        if audit_level is not None:
+            nfs_set_auditlevel(audit_level)
+        else:
+            Error(610)
+            sys.exit(1)
+    elif m_name == "query_audit":
+        nfs_query_audit_info()
+    else:
+        Error(610)
+        sys.exit(1)

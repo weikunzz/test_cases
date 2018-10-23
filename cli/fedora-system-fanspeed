@@ -1,0 +1,156 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+import getopt
+import sys
+# import commands
+import re
+from icfs_util import run_command
+# from icfs_util import get_remote_host_list
+from icfs_util import error, is_rack, run_remote_cmd, run_local_cmd
+
+
+
+
+def fan_query_local():
+    fan = run_local_cmd("ipmitool sdr|grep FAN|grep -v :|awk '{print $1,$3}'", timeout=20)
+    if fan["retcode"] != 0 or fan["stdout"] == "":
+        error("3001")
+    elif "No matched" in fan["stdout"]:
+        error('3002')
+    else:
+        name_rotate = fan["stdout"].split('\n')
+        for rotate in name_rotate:
+            status = 'normal'
+            if int(rotate.split()[1]) < 1:
+                status = 'abnormal'
+            fan_name = rotate.split()[0].replace('_SYS_', '')
+            fan_slot = rotate.split()[0].replace('FAN_SYS_', '')
+            fan_rotate = rotate.split()[1]
+            gear = fan_gear(fan_slot)
+            print 'Name:' + fan_name
+
+            print 'Slot:' + fan_slot
+            print 'State:' + status
+            print 'Gear:' + gear
+            print 'Speed:' + fan_rotate + 'RPM' + "\n"
+
+
+def fan_query():
+    result = run_remote_cmd("*", "icfs-system-fanspeed --query --local")
+    for hostName, returnInfor in result.iteritems():
+        print "Node:%s" % str(hostName)
+        print returnInfor["stdout"]
+        print ""
+
+
+def fan_gear(slot):
+    if slot < 9:
+        gear_info = run_local_cmd("ipmitool raw 0x3a 0x79 0x%s" % '0'+slot, timeout=10)
+    else:
+        gear_info = run_local_cmd("ipmitool raw 0x3a 0x79 0x%s" % slot, timeout=10)
+    if gear_info["retcode"] != 0:
+        fan_gear = "--"
+        return fan_gear
+    gear_info = gear_info["stdout"]
+    gear_ascii = gear_info.split()[3]
+    fan_gear_10 = int(gear_ascii, 16)
+    fan_gear = 'medium'
+    if int(fan_gear_10) < 40:
+        fan_gear = 'low'
+    elif int(fan_gear_10) > 70:
+        fan_gear = 'high'
+    return fan_gear
+
+
+def rack_fan_query():
+    rack_info_cache = 'cat /usr/local/ism/Agent/src/Cache/rack_info.txt'
+    rack_info = run_command(rack_info_cache)[1]
+    if rack_info == '' or 'No such file' in rack_info:
+        error('3005')
+    else:
+        rack_info_split = re.split('\n\s*\n', rack_info)  # 换行分隔
+        for r in rack_info_split:
+            if 'FanID' in r and 'Speed' in r:
+                fan_split = r.splitlines()  # fan模块每一行组成的列表
+                if len(fan_split) < 3:
+                    error('3005')
+                else:
+                    for fan_line in fan_split[2:]:  # 某一行
+                        fan = fan_line.split()
+                        if len(fan) < 3:
+                            error('3005')
+                        fan_name = 'FAN' + fan[0].strip()
+                        fan_slot = fan[0].strip()
+                        status = 'normal'
+                        if fan[1].strip() != 'OK':
+                            status = 'abnormal'
+                        fan_rotate = fan[2].strip()
+                        if "NA" == fan_rotate:
+                            fan_rotate = "0"
+                        print 'Name:' + fan_name
+                        print 'Slot:' + fan_slot
+                        print 'State:' + status
+                        print 'Speed:' + fan_rotate + 'RPM'
+                        if fan_line != fan_split[2:][-1]:
+                            print ''
+
+
+def usage():
+    print '''Help(-h|--help)for icfs-system-fanspeed:
+Usage:
+>> icfs-system-fanspeed ------ --query --------------------------------><
+Functions: Query fans info
+Options:
+  --query:  query fans info
+ 
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+Usage:
+>> icfs-system-fanspeed ------ --query smartrack ------------------------------><
+Functions: Query Racks fans info
+Options:
+  --query:  query Racks fans info
+  
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0)
+
+
+if __name__ == '__main__':
+    ret = None
+    try:
+        opts, argv = getopt.getopt(sys.argv[1:], 'h', ['query', 'help', "local"])
+    except getopt.GetoptError, err:
+        error('002')
+
+    if '-h' in sys.argv or '--help' in sys.argv:
+        if len(opts) != 1 or argv != []:
+            error('002')
+        else:
+            usage()
+
+    for k, v in opts:
+        if k == "--query":
+            if len(sys.argv[1:]) == 1:
+                ret = "query"
+            elif len(sys.argv[1:]) == 2 and "smartrack" in argv:
+                ret = "query_rack"
+        elif k == "--local":
+                ret = "query_local"
+        else:
+            error('002')
+
+    rack = is_rack()
+    if ret == "query":
+        if rack:
+            error('3009')
+        fan_query()
+    elif ret == "query_local":
+        fan_query_local()
+    elif ret == "query_rack":
+        if not rack:
+            error('3007')
+        rack_fan_query()

@@ -1,0 +1,818 @@
+#!/usr/bin/python
+# coding:utf-8
+
+# change log list
+# 20161214 shaoning (acl_set) add new error code: ACL function not enable
+# 20161214 shaoning (acl_query) compatible with user names longer than 15 when print ACLs
+# 20170103 shaoning (acl_check) "v"(visual) added in ACL after version 3.5.1.1(included)
+# 20170209 shaoning (__main__) command line parse method changed 
+
+import os
+import sys
+import commands
+import re
+import json
+import os.path
+import OptParser
+from icfs_util import IcfsVersion
+from icfs_util import NewConfigParser
+from icfs_util import run_remote_cmd, run_local_cmd
+
+
+def usage():
+    print """Help(-h|--help)for icfs-admin-acl:
+Usage:
+>> icfs-admin-acl ----+ --set    +----><
+                      + --query  +
+                      + --delete  +
+                      + --start  +
+                      ' --stop '
+Functions: start acl, stop acl, acl editor, query acl information, delete acl
+Options:
+  --set:       acl editor
+  --query:     query acl
+  --start:     start acl
+  --stop:      stop acl
+  --delete:    delete acl 
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+  
+icfs-admin-acl --start/stop:
+Usage:
+>> icfs-admin-acl --+-- --start --+--+-- --general ---- --type acl_type --+--><
+                    '-- --stop   '   +--          --fuse                --+
+                                     +--          --nas                 --+
+                                     +--          --deletable           --+
+                                     '--          --visible             --'
+Functions: Start/Stop acl function
+Options:
+    --start:   start command
+    --stop:    stop command
+    --general: general acl switch
+    --type:    client acl type(valid values: posix_acl, posix_extend_acl, posix_quick_acl)
+    --fuse:    fuse check switch
+    --nas:     nas check switch
+    --deletable: deletable check switch
+    --visible  : visible check switch
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+icfs-admin-acl --status:
+Usage:
+>> icfs-admin-acl ---- --status ----><
+Functions: Get acl switch information
+Options:
+    --status:   acl switch information
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+icfs-admin-acl --set:
+Usage:
+>> icfs-admin-acl ---- --set --+--------+--+--------+--+-- -u user_name  --+---- -d dir_name ---- -a acl_value ----><
+                               '-- -r --'  '-- -e --'  +-- -g group_name --+
+                                                       +-- --ip ip_addr  --+
+                                                       +-- --owner       --+
+                                                       +-- --group       --+
+                                                       +-- --mask        --+
+                                                       '-- --other       --'
+Functions: Modify the acl to set user/group access policy to the specified directory
+Options:
+  -r:        recruisive acl
+  -e:        default acl
+  -u:        user name
+  -g:        group name
+  -d:        directory name
+  -a:        acl value
+  --ip:      set ip ACL
+  --owner:   set owner's ACL
+  --group:   set group's ACL
+  --mask:    set ACL mask
+  --other:   set other's ACL
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+icfs-admin-acl --query:
+Usage:
+>> icfs-admin-acl ---- --query ---- -d dir_name ----><
+Functions: Acl information
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+>> icfs-admin-acl ---- --query ---- --mode ----><
+Functions: Acl mode information("user_acl" or "ip_acl")
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+icfs-admin-acl --delete:
+Usage:
+>> icfs-admin-acl ---- --delete --+--------+--+--------+--+-- -u user_name  --+---- -d dir_name --+--><
+                                  '-- -r --'  '-- -e --'  +-- -g group_name --+
+                                                          +-- --ip ip_addr  --+
+                                                          '-- --mask        --'
+Functions: Delete user/group access policy to the specified directory
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+  
+>> icfs-admin-acl ---- --delete ---- -d dir_name ----><
+Functions: Delete all access policy to the specified directory/file
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully """
+# create by jason
+MOUNT_POINT = "/mnt/icfs"  # icfs default mount point
+
+
+# check whether acl is valid
+def acl_check(acl_str):
+    # "v"(visual) added in ACL after version 3.5.1.1(included)
+    if IcfsVersion.current_version() >= IcfsVersion("3.5.1.1"):
+        if re.match("^[rwxdv-]{1,5}$", acl_str) is None or acl_str.count("r") > 1 or acl_str.count("w") > 1 or \
+                acl_str.count("x") > 1 or acl_str.count("d") > 1 or acl_str.count("v") > 1:
+            return False
+    else:
+        if re.match("^[rwxd-]{1,4}$", acl_str) is None or acl_str.count("r") > 1 or acl_str.count("w") > 1 or \
+                acl_str.count("x") > 1 or acl_str.count("d") > 1:
+            return False
+
+    return True
+
+
+def is_ip_acl_mode():
+    ip_acl_mode = False
+    parser = NewConfigParser()
+    parser.read("/etc/icfs/icfs.conf")
+    if parser.has_option("global", "client_ip_acl") and parser.get("global", "client_ip_acl") == "true":
+        ip_acl_mode = True
+    
+    return ip_acl_mode
+
+
+# check the config file is ok
+def congfile_check():
+    cfg_parser = NewConfigParser()
+    read_ok_list = cfg_parser.read("/etc/icfs/icfs.conf")
+    if "/etc/icfs/icfs.conf" not in read_ok_list:
+        error(1710, "/etc/icfs/icfs.conf")
+    if not cfg_parser.has_section("global"):
+        error(1710, "/etc/icfs/icfs.conf")
+
+
+# restart fuse client
+def restart_fuse():
+    # 1.find mount point
+    stat, info = commands.getstatusoutput("df -h| grep icfs-fuse | awk '{print $1;print $6}'")
+    if stat != 0:
+        print "Error(504): File system not mount"
+        return 1
+    elif len(info.splitlines()) < 2:
+        print "Error(504): File system not mount"
+        return 1
+    mount_point = info.splitlines()[1]
+    # 2.remount icfs-fuse
+    umount_status, umount_output = commands.getstatusoutput("umount %s" % mount_point)
+    if umount_status != 0:
+        error(1399, umount_output)
+    mount_status, mount_output = commands.getstatusoutput("icfs-fuse %s" % mount_point)
+    if mount_status != 0:
+        error(1399, mount_output)
+
+
+# synchronization config
+def copy_config():
+    copy_status, copy_output = commands.getstatusoutput("salt-cp '*' /etc/icfs/icfs.conf /etc/icfs/icfs.conf")
+    if copy_status != 0:
+        print copy_output
+        sys.exit(1)
+
+
+# set acl list
+def acl_set():
+    # setxacl -m u:user/g:group dir/file
+    # setxacl -m m:: dir/file
+    # setxacl -m o:: dir/file
+    # setxacl -d -m u:user/g:group dir
+    # setxacl -d -m m:: dir
+    # setxacl -d -m o:: dir
+    if acl_value is None:
+        error(610)
+    
+    if is_ip_acl_mode():
+        error(610)
+
+    cmd_line = ""
+    if has_dir:
+        if has_user:
+            cmd_line = "%s %s-m u:%s:%s %s" % (acl_cmd, "-d " if has_default and acl_cmd == "setxacl" else "", user_name, acl_value, dir_name)
+        elif has_group:
+            cmd_line = "%s %s-m g:%s:%s %s" % (acl_cmd, "-d " if has_default and acl_cmd == "setxacl" else "", group_name, acl_value, dir_name)
+        elif has_mask:
+            cmd_line = "%s %s-m m::%s %s" % (acl_cmd, "-d " if has_default and acl_cmd == "setxacl" else "", acl_value, dir_name)
+        elif has_other:
+            cmd_line = "%s %s-m o::%s %s" % (acl_cmd, "-d " if has_default and acl_cmd == "setxacl" else "", acl_value, dir_name)
+    elif has_file:
+        if has_user:
+            cmd_line = "%s -m u:%s:%s %s" % (acl_cmd, user_name, acl_value, file_name)
+        elif has_group:
+            cmd_line = "%s -m g:%s:%s %s" % (acl_cmd, group_name, acl_value, file_name)
+        elif has_mask:
+            cmd_line = "%s -m m::%s %s" % (acl_cmd, acl_value, file_name)
+        elif has_other:
+            cmd_line = "%s -m o::%s %s" % (acl_cmd, acl_value, file_name)
+    
+    if cmd_line == "":
+        error(610)
+    
+    status, output = commands.getstatusoutput(cmd_line)
+    if status != 0:
+        if "Option -m: Invalid argument near character 3" in output:
+            if has_user:
+                error(1700)
+            elif has_group:
+                error(1701)
+            else:
+                error(1705, output)
+        elif "Operation not supported" in output:
+            # add new error code: ACL function not enable
+            error(1709)
+        else:
+            error(1705, output)
+
+
+# set ip acl list
+def acl_set_ip():
+    # setxacl -m i:ip_addr:rwxdv dir/file
+    if acl_value is None:
+        error(610)
+    
+    if not is_ip_acl_mode():
+        error(610)
+
+    cmd_line = ""
+    if has_dir:
+        if has_ip:
+            cmd_line = "setxacl %s-m i:%s:%s %s" % ("-d " if has_default else "", ip_addr, acl_value, dir_name)
+    elif has_file:
+        if has_ip:
+            cmd_line = "setxacl -m i:%s:%s %s" % (ip_addr, acl_value, file_name)
+    
+    if cmd_line == "":
+        error(610)
+    
+    status, output = commands.getstatusoutput(cmd_line)
+    if status != 0:
+        if "Operation not supported" in output:
+            # add new error code: ACL function not enable
+            error(1709)
+        else:
+            error(1705, output)
+
+
+# query acl list
+def acl_query():
+    # getxacl dir/file
+    path = None
+    if has_dir:
+        path = dir_name
+    elif has_file:
+        path = file_name
+    
+    if path is None:
+        error(610)
+
+    ip_acl_mode = False
+    parser = NewConfigParser()
+    parser.read("/etc/icfs/icfs.conf")
+    if parser.has_option("global", "client_ip_acl") and parser.get("global", "client_ip_acl") == "true":
+        ip_acl_mode = True
+        
+    cmd_line = "%s %s 2>/dev/null" % (acl_cmd, path)
+    status, output = commands.getstatusoutput(cmd_line)
+    if status != 0:
+        error(1706, output)
+        
+    lines = output.split("\n")
+    for line in lines:
+        if "# owner:" in line:
+            # owner
+            varlist = line.split(":")
+            owner = varlist[1].replace(" ", "")
+            print "owner:%s" % owner
+        elif "# group:" in line:
+            # group
+            varlist = line.split(":")
+            group = varlist[1].replace(" ", "")
+            print "group:%s" % group
+            
+    print "%-15s %-15s %-15s %-15s %s" % ("DEFAULT", "TYPE", "NAME", "MODE", "EFFECTIVE")
+    for line in lines:
+        if "# file:" in line or "# owner:" in line or "# group:" in line:
+            continue
+        
+        effective = "-"
+        if "#effective:" in line:
+            sublist = line.split("#effective:")
+            line = sublist[0].strip()
+            effective = sublist[1].strip()
+        
+        values = line.split(":")
+        if len(values) == 3:
+            if ip_acl_mode:
+                if values[0] != "ip":
+                    continue
+            else:
+                if values[0] == "ip":
+                    continue
+
+            print "%-15s %-15s %-15s %-15s %s" % ("no", values[0], values[1] if len(values[1]) > 0 else "-",
+                                                  values[2], effective)
+        elif len(values) == 4 and values[0] == "default":
+            if ip_acl_mode:
+                if values[1] != "ip":
+                    continue
+            else:
+                if values[1] == "ip":
+                    continue
+
+            print "%-15s %-15s %-15s %-15s %s" % ("yes", values[1], values[2] if len(values[2]) > 0 else "-",
+                                                  values[3], effective)
+
+
+def acl_query_by_page():
+    abs_path = os.path.abspath(dir_name)
+    status, output = commands.getstatusoutput("list_dir %s %d %d" % (abs_path, page, num_per_page))
+    if status != 0:
+        print output
+        error(1399)
+
+
+def acl_delete():
+    # setxacl -b dir/file
+    # setxacl -x u:user/g:group dir/file
+    # setxacl -d -x u:user/g:group dir
+    if (has_user or has_group or has_mask) and is_ip_acl_mode():
+        error(610)
+    
+    cmd_line = ""
+    if has_dir:
+        if has_user:
+            cmd_line = "%s %s-x u:%s %s" % (acl_cmd, "-d " if has_default and acl_cmd == "setxacl" else "", user_name, dir_name)
+        elif has_group:
+            cmd_line = "%s %s-x g:%s %s" % (acl_cmd, "-d " if has_default and acl_cmd == "setxacl" else "", group_name, dir_name)
+        elif has_mask:
+            cmd_line = "%s %s-x m: %s" % (acl_cmd, "-d " if has_default and acl_cmd == "setxacl" else "", dir_name)
+        else:
+            cmd_line = "%s -b %s" % (acl_cmd, dir_name)
+    elif has_file:
+        if has_user:
+            cmd_line = "%s -x u:%s %s" % (acl_cmd, user_name, file_name)
+        elif has_group:
+            cmd_line = "%s -x g:%s %s" % (acl_cmd, group_name, file_name)
+        elif has_mask:
+            cmd_line = "%s -x m: %s" % (acl_cmd, file_name)
+        else:
+            cmd_line = "%s -b %s" % (acl_cmd, file_name)
+    
+    if cmd_line == "":
+        error(610)
+    
+    status, output = commands.getstatusoutput(cmd_line)
+    if status != 0:
+        if "Option -x: Invalid argument near character 3" in output:
+            if has_user:
+                error(1700)
+            elif has_group:
+                error(1701)
+            else:
+                error(1707, output)
+        elif "Malformed" in output:
+            if has_mask:
+                error(1708)
+            else:
+                error(1707, output)
+        else:
+            error(1707, output)
+
+    # "icfs-setfacl -x" may return 0 and print error messages as follows:
+    # "Failed! Can not find the user/group[1000] in current dir."
+    if acl_cmd == "icfs-setfacl" and output.startswith("Failed! Can not find the user/group"):
+        error(1713)
+
+
+def acl_delete_ip():
+    # setxacl -x i:ip_addr dir/file
+    # setxacl -d -x i:ip_addr dir
+    if not is_ip_acl_mode():
+        error(610)
+    
+    cmd_line = ""
+    if has_dir:
+        if has_ip:
+            cmd_line = "setxacl %s-x i:%s %s" % ("-d " if has_default else "", ip_addr, dir_name)
+    elif has_file:
+        if has_ip:
+            cmd_line = "setxacl -x i:%s %s" % (ip_addr, file_name)
+
+    if cmd_line == "":
+        error(610)
+
+    status, output = commands.getstatusoutput(cmd_line)
+    if status != 0:
+        error(1707, output)
+
+
+def acl_query_mode():
+    if is_ip_acl_mode():
+        print "ip_acl"
+    else:
+        print "user_acl"
+
+
+def acl_start():
+    congfile_check()
+    key = None
+    value = None
+    cfg_parser = NewConfigParser()
+    cfg_parser.read("/etc/icfs/icfs.conf")
+    if has_general:
+        if not cfg_parser.has_option("global", "client_acl_type") or \
+                cfg_parser.get("global", "client_acl_type") != acl_type:
+            cfg_parser.remove_option("global", "client_acl_extend_permissions")
+            key = "client_acl_type"
+            value = acl_type
+    elif has_fuse:
+        if not cfg_parser.has_option("global", "fuse_default_permissions") or \
+                'false' != cfg_parser.get('global', 'fuse_default_permissions'):
+            key = "fuse_default_permissions"
+            value = "false"
+    elif has_nas:
+        if not cfg_parser.has_option("global", "client_permissions") or \
+                'false' != cfg_parser.get('global', 'client_permissions'):
+            key = "client_permissions"
+            value = "false"
+    elif has_deletable:
+        if not cfg_parser.has_option("global", "client_acl_delete_permissions") or \
+                'true' != cfg_parser.get('global', 'client_acl_delete_permissions'):
+            key = "client_acl_delete_permissions"
+            value = "true"
+    elif has_visible:
+        if not cfg_parser.has_option("global", "client_acl_visible_permissions") or \
+                'true' != cfg_parser.get('global', 'client_acl_visible_permissions'):
+            key = "client_acl_visible_permissions"
+            value = "true"
+
+    if key is not None and value is not None:
+        cfg_parser.set('global', key, value)
+        cfg_parser.write(open('/etc/icfs/icfs.conf', 'w'))
+        copy_config()
+        # restart_fuse()
+        run_remote_cmd("*", "icfs-client-config --set --key %s --value '%s'" % (key, value))
+    print "Start acl success"
+
+
+def acl_stop():
+    congfile_check()
+    key = None
+    value = None
+    cfg_parser = NewConfigParser()
+    cfg_parser.read("/etc/icfs/icfs.conf")
+    if has_general:
+        if cfg_parser.has_option("global", "client_acl_type"):
+            cfg_parser.remove_option("global", "client_acl_extend_permissions")
+            key = "client_acl_type"
+            value = ""
+    elif has_fuse:
+        if cfg_parser.has_option("global", "fuse_default_permissions") and \
+                'true' != cfg_parser.get('global', 'fuse_default_permissions'):
+            key = "fuse_default_permissions"
+            value = "true"
+    elif has_nas:
+        if cfg_parser.has_option("global", "client_permissions") and \
+                'true' != cfg_parser.get('global', 'client_permissions'):
+            key = "client_permissions"
+            value = "true"
+    elif has_deletable:
+        if cfg_parser.has_option("global", "client_acl_delete_permissions") and \
+               'false' != cfg_parser.get('global', 'client_acl_delete_permissions'):
+            key = "client_acl_delete_permissions"
+            value = "false"
+    elif has_visible:
+        if cfg_parser.has_option("global", "client_acl_visible_permissions") and \
+               'false' != cfg_parser.get('global', 'client_acl_visible_permissions'):
+            key = "client_acl_visible_permissions"
+            value = "false"
+
+    if key is not None and value is not None:
+        if value == "":
+            cfg_parser.remove_option("global", key)
+        else:
+            cfg_parser.set("global", key, value)
+        cfg_parser.write(open('/etc/icfs/icfs.conf', 'w'))
+        copy_config()
+        # restart_fuse()
+        run_remote_cmd("*", "icfs-client-config --set --key %s --value '%s'" % (key, value))
+    print "Stop acl success"
+
+
+def acl_status():
+    congfile_check()
+    cfg_parser = NewConfigParser()
+    cfg_parser.read("/etc/icfs/icfs.conf")
+
+    client_acl_type = "None"
+    if cfg_parser.has_option("global", "client_acl_type"):
+        client_acl_type = cfg_parser.get("global", "client_acl_type")
+        client_acl_type = client_acl_type.strip('"')
+
+    if cfg_parser.has_option("global", "client_acl_extend_permissions") and \
+            cfg_parser.get("global", "client_acl_extend_permissions") == "true" and \
+            client_acl_type == "posix_acl":
+        client_acl_type = "posix_extend_acl"
+
+    fuse_permissions = "true"
+    if cfg_parser.has_option("global", "fuse_default_permissions"):
+        fuse_permissions = cfg_parser.get("global", "fuse_default_permissions")
+
+    client_permissions = "true"
+    if cfg_parser.has_option("global", "client_permissions"):
+        client_permissions = cfg_parser.get("global", "client_permissions")
+
+    delete_permissions = "false"
+    if cfg_parser.has_option("global", "client_acl_delete_permissions"):
+        delete_permissions = cfg_parser.get("global", "client_acl_delete_permissions")
+
+    visible_permissions = "false"
+    if cfg_parser.has_option("global", "client_acl_visible_permissions"):
+        visible_permissions = cfg_parser.get("global", "client_acl_visible_permissions")
+
+    print "client acl type:", client_acl_type
+    print "fuse check:", "true" if fuse_permissions == "false" else "false"
+    print "nas check:", "true" if client_permissions == "false" else "false"
+    print "deletable check:", "true" if delete_permissions == "true" else "false"
+    print "visible check:", "true" if visible_permissions == "true" else "false"
+
+
+# get client_acl_type from fuse daemon, return None if failed
+def get_client_acl_type():
+    socket_file = "/run/icfs/icfs-client.admin.asok"
+    if not os.path.exists(socket_file):
+        return None
+
+    ret = run_local_cmd("icfs daemon %s config get client_acl_type 2>/dev/null" % socket_file)
+    if ret["retcode"] != 0:
+        return None
+
+    try:
+        var_dict = json.loads(ret["stdout"])
+    except ValueError:
+        return None
+
+    if "client_acl_type" not in var_dict:
+        return None
+
+    return var_dict["client_acl_type"]
+
+
+def error(num, *description):
+    if num == 610:
+        print "Error(610): Invalid input! "
+    elif num == 1700:
+        print "Error(1700): User not exist"
+    elif num == 1701:
+        print "Error(1701): Group not exist"
+    elif num == 1702:
+        print "Error(1702): Invalid ACL value"
+    elif num == 1703:
+        print "Error(1703): Directory not exist"
+    elif num == 1704:
+        print "Error(1704): File not exist"
+    elif num == 1705:
+        print "Error(1705): Set ACL failed: %s" % description
+    elif num == 1706:
+        print "Error(1706): Get ACL failed: %s" % description
+    elif num == 1707:
+        print "Error(1707): Delete ACL failed: %s" % description
+    elif num == 1708:
+        print "Error(1708): Can not delete mask when ACL for other user or group exist"
+    elif num == 1709:
+        print "Error(1709): ACL function not enable in /etc/icfs/icfs.conf"
+    elif num == 1710:
+        print "Error(1710): The config file %s not exist or destroyed" % description
+    elif num == 1711:
+        print "Error(1711): The acl switch has started"
+    elif num == 1712:
+        print "Error(1712): The acl switch has stopped"
+    elif num == 1713:
+        print "Error(1713): Can not delete the specific ACL from current path"
+    else:
+        print "Error(1399): Unknown error"
+    sys.exit(1)
+
+if __name__ == "__main__":
+    operation = None
+    user_name = None
+    group_name = None
+    ip_addr = None
+    dir_name = None
+    file_name = None
+    acl_value = None
+    page = None
+    num_per_page = None
+    has_recursion = False
+    has_default = False
+    has_user = False
+    has_group = False
+    has_mask = False
+    has_other = False
+    has_dir = False
+    has_file = False
+    has_ip = False
+    has_fuse = False
+    has_nas = False
+    has_deletable = False
+    has_visible = False
+    has_general = False
+    acl_type = None
+    acl_cmd = None
+
+    try:
+        parser = OptParser.OptParser()
+        parser.append("help", "{-h|--help}")
+        # parser.append("set", "--set[-e]{-u=|-g=|--owner|--group|--mask|--other}{-d=|-f=}-a=")
+        parser.append("set", "--set[-r][-e]{-u=|-g=|--owner|--group|--mask|--other}-d=,-a=")
+        # parser.append("delete", "--delete[[-e]{-u=|-g=|--mask}]{-d=|-f=}")
+        parser.append("delete", "--delete[-r][[-e]{-u=|-g=|--mask}]-d=")
+        # parser.append("query", "--query{-d=|-f=}")
+        parser.append("query", "--query,-d=")
+        # parser.append("query_by_page", "--query,-d=,--page=,--num=")
+
+        # set IP ACL
+        parser.append("set_ip", "--set[-r][-e]--ip=,-d=,-a=")
+        # delete IP ACL
+        parser.append("delete_ip", "--delete[-r][-e]--ip=,-d=")
+        parser.append("query_mode", "--query,--mode")
+        parser.append("start", "--start,{--general,--type=|--fuse|--nas|--deletable|--visible}")
+        parser.append("stop", "--stop,{--general|--fuse|--nas|--deletable|--visible}")
+        parser.append("status", "--status")
+        m_name, m_opts = parser.parse(sys.argv[1:])
+    except Exception, e:
+        print e
+        print "Error(610): Invalid input! "
+        sys.exit(1)
+        
+    for x, y in m_opts:
+        if x == "-r":
+            has_recursion = True
+        if x == "-e":
+            has_default = True
+        elif x == "-u":
+            user_name = y
+            has_user = True
+        elif x == "-g":
+            group_name = y
+            has_group = True
+        elif x == "-d":
+            dir_name = y
+            has_dir = True
+            if not os.path.isdir(dir_name):
+                error(1703)
+        elif x == "-f":
+            file_name = y
+            has_file = True
+            if not os.path.isfile(file_name):
+                error(1704)
+        elif x == "-a":
+            acl_value = y
+            if not acl_check(acl_value):
+                error(1702)
+        elif x == "--owner":
+            user_name = ""
+            has_user = True
+        elif x == "--group":
+            group_name = ""
+            has_group = True
+        elif x == "--ip":
+            ip_addr = y
+            has_ip = True
+        elif x == "--mask":
+            has_mask = True
+        elif x == "--other":
+            has_other = True
+        elif x == "--page":
+            # page must be number greater than 0
+            try:
+                page = int(y)
+                if page <= 0:
+                    error(610)
+            except ValueError, e:
+                error(610)
+        elif x == "--num":
+            # num_per_page must be number greater than 0
+            try:
+                num_per_page = int(y)
+                if num_per_page <= 0:
+                    error(610)
+            except ValueError, e:
+                error(610)
+        elif x == "--fuse":
+            has_fuse = True
+        elif x == "--nas":
+            has_nas = True
+        elif x == "--deletable":
+            has_deletable = True
+        elif x == "--visible":
+            has_visible = True
+        elif x == "--general":
+            has_general = True
+        elif x == "--type":
+            acl_type = y
+            if acl_type not in ("posix_acl", "posix_extend_acl", "posix_quick_acl"):
+                print "Error(610): Invalid input! "
+                print "Invalid acl type:", acl_type
+                print "Valid types: posix_acl, posix_extend_acl, posix_quick_acl"
+                sys.exit(1)
+
+    if m_name == "help":
+        usage()
+    elif m_name == "set":
+        acl_type = get_client_acl_type()
+        if acl_type in ("posix_acl", "posix_extend_acl"):
+            acl_cmd = "setxacl"
+        elif acl_type == "posix_quick_acl":
+            acl_cmd = "icfs-setfacl"
+        else:
+            error(1709)
+
+        if has_dir and has_recursion and acl_cmd == "setxacl":
+            set_name = ""
+            if has_user:
+                set_name = user_name
+            elif has_group:
+                set_name = group_name
+
+            os.system("python /usr/bin/task-manage acl_set_recursion %s %s %s %s %s %s '%s' %s > /dev/null &"
+                      % (dir_name, str(has_default), str(has_user), str(has_group),
+                         str(has_mask), str(has_other), set_name, acl_value))
+        else:
+            acl_set()
+    elif m_name == "delete":
+        acl_type = get_client_acl_type()
+        if acl_type in ("posix_acl", "posix_extend_acl"):
+            acl_cmd = "setxacl"
+        elif acl_type == "posix_quick_acl":
+            acl_cmd = "icfs-setfacl"
+        else:
+            error(1709)
+
+        if has_dir and has_recursion and acl_cmd == "setxacl":
+            set_name = ""
+            if has_user:
+                set_name = user_name
+            elif has_group:
+                set_name = group_name
+
+            os.system("python /usr/bin/task-manage acl_delete_recursion %s %s %s %s %s '%s' > /dev/null &"
+                      % (dir_name, str(has_default), str(has_user), str(has_group), str(has_mask), set_name))
+        else:
+            acl_delete()
+    elif m_name == "query":
+        acl_type = get_client_acl_type()
+        if acl_type == "posix_quick_acl":
+            acl_cmd = "icfs-getfacl"
+        else:
+            acl_cmd = "getxacl"
+        acl_query()
+    elif m_name == "start":
+        acl_start()
+    elif m_name == "stop":
+        acl_stop()
+    elif m_name == "status":
+        acl_status()
+    # elif m_name == "query_by_page":
+    #     acl_query_by_page()
+    elif m_name == "set_ip":
+        if has_dir and has_ip and has_recursion:
+            os.system("python /usr/bin/task-manage acl_set_ip_recursion %s %s '%s' %s > /dev/null &"
+                      % (dir_name, str(has_default), ip_addr, acl_value))
+        else:
+            acl_set_ip()
+    elif m_name == "delete_ip":
+        if has_dir and has_ip and has_recursion:
+            os.system("python /usr/bin/task-manage acl_delete_ip_recursion %s %s '%s' > /dev/null &"
+                      % (dir_name, str(has_default), ip_addr))
+        else:
+            acl_delete_ip()
+    elif m_name == "query_mode":
+        acl_query_mode()
+    else:
+        error(610)

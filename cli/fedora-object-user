@@ -1,0 +1,325 @@
+#!/usr/bin/python
+# coding:utf-8
+
+
+import sys
+import re
+import pdb
+from icfs_util import run_local_cmd
+import OptParser
+
+
+def usage():
+    print """Help(-h|--help) for icfs-object-user:
+Usage:
+>> icfs-object-user ----+ --create +----><
+                        + --modify  +
+                        ' --delete '
+                       
+Functions: Create/Modify/Delete object user
+Options:
+  --create:  create object user
+  --modify:  modify object user
+  --delete:  delete object user
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-object-user --create:
+Usage: 
+>> icfs-object-user ---- --create ----+------------------+---- --uid uid ---- --displayName displayname ---- --accessKey accessKey ---->
+                                      ' --tenant tenant  '
+>---- --secretKey secretKey ------------><
+                                                                  
+Functions: Create S3 user
+Options:
+  --tenant:    set the tenant name
+  --uid:       the S3 uid
+  --displayName:   the S3 display name
+  --accessKey: the S3 user access key
+  --secretKey: the S3 user secret key
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+>> icfs-object-user ---- --modify ----+------------------+---- --uid uid ---- --oldAccessKey oldaccesskey ---- --oldSecretKey oldsecretkey----------->
+                                     ' --tenant tenant  '
+>---- --newAccessKey newaccesskey ---- --newSecretKey newsecretkey ---- --displayName displayname ---- --email email ----><
+Functions: Modify s3 user information
+Options:
+  --tenant:    set the tenant name
+  --uid:       the S3 uid
+  --displayName: the S3 display name
+  --oldAccessKey: the S3 user old access key
+  --oldSecretKey: the S3 user old secret key
+  --newAccessKey: the S3 user new access key
+  --newSecretKey: the S3 user new secret key
+  --displayName:  the S3 user display name 
+  --email:        the S3 user email address
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+icfs-object-user --delete:
+Usage: 
+>> icfs-object-user ---- --delete ---- --uid uid ----+-- --tenant tenant--+---><
+                                                     '--------------------'
+Functions: Delete S3 user 
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+"""
+
+
+def handlerRet(ret, stdout, stderr):
+    if "failed to parse" in stderr:
+        error(3601)
+        sys.exit(1)
+    elif "no user info saved" in stderr:
+        error(3631)
+        sys.exit(1)
+    elif "could not remove user" in stderr:
+        error(3632)
+        sys.exit(1)
+    elif "user does not exist" in stderr:
+        error(3631)
+        sys.exit(1)
+    elif "duplicate key provided" in stderr:
+        error(3633)
+        sys.exit(1)
+    elif "existing S3 key in RGW system" in stderr:
+        error(3633)
+        sys.exit(1)
+    elif "email address an existing" in stderr:
+        error(3634)
+        sys.exit(1)
+    elif "unable to find access key" in stderr:
+        error(3635)
+        sys.exit(1)
+    elif "no display name specified" in stderr:
+        error(3636)
+        sys.exit(1)
+    elif "on the anonymous user" in stderr:
+        error(3637)
+        sys.exit(1)
+    
+
+
+def error(error_number):
+    if 3631 == error_number:
+        print "Error(3631): user not found"
+    elif 3632 == error_number:
+        print "Error(3632):unable to remove user, must specify purge data to remove user with buckets"
+    elif 3633 == error_number:
+        print "Error(3633): unable to create or modify keys, this access key has been used"
+    elif 3634 == error_number:
+        print "Error(3634): unable to create or modify email, the email address has been used"
+    elif 3635 == error_number:
+        print "Error(3635): unable to remove access key, unable to find access key"
+    elif 3636 == error_number:
+        print "Error(3636): Input should contain display name"
+    elif 3637 == error_number:
+        print "Error(3637): unable to perform operations on the anonymous user"
+    elif 3639 == error_number:
+        print "Error(3639): UserExisting"
+    elif 3640 == error_number:
+        print "Error(3640): Invalid Input, only contain digit or alpha and length 6-32"
+    elif 3641 == error_number:
+        print "Error(3641): user name only contain digit or alpha or _ or - and length 1-255"
+    elif 3642 == error_number:
+        print "Error(3642): Invalid email format"
+
+
+def check_input(input_str):
+    if re.match('^[0-9a-zA-Z]+$',input_str) and len(input_str)>5 and len(input_str)<33:
+        return 0
+    else:
+        return -1
+
+def check_username(input_str):
+    if re.match('^[0-9a-zA-Z_-]+$',input_str) and len(input_str)>0 and len(input_str)<256:
+        return 0
+    else:
+        return -1
+
+def check_email(email):
+    str1=r'^[0-9a-zA-Z_-]+(\.[0-9a-zA-Z_-]+){0,4}@[0-9a-zA-Z_-]+(\.[0-9a-zA-Z_-]+){0,4}$'
+    if re.match(str1,email):
+        return 0
+    else:
+        return -1
+
+def s3_create_user():
+    if email:
+        str1 = " --email %s " % email
+    else:
+        str1 = ""
+
+    if accessKey:
+        str2 = " --access-key %s " % accessKey
+    else:
+        str2 = ""
+
+    if secretKey:
+        str3 = " --secret %s " % secretKey
+    else:
+        str3 = ""
+    if not has_tenant:
+        ret = run_local_cmd("radosgw-admin user info --uid=%s --name client.radosgw.gateway" % (uid))
+        if ret["retcode"] == 0:
+            error(3639)
+            sys.exit(1)
+        if accessKey:
+            ret = run_local_cmd("rados ls -p default.rgw.users.keys 2>/dev/null | grep %s" % accessKey)
+            if ret["stdout"]:
+                error(3633)
+                sys.exit(1)
+        ret = run_local_cmd("radosgw-admin user create --uid=%s --display-name=%s --name client.radosgw.gateway" % (uid, display_name) + str1 + str2 + str3)
+    else:
+        ret = run_local_cmd("radosgw-admin user info --tenant=%s --uid=%s --name client.radosgw.gateway" % (tenant, uid))
+        if ret["retcode"] == 0:
+            error(3639)
+            sys.exit(1)
+        if accessKey:
+            ret = run_local_cmd("rados ls -p default.rgw.users.keys 2>/dev/null | grep %s" % accessKey)
+            if ret["stdout"]:
+                error(3633)
+                sys.exit(1)
+        ret = run_local_cmd("radosgw-admin user create --uid=%s --display-name=%s --tenant=%s --name client.radosgw.gateway" % (uid, display_name, tenant) + str1 + str2 + str3)
+    handlerRet(ret["retcode"], ret["stdout"], ret["stderr"])
+    print "success"
+    sys.exit(0)
+
+
+def s3_delete_user():
+    if not has_tenant:
+        ret = run_local_cmd("radosgw-admin user rm --purge-data --uid=%s --name client.radosgw.gateway" % uid)
+    else:
+        ret = run_local_cmd("radosgw-admin user rm --purge-data --tenant=%s --uid=%s --name client.radosgw.gateway" % (tenant, uid))
+    handlerRet(ret["retcode"], ret["stdout"], ret["stderr"])
+    print "success"
+    sys.exit(0)
+
+
+def s3_modify_user():
+    if email:
+        str1 = " --email %s " % email
+    else:
+        str1 = ""
+    if display_name:
+        str2 = " --display-name %s " % display_name
+    else:
+        str2 = ""
+    if not has_tenant:
+        rm_ret = run_local_cmd("radosgw-admin key rm  --uid=%s --access-key=%s --secret=%s --name client.radosgw.gateway" % (uid, oldAcessKey, oldSecretKey))
+
+        create_ret = run_local_cmd("radosgw-admin key create  --uid=%s --access-key=%s --secret=%s --name client.radosgw.gateway" % (uid, newAcessKey, newSecretKey))
+        modify_ret = run_local_cmd("radosgw-admin user modify  --uid=%s --name client.radosgw.gateway" % uid + str1 + str2)
+
+    else:
+        rm_ret = run_local_cmd("radosgw-admin key rm --tenant=%s --uid=%s --access-key=%s --secret=%s --name client.radosgw.gateway"
+                             % (tenant, uid, oldAcessKey, oldSecretKey))
+        create_ret = run_local_cmd("radosgw-admin key create --tenant=%s --uid=%s --access-key=%s --secret=%s --name client.radosgw.gateway"
+                             % (tenant, uid, newAcessKey, newSecretKey))
+        modify_ret = run_local_cmd("radosgw-admin user modify --tenant=%s --uid=%s --name client.radosgw.gateway" % (tenant, uid) + str1 + str2)
+    handlerRet(rm_ret["retcode"], rm_ret["stdout"], rm_ret["stderr"])
+    handlerRet(create_ret["retcode"], create_ret["stdout"], create_ret["stderr"])
+    handlerRet(modify_ret["retcode"], modify_ret["stdout"], modify_ret["stderr"])
+    print "success"
+    sys.exit(0)
+    
+
+def s3_query_user():
+    query_ret = run_local_cmd("rados ls -p default.rgw.users.uid 2>/dev/null|grep '\$'|awk -F '$' '{print $1}'|sort|uniq")
+    print query_ret["stdout"]
+
+if __name__ == '__main__':
+    uid = None
+    tenant = None
+    display_name = None
+    accessKey = None
+    secretKey = None
+    oldAcessKey = None
+    oldSecretKey = None
+    newAcessKey = None
+    newSecretKey = None
+    email = None
+    has_tenant = False
+
+    try:
+        opt_parser = OptParser.OptParser()
+        # help
+        opt_parser.append("help", "{-h|--help}")
+        # create S3 user
+        opt_parser.append("create_user", "--create[--tenant=]--uid=,--displayName=[--accessKey=][--secretKey=][--email=]")
+        # delete S3 user
+        opt_parser.append("delete_user", "--delete,--uid=[--tenant=]")
+        # modify S3 user
+        opt_parser.append("modify_user", "--modify[--tenant=]--uid=,--oldAccessKey=,--oldSecretKey=,--newAccessKey=,"
+                                         "--newSecretKey=[--displayName=][--email=]")
+        # query S3 user
+        opt_parser.append("query_user", "--lstenant")
+        m_name, m_opts = opt_parser.parse(sys.argv[1:])
+    except Exception, e:
+        print "Error(3600): Input Error, get help use ‘-h|--help ! "
+        sys.exit(1)
+
+    for ops, arg in m_opts:
+        if ops == "--uid":
+            uid = arg
+            if (check_input(uid) < 0):
+                error(3640)
+                sys.exit(1)
+        elif ops == "--tenant":
+            tenant = arg
+            has_tenant = True
+        elif ops == "--displayName":
+            display_name = arg
+            if (check_username(display_name) < 0):
+                error(3641)
+                sys.exit(1)
+        elif ops == "--accessKey":
+            accessKey = arg
+            if (check_input(accessKey) < 0):
+                error(3640)
+                sys.exit(1)
+        elif ops == "--secretKey":
+            secretKey = arg
+            if (check_input(secretKey) < 0):
+                error(3640)
+                sys.exit(1)
+        elif ops == '--oldAccessKey':
+            oldAcessKey = arg
+        elif ops == '--oldSecretKey':
+            oldSecretKey = arg
+        elif ops == '--newAccessKey':
+            newAcessKey = arg
+            if (check_input(newAccessKey) < 0):
+                error(3640)
+                sys.exit(1)
+        elif ops == '--newSecretKey':
+            newSecretKey = arg
+            if (check_input(newSecretKey) < 0):
+                error(3640)
+                sys.exit(1)
+        elif ops == "--email":
+            email = arg
+            if (check_email(email) < 0):
+                error(3642)
+                sys.exit(1)
+
+    if m_name == "help":
+        usage()
+    elif m_name == "create_user":
+        s3_create_user()
+    elif m_name == "delete_user":
+        s3_delete_user()
+    elif m_name == "modify_user":
+        s3_modify_user()
+    elif m_name == "query_user":
+        s3_query_user()
+    else:
+        usage()
+        sys.exit(1)
+

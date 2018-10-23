@@ -1,0 +1,64 @@
+#!/usr/bin/python
+#coding:utf-8
+# -*- copyright -*-
+
+import sys
+import getopt
+import commands
+import re
+from icfs_util import error
+from FunctionTimeout import FunctionTimeout
+
+# 2018-1-12
+@FunctionTimeout(timeout=40)
+def network_query(node):
+    #run remote shell with ssh 
+    net_info = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' 'network-local-query' " % (node))
+    if net_info[0] != 0:
+        error('3002')
+    else:
+        net_line = net_info[1].splitlines()
+        for net in net_line:
+            print net.strip()
+
+def help():
+
+    print '''Help(-h|--help)for icfs-system-network:
+Usage:
+>> icfs-system-network -- --node node ---- --query --------------------------------><
+Functions: Query netcards info
+Options:
+  --query:  query netcards info
+  --node:   node name
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0)
+    
+if __name__ == '__main__':
+
+    try:
+        opts,argv = getopt.getopt(sys.argv[1:], ('h'), ['node=', 'query', 'help'])
+    except getopt.GetoptError,err:
+        error('002')
+    if '-h' in sys.argv or '--help' in sys.argv:
+        if len(opts) != 1 or argv !=[]:
+            error('002')
+        else:help()
+    if argv != [] or len(opts) != 2:
+        error('002')
+    for k,v in opts:
+        if '--node' in k:
+            if '--node' not in sys.argv or '--node' != sys.argv[1]:
+                error('002')
+            node = v
+        elif '--query' in k:
+            if '--query' not in sys.argv or '--query' != sys.argv[3]:
+                error('002')
+            operation = 'query'
+        else :
+            error('002')
+    if operation == 'query':
+        network_query(node)
+    else:
+        error('002')

@@ -1,0 +1,2444 @@
+#!/usr/bin/env python
+# coding:utf-8
+# -*- copyright -*-
+
+import os
+import re
+import time
+import subprocess
+import icfs_log
+import json
+import copy
+import prettytable as pt
+import math
+import getopt
+import sys
+import threading
+import uuid
+# import socket
+# from itertools import izip
+from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import cpu_count
+from collections import defaultdict
+
+JOURNAL_TYPE_CODE = "45b0969e-9b03-4f30-b4c6-b4b80ceff106"
+OSD_TYPE_CODE = "4fbd7e29-9d25-41b8-afd0-062c0ceff05d"
+icfs_disk_info = None
+raid_disk_info = None
+disk_regx = "^[1-9]\d*[KMGTP]$"
+
+
+class Disk:
+    def __init__(self):
+        self.parts = []
+
+    def to_dict(self):
+        disk = copy.deepcopy(self)
+        disk.parts = [part.__dict__ for part in disk.parts]
+        return disk.__dict__
+
+
+class Result:
+    def __init__(self):
+        self.code = 0
+        self.mess = ""
+
+
+class Opts:
+    def __init__(self, init_dic=None):
+        if init_dic:
+            self.__dict__.update(init_dic)
+
+    def has_param(self, param_name):
+        params = self.__dict__.keys()
+        if param_name in params:
+            return True
+        else:
+            return False
+
+    def __getattr__(self, param):
+        try:
+            return self.__dict__[param]
+        except:
+            _exit_with_error("Error(610): Invalid input. have no paramter: %s" % param)
+
+
+# cmd: command to run on LOCALHOST
+# return value: returncode, standard output, standard error
+#      such as: 0, 'abc', ''
+def _run_local_cmd(cmd, shell=True, timeout=0):
+    """
+    run local command, support timeout
+    :param cmd: command strings
+    :param shell:
+    :param timeout: timeout flag , time accuracy is 0.01 seconds. default timeout=0: don't return until command run over
+    :return: {returncode, standard output, standard error}
+             such as: 0, 'abc', ''}
+    """
+    # p is running:               p.poll()=None,  type NoneType
+    # p is killed by p.kill():    p.poll()=-9,    type int
+    # p is successed:             p.poll()=0,     type int
+    log.debug(cmd)
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=shell)
+    # wait process timeout seconds
+    if timeout > 0:
+        time_tmp = timeout
+        wait = True
+    else:
+        time_tmp = 0
+        wait = False
+    # time out
+    while p.poll() is None and timeout > 0:
+        time.sleep(0.01)
+        timeout -= 0.01
+    # if do wait and p is running, p is timeout
+    if wait and p.poll() is None:
+        try:
+            p.kill()
+        except:
+            pass
+        log.error(cmd + " timeout after %s" % str(time_tmp))
+        return 1, "", "command is timeout. after %s. " % str(time_tmp) + cmd
+    # get command stdour
+    stdout, stderr = p.communicate()
+    # get retcode
+    retcode = p.returncode
+    if p.stdout:
+        p.stdout.close()
+    if p.stderr:
+        p.stderr.close()
+    if p.stdin:
+        p.stdin.close()
+    stdout = stdout.rstrip("\n")
+    stderr = stderr.rstrip("\n")
+    if retcode:
+        log.error(cmd + " result---> " + str({"retcode": retcode, "stdout": stdout, "stderr": stderr}))
+    return retcode, stdout, stderr
+
+
+def _run_remote_cmd(cmd, node, connect_timeout=5, not_print_flag=False):
+    """
+    run remote cmd via ssh
+    :param cmd: comand line , should not content "'"
+    :param node: remote host name
+    :param connect_timeout: connect timeout.
+    :return:
+    """
+    if connect_timeout > 0:
+        cmd = "ssh -o ConnectTimeout=%s root@%s" % (str(connect_timeout), node) + " '" + cmd + "'"
+    else:
+        cmd = "ssh root@%s" % node + " '" + cmd + "'"
+    log.debug(cmd)
+    retcode, stdout, stderr = _run_local_cmd(cmd)
+    if retcode == 255:
+        stdout = "Error(057): Remote hosts %s is not accessable" % node
+        if opts.has_param("json"):
+            tmp_dict = dict()
+            tmp_dict["mess"] = stdout
+            stdout = json.dumps(tmp_dict)
+    if retcode:
+        if not_print_flag:
+            log.info(cmd + "result--->" + str({"retcode": retcode, "stdout": stdout, "stderr": stderr}))
+        else:
+            log.error(cmd + "result--->" + str({"retcode": retcode, "stdout": stdout, "stderr": stderr}))
+    if "Error(" in stdout:
+        return retcode, stdout, stdout
+    return retcode, stdout, stderr
+
+
+def unit_convert(size):
+    units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+    base = 1024
+    size = float(size)
+    i = math.floor(math.log(size, base))
+    i = int(i)
+    return ('%0.2f' + units[i]) % (size / math.pow(1024, i))
+
+
+def get_size_in_byte(size):
+    size = size.upper()
+    units = {"K": 1024,
+             "M": 1024*1024,
+             "G": 1024*1024*1024,
+             "T": 1024*1024*1024*1024,
+             "p": 1024*1024*1024*1024*1024}
+    if not re.match(disk_regx, size):
+        return 0
+    tmp = re.sub("[KMGTP]", "", size)
+    unit = re.sub("\d*", "", size)
+    return int(tmp) * units[unit]
+
+
+def _exit_with_error(errinfo):
+    result = Result()
+    result.code = 1
+    result.mess = errinfo
+    if "--json" in sys.argv[1:]:
+        print json.dumps(result.__dict__)
+    else:
+        print result.mess
+    sys.exit(1)
+
+
+def _list_dir(dir):
+    """
+    list dir
+    :param dir: path
+    :return: code, file name list
+    """
+    try:
+        log.debug("list dir %s" % dir)
+        files = os.listdir(dir)
+        log.debug(files)
+        return 0, files
+    except OSError, e:
+        log.error(e)
+        return 1, "Error(701): No such path"
+
+
+def _get_disk_info(disk_info, conver_size=True):
+    """
+    from disk_info create disk object
+    :param disk_info: like this:
+    :conver_size:
+    # [NAME=sdd, TYPE=disk, MOUNTPOINT=, SIZE=4000787030016, ROTA=1]
+    or
+    # [NAME=sdd1, TYPE=part, MOUNTPOINT=/var/lib/icfs/osd/icfs-2, SIZE=3995417255424, ROTA=1]
+    :return:
+    """
+    try:
+        disk = Disk()
+        disk.isosd = False
+        disk.osd = "None"
+        disk.name = disk_info[0].split("=")[1]
+        disk.type = disk_info[1].split("=")[1]
+        disk.mountpoint = disk_info[2].split("=")[1]
+        if conver_size:
+            disk.size = unit_convert(disk_info[3].split("=")[1])
+        else:
+            disk.size = disk_info[3].split("=")[1]
+        if raid_disk_info:
+            name_tmp = re.match(r"(/dev/[a-z]*)(\d?)", disk.name).group(1)
+            if raid_disk_info. has_key(name_tmp):
+                disk.medium = "SSD" if "SSD" in raid_disk_info[name_tmp][1] else "HDD"
+        else:
+            disk.medium = "HDD" if int(disk_info[4].split("=")[1]) == 1 else "SSD"
+        return 0, disk
+    except Exception, e:
+        log.error(e)
+        return 1, ""
+
+
+def set_disk_osd_info(disk):
+    global icfs_disk_info
+    disk_info_jsons = json.loads(icfs_disk_info)
+    disk_info_json = None
+    disk_label = disk.name
+    for tmp in disk_info_jsons:
+        if disk_label == tmp["path"]:
+            disk_info_json = tmp
+            break
+    if disk_info_json is None:
+        return
+    else:
+        if not disk_info_json. has_key("partitions"):
+            return
+        else:
+            parts = disk_info_json["partitions"]
+            stderr, fsid, stdout = _run_local_cmd("icfs-osd --show-config-value=fsid")
+            if fsid == "00000000-0000-0000-0000-000000000000":
+                return
+            else:
+                for part in parts:
+                    part_name = part["path"]
+                    if "type" in part.keys():
+                        if part["type"] == "journal":
+                            for part_disk in disk.parts:
+                                if part_disk.name == part_name:
+                                    part_disk.isosd = True
+                                    part_disk.osd = "journal"
+                                    # disk.isosd = True
+                                    # disk.osd = ""
+                                    break
+                        if part["type"] == "data":
+                            if "icfs_fsid" in part.keys():
+                                fsid_tmp = part["icfs_fsid"]
+                                if fsid_tmp == fsid:
+                                    whomi = part["whoami"]
+                                    for part_disk in disk.parts:
+                                        if part_disk.name == part_name:
+                                            part_disk.isosd = True
+                                            part_disk.osd = "osd."+str(whomi)
+                                            disk.isosd = True
+                                            disk.osd = ""
+                                            break
+
+
+def get_disk_info(disk_label, conver_size=True, check_osd=False):
+    """
+    get disk mount info, size,
+    :param disk_label:
+    :param conver_size: conver byte to M or G or T
+    :param check_osd: check osd info or not
+    :return:
+    """
+    try:
+        # result like this
+        # NAME="sdd" TYPE="disk" MOUNTPOINT="" SIZE="4000787030016" ROTA="1"
+        # NAME="sdd1" TYPE="part" MOUNTPOINT="/var/lib/icfs/osd/icfs-2" SIZE="3995417255424" ROTA="1"
+        # NAME="sdd2" TYPE="part" MOUNTPOINT="" SIZE="5368709120" ROTA="1"
+        retcode, stdout, stderr = _run_local_cmd("lsblk %s -b -p -P -o NAME,TYPE,MOUNTPOINT,SIZE,ROTA" % disk_label,
+                                                 timeout=3)
+        if retcode:
+            return 1, "Error(701): No such path. %s" % disk_label
+        else:
+            infos = stdout.replace("\"", "").splitlines()
+            error, disk = _get_disk_info(infos.pop(0).split(" "), conver_size)
+            if error:
+                return 1, "Error(553): Unknown error. get disk info: %s" % disk
+            for info in infos:
+                error, part = _get_disk_info(info.split(" "), conver_size)
+                if error:
+                    return 1, "Error(553): Unknown error. get disk info: %s" % part
+                disk.parts.append(part)
+            if check_osd:
+                set_disk_osd_info(disk)
+            return 0, disk
+    except Exception, e:
+        log.error(e)
+        return 1, "Error(553): Unknown error. get disk info: %s" % str(e)
+
+
+def get_disk_list(conver_size=True, check_osd=False):
+    """
+    get disk info
+    :return: disk list
+    """
+    error, disks = _list_dir("/sys/block")
+    if error:
+        return 1, disks
+    disk_label_list = ["/dev/" + disk for disk in disks if re.match("^(sd|hd|vd).*$", disk)]
+    disk_list = []
+    for disk_label in disk_label_list:
+        error, disk = get_disk_info(disk_label, conver_size, check_osd=check_osd)
+        if not error:
+            disk_list.append(disk)
+        else:
+            return 1, disk
+    return 0, disk_list
+
+
+def get_raid_disk_info():
+    retcode, stdout, stderr = _run_local_cmd("storcli64 show J")
+    if retcode:
+        log.warning("get raid card info error. %s " % stderr)
+        return None
+    try:
+        jsoninfo = json.loads(stdout)
+        Controllers = jsoninfo["Controllers"]
+        Number_of_Controllers = 0
+        for control in Controllers:
+            Number_of_Controllers += int(control["Response Data"]["Number of Controllers"])
+        if Number_of_Controllers > 0:
+            retcode, disk_info, stderr = _run_local_cmd("icfs-system-disk --disk --checktype")
+            if retcode:
+                log.error(stderr)
+                return None
+            else:
+                return_dict = {}
+                for tmp in disk_info.splitlines():
+                    return_dict[tmp.split()[0]] = tmp.split()[1:]
+                return return_dict
+    except Exception, e:
+        log.error("get raid card info error. %s" % e)
+        return None
+
+
+def print_disk_info(disks=None, format_out_put="pretty", check_osd=False):
+    """
+    get json string or lsblk like string
+    :param disks: get disk's info which in disk_list
+    :param format_out_put: default pretty , if json is gaven , return json format
+    :param check_osd: check disk is osd or not
+    :return: code, info
+    """
+    result = Result()
+    global raid_disk_info
+    raid_disk_info = get_raid_disk_info()
+    if check_osd:
+        global icfs_disk_info
+        error, icfs_disk_info, stderr = _run_local_cmd("icfs-disk list --format json")
+        if error:
+            result.code = 1
+            result.mess = "Error(1406): Get disk info error. icfs-disk list error"
+            return result
+    if not disks:
+        log.info("start get all disk info...")
+        error, disk_list = get_disk_list(check_osd=check_osd)
+        if error:
+            result.code = 1
+            result.mess = disk_list
+            return result
+    else:
+        disk_list = []
+        log.info("start get some disks info...")
+        for device in disks:
+            error, disk = get_disk_info(device, check_osd=check_osd)
+            if not error:
+                disk_list.append(disk)
+            else:
+                result.code = 1
+                result.mess = disk
+                return result
+    if "json" == format_out_put:
+        disk_list = [disk.to_dict() for disk in disk_list]
+        try:
+            result.mess = disk_list
+            return result
+        except Exception, e:
+            result.mess = str(e)
+            result.code = 1
+            return result
+    else:
+        if opts.has_param("checkosd"):
+            print_table = pt.PrettyTable(field_names=["NAME", "TYPE", "SIZE", "MEDIUM", "OSD", "MOUNTPOINT"], encoding="utf-8")
+        else:
+            print_table = pt.PrettyTable(field_names=["NAME", "TYPE", "SIZE", "MEDIUM", "MOUNTPOINT"], encoding="utf-8")
+        print_table.set_style(pt.PLAIN_COLUMNS)
+        print_table.right_padding_width = 2
+        for disk in disk_list:
+            if opts.has_param("checkosd"):
+                print_table.add_row([disk.name, disk.type, disk.size, disk.medium, disk.osd, disk.mountpoint])
+            else:
+                print_table.add_row([disk.name, disk.type, disk.size, disk.medium, disk.mountpoint])
+            total = len(disk.parts)
+            for now, disk_part in enumerate(disk.parts):
+                if now == total - 1:
+                    if opts.has_param("checkosd"):
+                        print_table.add_row(
+                            [str("└─") + disk_part.name, disk_part.type, disk_part.size, disk_part.medium,
+                             disk_part.osd, disk_part.mountpoint])
+                    else:
+                        print_table.add_row([str("└─") + disk_part.name, disk_part.type, disk_part.size,
+                                             disk_part.medium, disk_part.mountpoint])
+                else:
+                    if opts.has_param("checkosd"):
+                        print_table.add_row(
+                            [str("├─") + disk_part.name, disk_part.type, disk_part.size, disk_part.medium,
+                             disk_part.osd, disk_part.mountpoint])
+                    else:
+                        print_table.add_row([str("├─") + disk_part.name, disk_part.type, disk_part.size,
+                                             disk_part.medium, disk_part.mountpoint])
+        # align left
+        print_table.align = 'l'
+        result.mess = str(print_table.get_string())
+        return result
+
+
+def _check_disk_is_mounted_or_not(disk):
+    """
+    check disk is mounted or not.
+    :param disk: disk object
+    :return:
+    """
+    mounted = False
+    mess = ""
+    if disk.mountpoint != "":
+        mounted = True
+        mess = "Error(752): Disk is mounted %s" % disk.name
+    else:
+        # check partition is mounted or not
+        for part in disk.parts:
+            if part.mountpoint != "":
+                mounted = True
+                mess = "Error(752): Disk is mounted %s" % part.name
+                break
+    return mounted, mess
+
+
+def delete_part(device, parts_need_delete):
+    """
+    delete parts on disk
+    :param device: disk path, like: /dev/sdb or /dev/sdb,/dev/sdc
+    :param parts_need_delete: parts split by ',' like: "/dev/sdb2,/dev/sdb3" or ALL
+    :return:
+    """
+    result = Result()
+    log.debug("start delete parts: %s on %s" % (parts_need_delete, device))
+    disk_list = device.split(",")
+    if len(disk_list) > 1 and parts_need_delete != "ALL":
+        result.code = 1
+        result.mess = "Error(610): Invalid input. more than one disk --parts should be 'ALL'."
+        return result
+
+    # zap more than one disks
+    if len(disk_list) > 1:
+        mess_json = dict()
+        for device in disk_list:
+            log.debug("zap disk: %s" % device)
+            error, disk = get_disk_info(device)
+            if error:
+                result.code = 1
+                result.mess += device + ":" + disk + "\n"
+                mess_json[device] = disk
+                continue
+            if disk.type != "disk":
+                result.code = 1
+                result.mess += device + ":" + "Error(610): Invalid inpur. --disk should be disk\n"
+                mess_json[device] = "Error(610): Invalid inpur. --disk should be disk"
+                continue
+            # check disk is mount or not
+            mounted, mess = _check_disk_is_mounted_or_not(disk)
+            if mounted:
+                result.code = 1
+                result.mess += disk.name + ":" + mess + "\n"
+                mess_json[device] = mess
+                continue
+            retcode, stdout, stderr = _run_local_cmd("icfs-disk zap %s" % device, timeout=120)
+            # retcode, stdout, stderr = _run_local_cmd("sgdisk --zap-all %s" % device, timeout=120)
+            if retcode:
+                result.code = 1
+                result.mess += device + ":" + "Error(1418): Delete prttition error. %s\n" % stderr
+                mess_json[device] = "Error(1418): Delete prttition error. %s" % stderr
+            else:
+                result.mess += device + ":success\n"
+                mess_json[device] = "success"
+            # reload fstab
+            _run_local_cmd("partprobe %s" % device)
+        if opts.has_param("json"):
+            result.mess = mess_json
+        return result
+    # delete one disk
+    else:
+        mess_json = dict()
+        error, disk = get_disk_info(device)
+        if error:
+            result.code = 1
+            result.mess = disk
+            return result
+        # zap disk
+        if parts_need_delete == "ALL":
+            # check disk is mount or not
+            mounted, mess = _check_disk_is_mounted_or_not(disk)
+            if mounted:
+                result.code = 1
+                if opts.has_param("json"):
+                    mess_json[disk.name] = mess
+                    result.mess = mess_json
+                else:
+                    result.mess += disk.name + ":" + mess
+                return result
+            retry = 1
+            while True:
+                # delete all parts on the disk
+                retcode, stdout, stderr = _run_local_cmd("icfs-disk zap %s" % device, timeout=120)
+                if retcode:
+                    if retry > 0:
+                        log.info("Because of the zap disk fail, retry %d times" % (2 - retry))
+                        time.sleep(1)
+                    else:
+                        result.code = 1
+                        result.mess = device + ":" + "Error(1418): Delete prttition error. " + stderr
+                        if opts.has_param("json"):
+                            mess_json[disk.name] = stderr
+                            result.mess = mess_json
+                        else:
+                            result.mess = device + ":" + "Error(1418): Delete prttition error. " + stderr
+                        return result
+                else:
+                    if opts.has_param("json"):
+                        mess_json[disk.name] = "success"
+                        result.mess = mess_json
+                    else:
+                        result.mess = device + ":" + "success"
+                    break
+                retry -= 1
+            _run_local_cmd("partprobe %s" % device)
+        # delete some parts
+        else:
+            parts = parts_need_delete.split(",")
+            parts = sorted(parts, reverse=True)
+            for part in parts:
+                try:
+                    # check part is mounted or not
+                    error, part_obj = get_disk_info(part)
+                    if error:
+                        if opts.has_param("json"):
+                            mess_json[part] = part_obj
+                            result.mess = mess_json
+                        else:
+                            result.mess += part + ":" + part_obj + "\n"
+                        result.code = 1
+                        return result
+                    # check partition is mounted or not
+                    mounted, mess = _check_disk_is_mounted_or_not(part_obj)
+                    if mounted:
+                        result.code = 1
+                        if opts.has_param("json"):
+                            mess_json[part] = mess
+                            result.mess = mess_json
+                        else:
+                            result.mess = part + ":" + mess + "\n"
+                        return result
+                    # get part number
+                    partnum = int(re.sub(device, "", part))
+                    log.debug("part: %s part number: %s" % (part, partnum))
+                    retcode, stdout, stderr = _run_local_cmd("sgdisk -d %d %s" % (partnum, device))
+                    log.debug("sgdisk -d %d %s. result: %d; %s; %s." % (partnum, device, retcode, stdout, stderr))
+                    if retcode:
+                        result.code = 1
+                        if "out of range" in stderr:
+                            result.mess += part + ":" + "Error(1414): No such partition. %s\n" % part
+                        else:
+                            result.mess += part + ":" + "Error(553): Unknown error. %s\n" % stderr
+                        if opts.has_param("json"):
+                            if "out of range" in stderr:
+                                mess_json[part] = "Error(1414): No such partition."
+                            else:
+                                mess_json[part] = "Error(553): Unknown error. %s " % stderr
+                            result.mess = mess_json
+                        return result
+                except:
+                    result.code = 1
+                    result.mess = part + ":" + "Error(1411): Can not get partition's partition number. partition:%s\n" % part
+                    if opts.has_param("json"):
+                        mess_json[part] = "Error(1411): Can not get partition's partition number."
+                        result.mess = mess_json
+                    return result
+                if opts.has_param("json"):
+                    mess_json[part] = "success"
+                else:
+                    result.mess += part + ":" + "success\n"
+            _run_local_cmd("partprobe %s" % device)
+    return result
+
+
+def _check_new_part_create_result(*args, **kwargs):
+    """
+    check part is create success or not
+    :param args: device_name, part_number
+    :return: create success return True, create error return False
+    """
+    log.info("check create_new_part success or not %s, %s" % (str(args), str(kwargs)))
+    device_name = args[0]
+    part_number = args[1]
+    time.sleep(1)
+    # _run_local_cmd("partprobe %s" % device_name)
+    # retcode, stdout, stderr = _run_local_cmd("ls %s%d" % (device_name, part_number))
+    # if retcode:
+    #     return False
+    # else:
+    retcode, stdout, stderr = _run_local_cmd("sgdisk -i %d %s" % (part_number, device_name))
+    if "does not exist" in stdout:
+        return False
+    else:
+        return True
+
+
+def check_func_result(func, *args, **kwargs):
+    """
+    cal check function
+    :param func: function name
+    :param args: param of func
+    :return: True or False
+    """
+    wait_step = [1, 1, 1, 2, 2, 2, 3, 3, 5, 10, 10, 20, 20, 30]
+    for index, i in enumerate(wait_step):
+        log.info(str(func) + " wait %d times." % index)
+        time.sleep(i)
+        if func(*args, **kwargs):
+            return True
+    return False
+
+
+def create_new_part(device_name, part_size, part_number=0):
+    """
+    create new part on disk
+    :param device_name: device path
+    :param part_size: integer. kibibytes (K), mebibytes (M), gibibytes (G), tebibytes (T), or pebibytes (P). 0K|M|G|T|P
+    :param part_number: partition number
+    :return: code, info
+    """
+    if part_size == "largest-new":
+        retcode, stdout, stderr = _run_local_cmd("sgdisk -n %s:0:0 %s" % (part_number, device_name))
+    elif not re.match(disk_regx, part_size):
+        return 1, "Error(1410): Partition size format error"
+    else:
+        retcode, stdout, stderr = _run_local_cmd("sgdisk -n %s:0:+%s %s" % (part_number, part_size, device_name))
+    # check create success or not
+    if retcode:
+        return 1, "Error(553): Unknown error. %s %s " % (device_name, stderr)
+    else:
+        time.sleep(1)
+        _run_local_cmd("partprobe %s" % device_name)
+        time.sleep(1)
+        return 0, "success"
+
+
+def _check_part_info_result(*args, **kwargs):
+    """
+    check partition info set success or not
+    :param args: disk_label, partition_number
+    :param kwargs: part_name:xxx, partguid:xxx, typecode:xxx, retry:xxx
+    :return: True or False
+    """
+    log.info("check partition info %s, %s" % (str(args), str(kwargs)))
+    disk_label = args[0]
+    partition_number = args[1]
+    partition_number = str(partition_number)
+    retcode, stdout, stderr = _run_local_cmd("sgdisk -i %s %s" % (partition_number, disk_label))
+    if retcode:
+        return False
+    else:
+        log.info("sgdisk -i %s %s" % (partition_number, disk_label) + "\n" + stdout)
+    # disk info like this:
+    # Partition GUID code: 4FBD7E29-9D25-41B8-AFD0-062C0CEFF05D (Unknown)
+    # Partition unique GUID: 04377E58-CF30-4B7E-992E-708A713F0BAD
+    # First sector: 10487808 (at 5.0 GiB)
+    # Last sector: 209715166 (at 100.0 GiB)
+    # Partition size: 199227359 sectors (95.0 GiB)
+    # Attribute flags: 0000000000000000
+    # Partition name: 'icfs data'
+    lines = stdout.splitlines()
+    partinfo_dict = {}
+    for line in lines:
+        key, value = line.split(":")
+        partinfo_dict[key.strip()] = value.strip()
+    success = True
+    part_name = None
+    partguid = None
+    typecode = None
+    if kwargs. has_key("part_name"):
+        part_name = kwargs["part_name"]
+        if part_name not in partinfo_dict["Partition name"]:
+            success = False
+    if kwargs. has_key("partguid"):
+        partguid = kwargs["partguid"]
+        if partguid not in partinfo_dict["Partition unique GUID"].lower():
+            success = False
+    if kwargs. has_key("typecode"):
+        typecode = kwargs["typecode"]
+        if typecode.lower() not in partinfo_dict["Partition GUID code"].lower():
+            success = False
+    if success:
+        return True
+    elif kwargs["retry"]:
+        if part_name:
+            set_part_info(disk_label, partition_number, part_name=part_name)
+        if partguid:
+            set_part_info(disk_label, partition_number, partguid=partguid)
+        if typecode:
+            set_part_info(disk_label, partition_number, typecode=typecode)
+        return False
+    else:
+        return False
+
+
+def set_part_info(disk_label, partition_number, part_name=None, partguid=None, typecode=None):
+    """
+    set partition info
+    :param disk_label: disk name like: /dev/sdb
+    :param partition_number: partition number. 1 or 2 or 3 ...
+    :param part_name: partition name. 'icfs data', 'journal' ...
+    :param partguid: partition uuid. used by /dev/disk/by-partuuid
+    :param typecode: partition type code. used by udev rules. start osd when server power on.
+    :return: code, info
+    """
+    cmd = "sgdisk"
+    partition_number = str(partition_number)
+    if part_name:
+        cmd += " --change-name='%s:%s'" % (partition_number, part_name)
+    if partguid:
+        cmd += " --partition-guid='%s:%s'" % (partition_number, partguid)
+    if typecode:
+        cmd += " --typecode='%s:%s'" % (partition_number, typecode)
+    cmd += " " + disk_label
+    retcode, stdout, stderr = _run_local_cmd(cmd, timeout=20)
+    if retcode:
+        log.error("set partition info error.  %s  %s" % (disk_label, partition_number))
+        return 1, "Error(1422): Set partition info error. %s" % stderr
+    else:
+        log.info(cmd + ":result:" + stdout)
+        return 0, "success"
+
+
+def create_part_by_part_size(disk_label, size):
+    """
+    create partition by size
+    :param disk_label: disk label, like this: /dev/sdb
+    :param size: new partitions size
+    :return:
+    """
+    result = Result()
+    log.info("start create new partition by size...")
+    size_list = size.split(",")
+    size_count = 0
+    largest_new = False
+    mess_dict = dict()
+    for index, psize in enumerate(size_list):
+        if index == len(size_list) - 1:
+            if psize == "largest-new":
+                largest_new = True
+            elif re.match(disk_regx, psize):
+                size_count += get_size_in_byte(psize)
+            else:
+                log.error("format error: %s" % psize)
+                result.code = 1
+                result.mess = "Error(1410): Partition size format error. %s" % psize
+                return result
+        elif re.match(disk_regx, psize):
+            size_count += get_size_in_byte(psize)
+        else:
+            log.error("format error: %s" % psize)
+            result.code = 1
+            result.mess = "Error(1410): Partition size format error. %s" % psize
+            return result
+    disk_labels = disk_label.split(",")
+    disks_list = []
+    # get disk info
+    for disk_label in disk_labels:
+        error, disk = get_disk_info(disk_label, conver_size=False)
+        if error:
+            result.code = 1
+            result.mess += disk_label + ":" + disk + "\n"
+            mess_dict[disk_label] = disk
+        elif disk.type != "disk":
+            result.code = 1
+            result.mess += disk_label + ":is not a disk" + "\n"
+            mess_dict[disk_label] = "is not a disk"
+        else:
+            disks_list.append(disk)
+    # do create part
+    for disk in disks_list:
+        size_list_tmp = size_list
+        # disk size - all partition size
+        avalible_size = int(disk.size)
+        for part in disk.parts:
+            avalible_size -= int(part.size)
+        if largest_new:
+            if size_count > avalible_size:
+                result.code = 1
+                result.mess += disk.name + ":sum of partitions size is larger than free disk size." + "\n"
+                mess_dict[disk.name] = "sum of partitions size is larger than free disk size."
+                continue
+        elif size_count > avalible_size:
+            result.code = 1
+            result.mess += disk.name + ":sum of partitions size is larger than free disk size." + "\n"
+            mess_dict[disk.name] = "sum of partitions size is larger than free disk size."
+            continue
+        else:
+            if size_count > (avalible_size - (2048*512 + 100*512)):
+                size_list_tmp.pop(-1)
+                size_list_tmp.insert(len(size_list_tmp), "largest-new")
+        for psize in size_list_tmp:
+            error, info = create_new_part(disk.name, psize)
+            if error:
+                result.code = 1
+                result.mess += disk.name + ":" + info + "\n"
+                mess_dict[disk.name] = info
+                break
+    if opts.has_param("json"):
+        result.mess = mess_dict
+    return result
+
+
+def create_part_by_part_count(disk_label, count):
+    disk_labels = disk_label.split(",")
+    result = Result()
+    for disk_label in disk_labels:
+        resulttmp = create_part_by_part_numbers(disk_label, count)
+        if resulttmp.code:
+            result.code = resulttmp.code
+            result.mess += disk_label + ":" + resulttmp.mess + "\n"
+    return result
+
+
+def create_part_by_part_numbers(disk_label, count):
+    """
+    create partition by count of partitions
+    :param disk_label: disk label, like this: /dev/sdb
+    :param count: number of new partitions
+    :return:
+    """
+    result = Result()
+    log.info("start create new partition by count...")
+    try:
+        count = int(count)
+    except:
+        result.code = 1
+        result.mess = "Error(1413): Number of new partitions error. %s" % count
+        return result
+    # get disk info
+    error, disk = get_disk_info(disk_label, conver_size=False)
+    if error:
+        result.code = 1
+        result.mess = disk
+        return result
+    # get disk size
+    total_size = int(disk.size)
+    # get used size count
+    used_size = 0
+    for part in disk.parts:
+        used_size += int(part.size)
+    # free size
+    free_size = total_size - used_size
+    # free in KB
+    free_size /= 1024
+    per_part_size = free_size / count
+    mod = free_size % count
+    size_list = []
+    for i in range(count):
+        if i == count - 1:
+            size_list.append("largest-new")
+        elif i + mod < count:
+            size_list.append(str(per_part_size) + "K")
+        else:
+            size_list.append(str(per_part_size + 1) + "K")
+    for size in size_list:
+        error, info = create_new_part(disk_label, size)
+        if error:
+            result.code = 1
+            result.mess = info
+            return result
+    return result
+
+
+def get_avalibe_ssd_for_mon():
+    error, disk_list = get_disk_list(conver_size=False)
+    if error:
+        return 1, disk_list
+    ssd_list = []
+    for disk in disk_list:
+        if disk.medium != "SSD":
+            continue
+        else:
+            ssd_list.append(disk)
+    if not ssd_list:
+        return 1, "Error(1415): Have no SSD."
+    # find first ssd which have no partitions
+    log.info("find disk which have no partitions...")
+    for ssd_tmp in ssd_list:
+        if ssd_tmp.mountpoint != "":
+            continue
+        elif len(ssd_tmp.parts) != 0:
+            continue
+        else:
+            return 0, ssd_tmp
+    # find first ssd which no mountpoint info
+    log.info("find first disk which whitout mountpoint info...")
+    for ssd_tmp in ssd_list:
+        have_mountpoint = False
+        if ssd_tmp.mountpoint != "":
+            continue
+        for part in ssd_tmp.parts:
+            if part.mountpoint != "":
+                have_mountpoint = True
+                break
+        if not have_mountpoint:
+            return 0, ssd_tmp
+    # can't find fit ssd
+    return 1, "Error(1416): Have no avalibe ssd."
+
+
+def umount_device(device_name):
+    """
+    umount device.
+    :param device_name: device_name or mount point.
+    :return:
+    """
+    retcode, stdout, stderr = _run_local_cmd("umount %s" % device_name, timeout=10)
+    if retcode:
+        return 1, "Error(511): Umount %s failed. " % device_name + stderr
+    return 0, "success"
+
+
+def mount_device(device_name, mount_point, retry=3):
+    """
+    mount device
+    :param device_name:
+    :param mount_point:
+    :param retry: retry 3 times if mount error.
+    :return:
+    """
+    retcode, stdout, stderr = _run_local_cmd("mount %s %s" % (device_name, mount_point))
+    if retcode:
+        return 1, "Error(1420): Mount disk error. %s" % stderr
+    with open("/proc/mounts", 'r') as mount:
+        mount_info = mount.readlines()
+    # check mount info
+    for info in mount_info:
+        if device_name in info and mount_point in info:
+            log.info(info)
+            return 0, "success"
+    # here, means can't find disk mount info in /proc/mounts
+    if retry:
+        return mount_device(device_name, mount_point, retry-1)
+    else:
+        return 1, "Error(1420): Mount disk error. can't find mount info in /proc/mounts."
+
+
+def get_part_uuid(device_name, part_num):
+    retcode, stdout, stderr = _run_local_cmd("sgdisk -i %s %s" % (part_num, device_name))
+    if retcode:
+        return 1, "Error(1419): Get partition partuuid error. " + device_name + part_num + stderr
+    retinfos = stdout.splitlines()
+    for line in retinfos:
+        if "Partition unique GUID" in line:
+            try:
+                partuuid = line.split(": ")[1].strip().lower()
+                # find and return
+                return 0, partuuid
+            except Exception, e:
+                log.error(e)
+                return 1, "Error(1419): Unknown error. " + device_name + part_num + str(e)
+    # can't find use ls -lh
+    disk_name = device_name.split("/")[-1]
+    retcode, stdout, stderr = _run_local_cmd("ls -lh /dev/disk/by-partuuid/ | grep sdy%s" % disk_name)
+    if retcode:
+        return 1, "Error(1419): Unknown error. " + device_name + part_num
+    try:
+        uuid = stdout.split(" ")[8]
+        return 0, uuid
+    except:
+        return 1, "Error(1419): Unknown error. " + device_name + part_num + stdout
+
+
+def mkfs_on_part(part_name, retry=4):
+    retcode, stdout, stderr = _run_local_cmd("mkfs.xfs -f -s size=2048 -K %s" % part_name)
+    if retcode:
+        time.sleep(3)
+        if retry > 0:
+            log.info("mkfs on %s %d times." % (part_name, 5-retry))
+            if "No such file or directory" in stderr:
+                device_name = re.match("(^/dev/[A-Za-z]+)[0-9]*$", part_name)
+                if not device_name:
+                    log.info("can't match the disk name in mkfs on part retry!")
+                    pass
+                else:
+                    log.info("Because of mkfs report no such dir, will retry to partx the %s" % device_name.group(1))
+                    _run_local_cmd("partx -a %s %s" % (part_name, device_name.group(1)))
+            return mkfs_on_part(part_name, retry-1)
+        else:
+            return 1, "Error(745): mkfs.xfs on disk part error. " + stderr
+    return 0, "success"
+
+
+def umount_disk_all_partitions(disk):
+    # umount path
+    if disk.mountpoint != "":
+        error, info = umount_device(disk.name)
+        if error:
+            return error, info
+    for part in disk.parts:
+        if part.mountpoint != "":
+            error, info = umount_device(part.name)
+            if error:
+                return error, info
+    return 0, "success"
+
+
+def clear_disk(disk):
+    # clear all partitions
+    result = delete_part(disk.name, "ALL")
+    if result.code == 1:
+        if opts.has_param("json"):
+            errors = result.mess
+            returninfo = ""
+            for value in errors.values():
+                returninfo += value
+            return 1, returninfo
+        else:
+            return 1, result.mess
+    return 0, "success"
+
+
+def create_mount_systemd_config(device_name):
+    """
+    create auto mount device config
+    :param device_name:
+    :return:
+    """
+    mount_file = "/usr/lib/systemd/system/var-lib-icfs-mon.mount"
+    content = [
+        "[Unit]",
+        "Description=icfs monitor data dir",
+        "",
+        "[Mount]",
+        "What=%s" % device_name,
+        "Where=/var/lib/icfs/mon",
+        "Type=xfs",
+        "",
+        "# Make 'systemctl enable tmp.mount' work:",
+        "[Install]",
+        "WantedBy=multi-user.target"
+    ]
+    try:
+        with open(mount_file, mode="w") as config_file:
+            config_file.writelines("\n".join(content) + "\n")
+    except Exception, e:
+        _exit_with_error("Error(553): Unknown error. %s" % str(e))
+    times = 30
+    while times and not os.path.isfile(mount_file):
+        time.sleep(1)
+        times -= 1
+    _run_local_cmd("systemctl daemon-reload")
+    retcode, stdout, stderr = _run_local_cmd("systemctl start var-lib-icfs-mon.mount")
+    if retcode:
+        _exit_with_error("Error(553): Unknown error. %s" % stderr)
+    _run_local_cmd("systemctl enable var-lib-icfs-mon.mount")
+
+
+def modify_icfs_mon_systemd_service():
+    result = []
+    with open("/usr/lib/systemd/system/icfs-mon@.service", 'r') as config:
+        contents = config.readlines()
+    for line in contents:
+        if line.startswith("After=") and "var-lib-icfs-mon.mount" not in line:
+            line = line[0:-1] + " var-lib-icfs-mon.mount\n"
+        elif line.startswith("Wants=") and "var-lib-icfs-mon.mount" not in line:
+            line = line[0:-1] + " var-lib-icfs-mon.mount\n"
+        result.append(line)
+    try:
+        with open("/usr/lib/systemd/system/icfs-mon@.service", "w") as config:
+            config.writelines(result)
+    except Exception, e:
+        log.error(e)
+        _exit_with_error("Error(553): Unknown error. " + str(e))
+    # reload service module
+    _run_local_cmd("systemctl daemon-reload")
+
+
+def check_is_ssd_mon_or_not():
+    # check mount info
+    retcode, stdout, stderr = _run_local_cmd("cat /proc/mounts | grep -w '/var/lib/icfs/mon'")
+    if stdout != "":
+        # stdout:  /dev/vdb1 /var/lib/icfs/mon xfs rw,relatime,attr2,inode64,noquota 0 0
+        disk = stdout.split()[0]
+        # check mount partition when power on
+        retcode, stdout, stderr = _run_local_cmd("ls /usr/lib/systemd/system/var-lib-icfs-mon.mount")
+        if retcode:
+            _exit_with_error("parth: /var/lib/icfs/mon/ is busy. plase check.")
+        else:
+            disk_link = ""
+            with open("/usr/lib/systemd/system/var-lib-icfs-mon.mount") as fp:
+                lines = fp.readlines()
+                for line in lines:
+                    # What=/dev/disk/by-partuuid/8a6d0525-b154-4348-9a6c-4afb521fcb50
+                    if line.startswith("What="):
+                        disk_link = line.split("=")[1]
+                        break
+            # disk_link:  /dev/disk/by-partuuid/8a6d0525-b154-4348-9a6c-4afb521fcb50
+            disk_link_part = disk_link.split("/")
+            retcode, disk_path, stderr = _run_local_cmd("ls -l %s" % disk_link)
+            if retcode:
+                _exit_with_error("parth: /var/lib/icfs/mon/ is busy. plase check.")
+            # disk_path:  lrwxrwxrwx 1 root root 10 Oct 20 16:07 /dev/disk/by-partuuid/8a6d0525-b154-4348-9a6c-4afb521fcb50 -> ../../vdb1
+            disk_path = disk_path.split()[-1]
+            # disk_path: ../../vdb1
+            disk_path_part = disk_path.split("/")
+            disk_path_part.reverse()
+            disk_link_part.reverse()
+            tmp_name = []
+            for index, value in enumerate(disk_link_part):
+                if index < len(disk_path_part):
+                    if disk_path_part[index] != "..":
+                        tmp_name.append(disk_path_part[index])
+                else:
+                    tmp_name.append(value)
+            disk_part = disk.split("/")
+            tmp_name.reverse()
+            if disk_part != tmp_name:
+                _exit_with_error("parth: /var/lib/icfs/mon/ is busy. plase check.")
+            else:
+                _exit_with_error("mon is on ssd already!")
+
+
+def prepare_ssd_part_for_mon(disk=None):
+    """
+    select and init ssd for mon
+    :param disk:
+    :return:
+    """
+    check_is_ssd_mon_or_not()
+    log.info("start prepare ssd for mon...")
+    result = Result()
+    # maybe part_name or device name
+    partition = None
+    if disk:
+        error, disk_obj = get_disk_info(disk, conver_size=False)
+        if error:
+            _exit_with_error(disk_obj)
+        if disk_obj.type == "disk":
+            clear_disk(disk_obj)
+            error, info = create_new_part(disk.name, "50G")
+            if error:
+                _exit_with_error(info)
+            partition = disk.name + "1"
+        # is partition. check part size large than 50G or not
+        else:
+            if int(disk_obj.size) < 50 * 1024 * 1024 * 1024:
+                _exit_with_error("Error(1417): Partition is too small for mon.")
+            else:
+                partition = disk
+    else:
+        error, disk = get_avalibe_ssd_for_mon()
+        if error:
+            _exit_with_error(disk)
+        # umount all partitions
+        error, info = umount_disk_all_partitions(disk)
+        if error:
+            _exit_with_error(info)
+        # clear all partitions
+        error, info = clear_disk(disk)
+        if error:
+            _exit_with_error(info)
+        # create new partition
+        error, info = create_new_part(disk.name, "50G")
+        if error:
+            _exit_with_error(info)
+        partition = disk.name + "1"
+    # mkfs on partition
+    error, info = mkfs_on_part(partition)
+    if error:
+        _exit_with_error(info)
+    # mount partition to mon dir
+    # create auto mount config
+    # get part uuid
+    error, partuuid = get_part_uuid(disk.name, "1")
+    if error:
+        _exit_with_error(partuuid)
+    # create auto mount info
+    create_mount_systemd_config("/dev/disk/by-partuuid/%s" % partuuid)
+    # modify icfs-mon
+    modify_icfs_mon_systemd_service()
+    return result
+
+
+def get_numb_of_osds():
+    """
+    get osd count in cluster
+    :return:
+    """
+    import commands
+    retcode, stdout = commands.getstatusoutput("icfs osd tree 2>/dev/null --format json")
+    if retcode:
+        stderr = stdout
+        # log.error("Error(724): Get osd tree error ")
+        return 1, "Error(724): Get osd tree error, %s." % stderr
+    else:
+        try:
+            osd_count_num = 0
+            osd_tree = json.loads(stdout)
+            for bucket in osd_tree["nodes"]:
+                if bucket["type"] == "osd":
+                    osd_count_num += 1
+            for bucket in osd_tree["stray"]:
+                if bucket["type"] == "osd":
+                    osd_count_num += 1
+        except Exception, e:
+            return 1, "Error(724): Get osd tree error. %s" % str(e)
+    return 0, osd_count_num
+
+
+def osd_batch_create(nowcount, total):
+    """
+    batch create osd
+    :param nowcount: total osd in cluster before create
+    :param total: the number of osds need create
+    :return: 0, osd_ids (list) or 1 error info
+    """
+    total = str(total)
+    retcode, stdout, stderr = _run_local_cmd("icfs osd batch_create %s %s" % (nowcount, total), timeout=30)
+    if retcode:
+        return 1, "Error(746): Create osd failed. %s" % stderr
+    else:
+        osd_id_list = [int(osdid) for osdid in stdout.split(",")[0:-1]]
+        osd_id_list.sort()
+        return 0, osd_id_list
+
+
+def get_journal_size():
+    retcode, stdout, stderr = _run_local_cmd("icfs-osd --show-config-value=osd_journal_size", timeout=10)
+    if retcode:
+        return '5120'
+    else:
+        return stdout
+
+
+def disk_is_mounted(disk):
+    if disk.mountpoint != "":
+        return True
+    for part in disk.parts:
+        if part.mountpoint != "":
+            return True
+    return False
+
+
+def check_disk_status(disk_label):
+    # get disk info
+    error, disk = get_disk_info(disk_label)
+    if error:
+        return 1, disk
+    # check disk is osd or not
+    if disk.type == "part":
+        disk_label = re.sub("\d*$", "", disk_label)
+    # check part or disk is osd or not
+    disk_info_jsons = json.loads(icfs_disk_info)
+    disk_info_json = None
+    for tmp in disk_info_jsons:
+        if disk_label == tmp["path"]:
+            disk_info_json = tmp
+            break
+    if disk_info_json is None:
+        return 1, "Error(1406): Get disk info error."
+    # check partitions stat, if partitions exist.
+    if not disk_info_json. has_key("partitions"):
+        return 0, disk
+    parts = disk_info_json["partitions"]
+    stderr, fsid, stdout = _run_local_cmd("icfs-osd --show-config-value=fsid")
+    # have no config file mean have no cluster.
+    if fsid == "00000000-0000-0000-0000-000000000000":
+        return 0, disk
+    for part in parts:
+        if "icfs_fsid" in part.keys():
+            fsid_tmp = part["icfs_fsid"]
+            if fsid_tmp == fsid:
+                return 1, "is osd osd." + part["whoami"]
+    # check disk mounted or not
+    if disk_is_mounted(disk):
+        return 1, "Error(752): Disk is mounted."
+    return 0, disk
+
+
+def create_osd_thread(disk_label, osdid, ssd_journal_part=None, ssd_cache_part=None):
+    """
+    create osd with osd id and disk partition or disk
+    :param disk_label: disk_label or partition name
+    :param osdid: osd id  str(integer)
+    :param ssd_journal_part: journal device
+    :param ssd_cache_part: journal device
+    :return: disk_label:info
+    """
+    cache_enable = False
+    journal_part = None
+    osd_data_part_num = 1
+    log.debug("create osd. disk:%s; osdid:%s" % (disk_label, osdid))
+    try:
+        int(osdid)
+        osdid = str(osdid)
+    except:
+        _run_local_cmd("icfs osd rm %s" % osdid)
+        return disk_label + ":" + "Error(725): Get osd id error. %s" % osdid
+    # check disk status
+    error, disk = check_disk_status(disk_label)
+    if error:
+        _run_local_cmd("icfs osd rm %s" % osdid)
+        return disk_label + ":" + disk
+    # if disk , zap it，create data partition and journal partition
+    if disk.type == "disk":
+        if disk.medium == "SSD":
+            if ssd_journal_part and ssd_cache_part:
+                # journal + cache + osd
+                journal_part = ssd_journal_part
+                # get the osd part number
+                disk.parts.sort(key=lambda part: part.name)
+                parts = [int(re.match("^/dev/\w+?(\d+)", part.name).group(1)) for part in disk.parts]
+                parts.sort()
+                osd_data_part_num = parts[-1] + 1
+                # cache enable
+                cache_enable = True
+            elif ssd_journal_part and not ssd_cache_part:
+                # journal + osd
+                journal_part = ssd_journal_part
+                # get the osd part number
+                disk.parts.sort(key=lambda part: part.name)
+                parts = [int(re.match("^/dev/\w+?(\d+)", part.name).group(1)) for part in disk.parts]
+                parts.sort()
+                osd_data_part_num = parts[-1] + 1
+            elif not ssd_journal_part and ssd_cache_part:
+                _run_local_cmd("icfs osd rm %s" % osdid)
+                return disk_label + ":" + "Error(1426) unsupport mode only enable cache"
+            else:
+                # zap disk
+                error, info = clear_disk(disk)
+                if error:
+                    _run_local_cmd("icfs osd rm %s" % osdid)
+                    return disk_label + ":" + info
+        else:
+            if ssd_journal_part and ssd_cache_part:
+                # journal + cache
+                journal_part = ssd_journal_part
+                # cache enable
+                cache_enable = True
+            elif ssd_journal_part and not ssd_cache_part:
+                # journal
+                journal_part = ssd_journal_part
+            elif not ssd_journal_part and ssd_cache_part:
+                _run_local_cmd("icfs osd rm %s" % osdid)
+                return disk_label + ":" + "Error(1426) unsupport mode only enable cache"
+            # zap disk
+            error, info = clear_disk(disk)
+            if error:
+                _run_local_cmd("icfs osd rm %s" % osdid)
+                return disk_label + ":" + info
+
+        if not journal_part:
+            # create journal part
+            error, info = create_new_part(disk.name, get_journal_size() + 'M', part_number=2)
+            if error:
+                _run_local_cmd("icfs osd rm %s" % osdid)
+                return disk_label + ":" + info
+            success = check_func_result(_check_new_part_create_result, disk.name, 2)
+            if not success:
+                _run_local_cmd("icfs osd rm %s" % osdid)
+                return disk_label + ":Error(553): Unknown error.create journal part error"
+
+        # create data partition. use all free disk space
+        error, info = create_new_part(disk.name, "largest-new", part_number=osd_data_part_num)
+        if error:
+            _run_local_cmd("icfs osd rm %s" % osdid)
+            return disk_label + ":" + info
+        success = check_func_result(_check_new_part_create_result, disk.name, osd_data_part_num)
+        if not success:
+            _run_local_cmd("icfs osd rm %s" % osdid)
+            return disk_label + ":Error(553): Unknown error.create data part error"
+        if not journal_part:
+            # set journal partition type code
+            journal_uuid = str(uuid.uuid4())
+            set_part_info(disk_label, 2, part_name="icfs journal", partguid=journal_uuid, typecode=JOURNAL_TYPE_CODE)
+            success = check_func_result(_check_part_info_result, disk_label, 2,
+                                        part_name="icfs journal",
+                                        partguid=journal_uuid,
+                                        typecode=JOURNAL_TYPE_CODE,
+                                        retry=True)
+            if not success:
+                _run_local_cmd("icfs osd rm %s" % osdid)
+                return disk_label + ":Error(1422): Set partition info error."
+            journal_part = "/dev/disk/by-partuuid/%s" % journal_uuid
+
+        data_part = disk.name + str(osd_data_part_num)
+        # format data partition
+        error, info = mkfs_on_part(data_part)
+        if error:
+            _run_local_cmd("icfs osd rm %s" % osdid)
+            return disk_label + ":" + info
+    # if partition, format it
+    elif disk.type == "part":
+        error, info = mkfs_on_part(disk.name)
+        if error:
+            _run_local_cmd("icfs osd rm %s" % osdid)
+            return disk_label + ":" + info
+        data_part = disk.name
+    else:
+        _run_local_cmd("icfs osd rm %s" % osdid)
+        return disk_label + ":Error(1421): Partition type error. %s" % disk.type
+    # mount cache should before the create osd dir
+    if cache_enable:
+        osd_cache_dir = "/var/lib/icfs/osd/cache-%s" % osdid
+        # create osd data dir
+        retcode, stdour, stderr = _run_local_cmd("mkdir -p %s" % osd_cache_dir)
+        if retcode:
+            _run_local_cmd("icfs osd rm %s" % osd_cache_dir)
+            return disk_label + ":" + "Error(2101): Create directory failed. %s" % stderr
+        # clear dir
+        _run_local_cmd("rm -rf %s/*" % osd_cache_dir)
+
+        # check cache exist or not
+        retcode, stdout, stderr = _run_local_cmd("ls -l %s" % ssd_cache_part)
+        if "No such file or directory" in stderr:
+            log.info("try to inform the system of the add part, ls -l can't, so try to partx")
+            _run_local_cmd(
+                "partx -a %s %s" % (ssd_cache_part, re.match("(^/dev/[A-Za-z]+)[0-9]*$", ssd_cache_part).group(1)))
+        # mount cache dir on osd_cache_dir
+        error, info = mount_device(ssd_cache_part, osd_cache_dir)
+        if error:
+            _run_local_cmd("icfs osd rm %s" % osdid)
+            _run_local_cmd("rm -rf %s" % osd_cache_dir)
+            return disk_label + ":" + info
+    # create osd data dir
+    osd_dir = "/var/lib/icfs/osd/icfs-%s" % osdid
+    retcode, stdour, stderr = _run_local_cmd("mkdir -p %s" % osd_dir)
+    if retcode:
+        _run_local_cmd("icfs osd rm %s" % osdid)
+        return disk_label + ":" + "Error(2101): Create directory failed. %s" % stderr
+    # clear dir
+    _run_local_cmd("rm -rf %s/*" % osd_dir)
+    # mount partition on osd_dir
+    error, info = mount_device(data_part, osd_dir)
+    if error:
+        _run_local_cmd("icfs osd rm %s" % osdid)
+        _run_local_cmd("rm -rf %s" % osd_dir)
+        return disk_label + ":" + info
+    # get part uuid. osd-uuid = part-uuid
+    data_part_uuid = str(uuid.uuid4())
+    # make journal link if jour_part exist
+    if journal_part:
+        _run_local_cmd("ln -sf %s %s" % (journal_part, osd_dir + "/journal"))
+        osd_mkfs_comm = "icfs-osd --mkfs --mkkey --mkjournal -i {0} --osd-data {1} --osd-journal {2} --osd-uuid {3}".\
+            format(osdid, osd_dir, osd_dir + "/journal", data_part_uuid)
+    else:
+        osd_mkfs_comm = "icfs-osd --mkfs --mkkey -i {0} --osd-data {1} --osd-uuid {2}".format(osdid, osd_dir, data_part_uuid)
+    # init osd dir
+    mutex.acquire()
+    time.sleep(1)
+    retcode, stdout, stderr = _run_local_cmd(osd_mkfs_comm)
+    mutex.release()
+    #
+    if retcode:
+        umount_device(osd_dir)
+        _run_local_cmd("icfs osd rm %s" % osdid)
+        _run_local_cmd("rm -rf %s" % osd_dir)
+        return disk_label + ":" + "Error(749): Make osd key fs error. %s" % stderr
+    else:
+        log.info("icfs-osd --mkfs %s" % data_part + " stdout: %s , stderr: %s" % (stdout, stderr))
+    # chown
+    _run_local_cmd("chown -hR icfs:icfs {0}".format(osd_dir))
+    _run_local_cmd("chown -hR icfs:icfs {0}".format(data_part))
+    if journal_part:
+        # get the disk
+        original_part_ret, original_part_ret_stdout, original_part_stderr = \
+            _run_local_cmd("ls -al %s | awk -F '../../' '{print $2}'" % journal_part)
+        original_part = "/" + disk_label.split('/')[1] + "/" + original_part_ret_stdout
+        log.info("the journal part is %s" % original_part)
+        _run_local_cmd("chown -hR icfs:icfs {0}".format(original_part))
+    # umount osd_dir
+    umount_device(osd_dir)
+    error, info = check_osd_data_flush(data_part, osdid)
+    if error:
+        log.error(info)
+        _run_local_cmd("icfs osd rm %s" % osdid)
+        _run_local_cmd("rm -rf %s" % osd_dir)
+        return disk_label + ":" + "Error(749): Make osd key fs error. %s" % info
+    # set data_part info
+    if disk.type == "part":
+        result = re.match(r"(/[a-z]*)*(\d*)$", disk.name)
+        part_number = result.group(2)
+        disk_name = disk.name[0:-len(part_number)]
+    else:
+        part_number = osd_data_part_num
+        disk_name = disk.name
+    set_part_info(disk_name, part_number, part_name="icfs data", partguid=data_part_uuid, typecode=OSD_TYPE_CODE)
+    success = check_func_result(_check_part_info_result, disk_name, part_number,
+                                partguid=data_part_uuid,
+                                part_name="icfs data",
+                                typecode=OSD_TYPE_CODE,
+                                retry=True)
+    if not success:
+        _run_local_cmd("icfs osd rm %s" % osdid)
+        _run_local_cmd("rm -rf %s" % osd_dir)
+        return disk_label + ":Error(1422): Set partition info error."
+    # start osd by udev
+    _run_local_cmd("/usr/bin/udevadm trigger --action=add --name-match {0}".format(data_part))
+    return disk_label + ":" + "success"
+
+
+def check_osd_data_flush(disk, osdid):
+    tmp = str(uuid.uuid4())
+    osd_path = "/var/lib/icfs/osd/icfs-%s" % str(osdid)
+    tmp_path = "/tmp/%s" % tmp
+    _run_local_cmd("mkdir %s" % tmp_path)
+    error, info = mount_device(disk, tmp_path)
+    if error:
+        return 1, "osd data part format error."
+    # check files
+    error, whoami, error_info = _run_local_cmd("cat %s/whoami" % tmp_path)
+    # files are in /var/lib/icfs/osd/icfs-N. move them to disk
+    if error and "No such file or directory" in error_info:
+        if not os.path.isfile(osd_path+"/whoami"):
+            _run_local_cmd("umount %s" % tmp_path)
+            _run_local_cmd("umount %s" % tmp_path)
+            time.sleep(1)
+            _run_local_cmd("rm -rf %s" % tmp_path)
+            return 1, "can't find whoami file"
+        _run_local_cmd("mv -f %s/* %s" % (osd_path, tmp_path))
+        _run_local_cmd("umount %s" % tmp_path)
+        _run_local_cmd("umount %s" % tmp_path)
+        time.sleep(1)
+        _run_local_cmd("rm -rf %s" % tmp_path)
+        return 0, "success"
+    # disk mkfs error
+    elif whoami != str(osdid):
+        _run_local_cmd("umount %s" % tmp_path)
+        _run_local_cmd("umount %s" % tmp_path)
+        time.sleep(1)
+        _run_local_cmd("rm -rf %s" % tmp_path)
+        return 1, "disk is not be format"
+    else:
+        _run_local_cmd("umount %s" % tmp_path)
+        _run_local_cmd("umount %s" % tmp_path)
+        time.sleep(1)
+        _run_local_cmd("rm -rf %s" % tmp_path)
+        return 0, "success"
+
+
+def get_avalibe_journal_ssd():
+    available_ssds = []
+    error, disk_list = get_disk_list(conver_size=False)
+    if error:
+        return 1, disk_list
+    ssd_list = []
+    for disk in disk_list:
+        if disk.medium != "SSD":
+            continue
+        else:
+            ssd_list.append(disk)
+    if not ssd_list:
+        return 1, "Error(1415): Have no SSD."
+    # find first ssd which have no partitions
+    log.info("find disk which have no partitions...")
+    for ssd_tmp in ssd_list:
+        if ssd_tmp.mountpoint != "":
+            continue
+        elif len(ssd_tmp.parts) != 0:
+            continue
+        else:
+            available_ssds.append(ssd_tmp)
+    # find first ssd which no mountpoint info
+    log.info("find first disk which whitout mountpoint info...")
+    for ssd_tmp in ssd_list:
+        have_mountpoint = False
+        if ssd_tmp.mountpoint != "":
+            continue
+        for part in ssd_tmp.parts:
+            if part.mountpoint != "":
+                if "/var/lib/icfs/osd/cache" in part.mountpoint or "/var/lib/icfs/osd/icfs" in part.mountpoint:
+                    continue
+                have_mountpoint = True
+                break
+        if not have_mountpoint:
+            available_ssds.append(ssd_tmp)
+    # can't find fit ssd
+    if not available_ssds:
+        return 1, "Error(1416): Have no avalibe ssd."
+    return 0, list(set(available_ssds))
+
+
+def get_remain_capability(disk):
+    """
+    adjust if the surplus is fit the need, the need_capability should in byte.
+    :param disk:
+    :return:
+    """
+    retcode, stdout, stderr = _run_local_cmd("lsblk -bln -o NAME,SIZE %s" % disk)
+    if retcode:
+        return 1, "Error(1425) get block device capability fail, fail info %s" % stderr+stdout
+    lines = stdout.splitlines()
+    used = 0
+    total = 0
+    for line in lines:
+        if re.match('^[A-Za-z]+\s+\d+$', line):
+            total = int(line.split()[1].strip())
+        elif re.match('^[A-Za-z]+[0-9]+\s+\d+$', line):
+            used += int(line.split()[1].strip())
+        else:
+            return 1, "Error(1427) get unknown device %s" % line
+    log.info("used space is %s, total is %s" % (used, total))
+    available = total - used
+    if available <= 0:
+        return 1, "Error(1426) there have no enough %s sapce on this device" % available
+    return 0, available
+
+
+def do_ssd_journal_all_cache(ssds, ssd_journal_size, osdids):
+    osd_num = len(osdids)
+    journal_parts = []
+    cache_parts = []
+    # check if the ssd size is meet the require
+    # check if the total disk space is enough
+    disk_part_num = dict([(disk.name, int(disk.size)/ssd_journal_size) for disk in ssds])
+    total_part_num = sum([item for item in disk_part_num.itervalues()])
+    log.info("disk_part_num %s, total_part_num %s" % (disk_part_num, total_part_num))
+    if total_part_num < osd_num:
+        return 1, "Error(1416): Have no avalibe ssd.", None
+    # create the ssd journal according to the disk_part_num
+    part_num = defaultdict(int)
+    for osd in osdids:
+        osd = int(osd)
+        if part_num[ssds[osd % len(ssds)].name] <= disk_part_num[ssds[osd % len(ssds)].name]:
+            # create ssd journal
+            error, info = create_new_part(ssds[osd % len(ssds)].name, get_journal_size() + 'M')
+            if error:
+                return 1, info, None
+            part_num[ssds[osd % len(ssds)].name] += 1
+            # check if create success
+            log.info("check the %d part" % part_num[ssds[osd % len(ssds)].name])
+            success = check_func_result(_check_new_part_create_result, ssds[osd % len(ssds)].name,
+                                        part_num[ssds[osd % len(ssds)].name])
+            if not success:
+                return 1, ssds[osd % len(ssds)].name + ":Error(553): Unknown error.create journal part error", None
+
+            # set journal partition type code
+            journal_uuid = str(uuid.uuid4())
+            set_part_info(ssds[osd % len(ssds)].name, part_num[ssds[osd % len(ssds)].name],
+                          part_name="icfs journal", partguid=journal_uuid, typecode=JOURNAL_TYPE_CODE)
+            success = check_func_result(_check_part_info_result, ssds[osd % len(ssds)].name,
+                                        part_num[ssds[osd % len(ssds)].name],
+                                        part_name="icfs journal",
+                                        partguid=journal_uuid,
+                                        typecode=JOURNAL_TYPE_CODE,
+                                        retry=True)
+            if not success:
+                return 1, ssds[osd % len(ssds)].name + ":Error(1422): Set partition info error.", None
+            journal_parts.append("/dev/disk/by-partuuid/%s" % journal_uuid)
+        time.sleep(2)
+    # create ssd cache
+    for disk in ssds:
+        # create the same num of journal cache
+        journal_num = part_num[disk.name]
+        ret, remain = get_remain_capability(disk.name)
+        if ret:
+            return 1, remain, None
+        # calculate the cache size
+        cache_size = remain / journal_num
+        log.info("remain %s and part_num %s and num of osd %s" % (remain, part_num[disk.name], journal_num))
+        log.info("cache size %s" % cache_size)
+        for i in range(journal_num):
+            if i == journal_num - 1:
+                log.info("%s divide all space to create cache" % i)
+                # if this is last part divide all space
+                error, info = create_new_part(disk.name, "largest-new")
+            else:
+                # create ssd cache part
+                error, info = create_new_part(disk.name, str(cache_size / 1024) + 'K')
+            if error:
+                return 1, info, None
+            part_num[disk.name] += 1
+            # check if create success
+            log.info("check the %d part" % part_num[disk.name])
+            success = check_func_result(_check_new_part_create_result, disk.name, part_num[disk.name])
+            if not success:
+                return 1, disk.name + ":Error(553): Unknown error.create journal part error", None
+            time.sleep(1)
+            # mkfs the part
+            log.info("start to mkfs %s part" % disk.name + str(part_num[disk.name]))
+            error, info = mkfs_on_part(disk.name + str(part_num[disk.name]))
+            if error:
+                return 1, disk.name + ":" + info, None
+            # collect the cache
+            cache_parts.append(disk.name + str(part_num[disk.name]))
+            time.sleep(1)
+    return 0, journal_parts, cache_parts
+
+
+def do_ssd_journal_osd(ssds, ssd_journal_size, osd_ids):
+    osd_num = len(osd_ids)
+    journal_parts = []
+
+    # check if the ssd size is meet the require
+    # check if the total disk space is enough
+    disk_part_num = dict([(disk.name, int(disk.size) / ssd_journal_size) for disk in ssds])
+    total_part_num = sum([item for item in disk_part_num.itervalues()])
+    log.info("disk_part_num is %s" % disk_part_num)
+    log.info("total_part_num is %s" % total_part_num)
+    if total_part_num < osd_num:
+        return 1, "Error(1416): Have no avalibe ssd."
+    # create the ssd journal according to the disk_part_num
+    part_num = defaultdict(int)
+    for osd in osd_ids:
+        osd = int(osd)
+        ssd_disk_name = ssds[osd % len(ssds)].name
+        if part_num[ssd_disk_name] <= disk_part_num[ssd_disk_name]:
+            # create ssd journal
+            error, info = create_new_part(ssd_disk_name, get_journal_size() + 'M')
+            if error:
+                return 1, info
+            part_num[ssd_disk_name] += 1
+            # check if create success
+            log.info("check the %d part" % part_num[ssd_disk_name])
+            success = check_func_result(_check_new_part_create_result, ssd_disk_name,
+                                        part_num[ssd_disk_name])
+            if not success:
+                return 1, ssds[osd % len(ssds)].name + ":Error(553): Unknown error.create journal part error"
+
+            # set journal partition type code
+            journal_uuid = str(uuid.uuid4())
+            set_part_info(ssd_disk_name, part_num[ssd_disk_name],
+                          part_name="icfs journal", partguid=journal_uuid, typecode=JOURNAL_TYPE_CODE)
+            success = check_func_result(_check_part_info_result, ssd_disk_name,
+                                        part_num[ssd_disk_name],
+                                        part_name="icfs journal",
+                                        partguid=journal_uuid,
+                                        typecode=JOURNAL_TYPE_CODE,
+                                        retry=True)
+            if not success:
+                return 1, ssds[osd % len(ssds)].name + ":Error(1422): Set partition info error."
+            journal_parts.append("/dev/disk/by-partuuid/%s" % journal_uuid)
+            time.sleep(2)
+
+    return 0, journal_parts
+
+
+def create_osds(disk_labels, osd_ids=None, ssd_cache=None):
+    """
+    create osd in multi process.  can't run on different host at same time.
+    :param disk_labels:
+    :param osd_ids:
+    :param ssd_cache:
+    :return:
+    """
+    journal_part = None
+    cache_part = None
+
+    log.info("start create osd...")
+    log.debug(disk_labels)
+    result = Result()
+    # check icfs.conf exists or not
+    if not os.path.exists("/etc/icfs/icfs.conf"):
+        result.code = 1
+        result.mess = "Error(1710): The config file /etc/icfs/icfs.conf not exist or destroyed."
+        return result
+    log.debug("use icfs-disk get diskinfo")
+    global icfs_disk_info
+    error, icfs_disk_info, stderror = _run_local_cmd("icfs-disk list --format json")
+    if error:
+        result.code = 1
+        result.mess = "Error(1406): Get disk info error. icfs-disk list error"
+        if osd_ids:
+            __rm_osd_id(osd_ids)
+        return result
+    # get osd ids
+    disk_labels = disk_labels.strip().split(",")
+    if not osd_ids:
+        # get osd numbers now
+        error, nowcount = get_numb_of_osds()
+        if error:
+            _exit_with_error(nowcount)
+        # create len(disk_labels) osd
+        error, osd_ids = osd_batch_create(nowcount, len(disk_labels))
+        if error:
+            _exit_with_error(osd_ids)
+    else:
+        osd_ids = osd_ids.strip().split(",")
+    log.debug(osd_ids)
+    log.debug("ssd_cache is %s" % ssd_cache)
+    if ssd_cache:
+        # total journal size in byte
+        ssd_journal_size = int(get_journal_size())*1024*1024
+        # get available ssd disks and clean them
+        error, ssds = get_avalibe_journal_ssd()
+        if error:
+            result.code = 1
+            result.mess = ssds
+            return result
+        log.info("get available ssd %s" % [ssd.name for ssd in ssds])
+        for ssd in ssds:
+            log.info("parts of ssd %s is %s" % (ssd.name, ssd.parts))
+            mount_part = [part.mountpoint for part in ssd.parts if part.mountpoint != ""]
+            if mount_part:
+                # umount the mount point
+                error, info = umount_disk_all_partitions(ssd)
+                if error:
+                    result.code = 1
+                    result.mess = info
+                    return result
+            # clear all partitions
+            error, info = clear_disk(ssd)
+            if error:
+                result.code = 1
+                result.mess = info
+                return result
+        if ssd_cache == "all":
+            # mode1 ssd journal + cache no remain space
+            ret, journal_part, cache_part = do_ssd_journal_all_cache(ssds, ssd_journal_size, osd_ids)
+            if ret:
+                __rm_osd_id(osd_ids)
+                result.code = 1
+                result.mess = journal_part
+                return result
+        elif ssd_cache == 'off':
+            # mode2 ssd journal + osd part remain space need to create osd or not
+            ret, journal_part = do_ssd_journal_osd(ssds, ssd_journal_size, osd_ids)
+            if ret:
+                __rm_osd_id(osd_ids)
+                result.code = 1
+                result.mess = journal_part
+                return result
+        else:
+            # mode3 ssd journal + osd part + specified size cache remain space need to create osd or not
+            print "coming soon"
+
+        # osd_num = len(disk_labels) + (len(osd_ids) if osd_ids else 0)
+        # find ssd disk and create the partition for osd journal
+        # check if the ssd have enough space to store the osd journal
+        # if not cache_size:
+    log.info("disk_labels is %s" % disk_labels)
+    log.info("osd_ids is %s" % osd_ids)
+    log.info("journal_part is %s" % journal_part)
+    log.info("cache_part is %s" % cache_part)
+    # create osd in threadpool
+    if not journal_part:
+        journal_part = [None]*len(osd_ids)
+    if not cache_part:
+        cache_part = [None] * len(osd_ids)
+    executor = ThreadPoolExecutor(cpu_count())
+    future = executor.map(create_osd_thread, disk_labels, osd_ids, journal_part, cache_part)
+    result_mess = dict()
+    for return_info in future:
+        if "Error" in return_info:
+            result.code = 1
+        if not opts.has_param("json"):
+            result.mess += return_info + "\n"
+        else:
+            disk_name, info = return_info.split(":", 1)
+            result_mess[disk_name] = info
+            result.mess = result_mess
+    return result
+
+
+def remote_create_osd(host, disk_list, osdid_list):
+    """
+    call icfs-admin-disktool create_osd on remote host
+    :param host:
+    :param disk_list:
+    :param osdid_list:
+    :return:
+    icfs-admin-disktool --create_osd --disk /dev/vdd,/dev/vde --json
+    {"mess": {"/dev/vde": "success", "/dev/vdd": "success"}, "code": 0}
+
+    icfs-admin-disktool --create_osd --disk /dev/vde,/dev/vdf
+    /dev/vde:success
+    /dev/vdf:success
+    """
+    cache_size = None
+    if opts.has_param("ssd_cache"):
+        cache_size = opts.ssd_cache
+    log.info("in create %s osd process, cache size is %s" % (host, cache_size))
+    disk_list = [disk.strip() for disk in disk_list]
+    osdid_list = [str(osdid) for osdid in osdid_list]
+    disks = ",".join(disk_list)
+    osdids = ",".join(osdid_list)
+    if opts.has_param("json"):
+        if not cache_size:
+            retcode, stdout, stderr = _run_remote_cmd(
+                "icfs-admin-disktool --create_osd --disk %s --osd_ids %s --json" % (disks, osdids),
+                host,
+                connect_timeout=60)
+        else:
+            retcode, stdout, stderr = _run_remote_cmd(
+                "icfs-admin-disktool --create_osd --disk %s --osd_ids %s --ssd_cache %s --json"
+                % (disks, osdids, cache_size), host, connect_timeout=60)
+    else:
+        if not cache_size:
+            retcode, stdout, stderr = _run_remote_cmd(
+                "icfs-admin-disktool --create_osd --disk %s --osd_ids %s " % (disks, osdids),
+                host,
+                connect_timeout=60)
+        else:
+            retcode, stdout, stderr = _run_remote_cmd(
+                "icfs-admin-disktool --create_osd --disk %s --osd_ids %s --ssd_cache %s" % (disks, osdids, cache_size),
+                host,
+                connect_timeout=60)
+    # remote host is not accessable.
+    if retcode == 255:
+        __rm_osd_id(osdid_list)
+    if opts.has_param("json"):
+        result = json.loads(stdout)
+        result["host"] = host
+        return json.dumps(result)
+    else:
+        if retcode:
+            return host+":\n" + stderr
+        else:
+            return host + ":\n" + stdout
+
+
+def __rm_osd_id(osd_id_list):
+    if type(osd_id_list) == list:
+        for osds in osd_id_list:
+            if type(osds) == list:
+                for osdid in osds:
+                    _run_local_cmd("icfs osd rm %s" % osdid)
+            try:
+                int(osds)
+                _run_local_cmd("icfs osd rm %s" % osds)
+            except:
+                pass
+    else:
+        _run_local_cmd("icfs osd rm %s" % osd_id_list)
+
+
+def push_icfs_config_to_remote(filenames, host_name, force=False):
+    filenames = [filename.strip() for filename in filenames.split(",") if filename.strip() != ""]
+    if not force:
+        for file_tmp in filenames:
+            retcode, md5_local, stderr = _run_local_cmd("md5sum %s" % file_tmp)
+            if retcode:
+                return 1, "Error(933): Open configure file %s fail! host:localhost" % file_tmp
+            retcode, md5_remote, stderr = _run_remote_cmd("md5sum %s" % file_tmp, node=host_name, not_print_flag=True)
+            if retcode:
+                retcode, stdout, stderr = _run_local_cmd("scp %s %s:%s" % (file_tmp, host_name, file_tmp))
+                if retcode:
+                    return 1, "Error(055): Failed to copy file to remote host:%s. %s" % (host_name, stderr)
+                retcode, md5_remote, stderr = _run_remote_cmd("md5sum %s" % file_tmp, node=host_name)
+                if retcode:
+                    return 1, "Error(1428): Reopen remote configure file %s on %s fail!" % file_tmp, host_name
+            log.debug("md5_local %s, md5_remote %s" % (md5_local, md5_remote))
+            if md5_local != md5_remote:
+                # check if is the same cluster
+                retcode, fsid_local, stderr = _run_local_cmd(
+                    "cat /etc/icfs/icfs.conf | grep fsid | awk -F \"=\" '{print $2}'")
+                if retcode:
+                    return 1, "Error(1429): get cluster id fail! host:localhost"
+                retcode, fsid_remote, stderr = _run_remote_cmd(
+                    "cat /etc/icfs/icfs.conf | grep fsid | awk -F \"=\" \"{print \$2}\"", node=host_name)
+                if retcode:
+                    return 1, "Error(1430): get remote host %s cluster id fail!" % host_name
+                log.debug("fsid_local is %s, fsid_remote is %s" % (fsid_local.strip(), fsid_remote.strip()))
+                if fsid_local.strip() != fsid_remote.strip():
+                    # if the fsid not same the node is come from the old cluster, overwrite
+                    retcode, stdout, stderr = _run_local_cmd("scp %s %s:%s" % (file_tmp, host_name, file_tmp))
+                    if retcode:
+                        return 1, "Error(055): Failed to copy file to remote host:%s. %s" % (host_name, stderr)
+                else:
+                    return 1, "Error(1423): Configuration file conflict. %s; host:%s" % (file_tmp, host_name)
+    else:
+        for file_tmp in filenames:
+            retcode, stdout, stderr = _run_local_cmd("scp %s %s:%s" % (file_tmp, host_name, file_tmp))
+            if retcode:
+                return 1, "Error(055): Failed to copy file to remote host:%s. %s" % (host_name, stderr)
+    return 0, "success"
+
+
+def mutil_thread_osdcreate(host_disks_lists):
+    """
+    do remote osd create in multiprocess
+    :param: host_disks_lists: hosts and disks info. like this: inspur01:/dev/sdb,/dev/sdc;inspur02:/dev/sdb,/dev/sdc...
+    :return: result
+    """
+    log.info("start create remote osds...")
+    # print "start create remote osds..."
+    result = Result()
+    host_disks_list = host_disks_lists.split(";")
+    hosts_list = []
+    disks_list = []
+    osdids_list = []
+    for host_disks in host_disks_list:
+        try:
+            host, disks = host_disks.split(":")
+            if disks.strip() == "" or host.strip() == "":
+                _exit_with_error("Error(610): Invalid input. %s" % host_disks_lists)
+            hosts_list.append(host.strip())
+            # push icfs.conf
+            error, info = push_icfs_config_to_remote("/etc/icfs/icfs.conf", host)
+            if error:
+                _exit_with_error(info)
+            # force to push icfs.client.admin.keyring
+            error, info = push_icfs_config_to_remote("/etc/icfs/icfs.client.admin.keyring", host, force=True)
+            if error:
+                _exit_with_error(info)
+            disk_list = [disk.strip() for disk in disks.split(",") if disk.strip() != ""]
+            disks_list.append(disk_list)
+        except:
+            _exit_with_error("Error(610): Invalid input. %s" % host_disks_lists)
+    # get osdid list
+    for index in range(len(disks_list)):
+        error, nowcount = get_numb_of_osds()
+        if error:
+            __rm_osd_id(osdids_list)
+            _exit_with_error(nowcount)
+        error, osdid_list = osd_batch_create(nowcount=nowcount, total=len(disks_list[index]))
+        if error:
+            __rm_osd_id(osdids_list)
+            _exit_with_error(osdid_list)
+        else:
+            osdids_list.append(osdid_list)
+    # mutiprocess
+    log.info("hosts_list %s" % hosts_list)
+    log.info("disks_list %s" % disks_list)
+    log.info("osdids_list %s" % osdids_list)
+    executor = ThreadPoolExecutor(cpu_count())
+    future = executor.map(remote_create_osd, hosts_list, disks_list, osdids_list)
+    ret_code = 0
+    if opts.has_param("json"):
+        result_tmp = []
+        for return_info in future:
+            tmp_json = json.loads(return_info)
+            if tmp_json["code"] == 1:
+                ret_code = 1
+            result_tmp.append(tmp_json)
+        print json.dumps(result_tmp)
+    else:
+        for return_info in future:
+            if "Error" in return_info:
+                ret_code = 1
+            result.mess += return_info + "\n"
+        if result.mess[-1] == "\n":
+            result.mess = result.mess[0:-1]
+        print result.mess
+    sys.exit(ret_code)
+
+
+def umount_mount_point(mount_point):
+    """
+    umount mountpoint
+    :param mount_point: path
+    :return:
+    """
+    points = mount_point.split(",")
+    result = Result()
+    mess_dict = dict()
+    for point in points:
+        retcode, mess = umount_device(point)
+        mess_dict[point] = mess
+        result.code |= retcode
+        result.mess += point + ":" + mess + "\n"
+    if opts.has_param("json"):
+        result.mess = mess_dict
+    return result
+
+
+def remote_operation(host_list, params):
+    """
+    do operation on remote host
+    :param host_list: host list
+    :param params:
+    :return:
+    """
+    results = []
+    exit_code = 0
+    cmd = "icfs-admin-disktool %s" % params
+    cmds = []
+    for i in range(len(host_list)):
+        cmds.append(cmd)
+    executor = ThreadPoolExecutor(cpu_count())
+    future = executor.map(_run_remote_cmd, cmds, host_list)
+    index = 0
+    for return_info in future:
+        result = dict()
+        result["host"] = host_list[index]
+        index += 1
+        retcode, stdout, stderr = return_info
+        result["code"] = retcode
+        exit_code |= retcode
+        if opts.has_param("json"):
+            ret_json = json.loads(stdout)
+            result["mess"] = ret_json["mess"]
+        else:
+            if stdout == "":
+                result["mess"] = stderr
+            else:
+                result["mess"] = stdout
+        results.append(result)
+    if opts.has_param("json"):
+        print json.dumps(results)
+    else:
+        print_str = ""
+        for dic in results:
+            print_str += dic["host"] + ":\n"
+            print_str += dic["mess"] + "\n"
+        if print_str[-1] == "\n":
+            print_str = print_str[0:-1]
+        print print_str
+    sys.exit(exit_code)
+
+
+# handler sys.argvs
+
+
+def do_get_list():
+    """
+    query disk list
+    icfs-admin-disktool --getdisks [--json]
+    icfs-admin-disktool --getdisks --disk /dev/sdb[,/dev/sdc] [--json]
+    icfs-admin-disktool --getdisks --disk /dev/sdb1 [--json]
+    :return:
+    """
+    disk = []
+    if opts.has_param("disk"):
+        disk = opts.disk
+        disk = disk.split(",")
+        disk = [tmp for tmp in disk if tmp != ""]
+    check_osd = False
+    if opts.has_param("checkosd"):
+        check_osd = True
+    format_out_put = "pretty"
+    if opts.has_param("json"):
+        format_out_put = "json"
+    return print_disk_info(disks=disk, format_out_put=format_out_put, check_osd=check_osd)
+
+
+def do_create_part():
+    """
+    create partition
+    icfs-admin-disktool --create_part --disk /dev/sdb --size xxx,xxx,xxx
+    icfs-admin-disktool --create_part --disk /dev/sdb --count n
+    icfs-admin-disktool --create_part --disk /dev/sdb,/dev/sdc --size xxx,xxx,xxx
+    icfs-admin-disktool --create_part --disk /dev/sdb,/dev/sdc --count n
+    :return:
+    """
+    size = None
+    count = None
+    if not opts.has_param("disk"):
+        _exit_with_error("Error(610): Invalid input need --disk")
+    if opts.has_param("size") and opts.has_param("count"):
+        _exit_with_error("Error(610): Invalid input need --size and --count can't used together")
+    if not opts.has_param("size") and not opts.has_param("count"):
+        _exit_with_error("Error(610): Invalid input need --size or --count")
+    if opts.has_param("size"):
+        size = opts.size
+    if opts.has_param("count"):
+        count = opts.count
+    disk = opts.disk
+    if size:
+        return create_part_by_part_size(disk, size)
+    else:
+        return create_part_by_part_count(disk, count)
+
+
+def do_delete_part():
+    """
+    delete partitions
+    icfs-admin-disktool --delete_part --disk /dev/sdb --parts /dev/sdb1,/dev/sdb2 [--json]
+    icfs-admin-disktool --delete_part --disk /dev/sdb --parts ALL  [--json]
+    icfs-admin-disktool --delete_part --disk /dev/sdb,/dev/sdc,/dev/sdd --parts ALL  [--json]
+    :return:
+    """
+    disk = None
+    parts = None
+    if not opts.has_param("disk"):
+        _exit_with_error("Error(610): Invalid input need --disk")
+    else:
+        disk = opts.disk
+    if not opts.has_param("parts"):
+        _exit_with_error("Error(610): Invalid input need --parts")
+    else:
+        parts = opts.parts
+    return delete_part(disk, parts)
+
+
+def do_ssd_mon():
+    """
+    create and init ssd partition for mon
+    icfs-admin-disktool --ssd_mon
+    icfs-admin-disktool --ssd_mon --host h1,h2,h3,h4
+    icfs-admin-disktool --ssd_mon --disk disk_name (clear disk then create partition)
+    icfs-admin-disktool --ssd_mon --disk part_name (format partition)
+    :return:
+    """
+    disk_label = None
+    if opts.has_param("disk"):
+        disk_label = opts.disk
+    return prepare_ssd_part_for_mon(disk_label)
+
+
+def do_create_osd():
+    """
+    create osd
+    icfs-admin-disktool --create_osd --disk /dev/sdb,/dev/sdc,/dev/sdd1
+    icfs-admin-disktool --create_osd --disk /dev/sdb,/dev/sdc,/dev/sdd1 --osd_ids 1,2,3  (zhe ge ge shi shou dong bie yong ,chu le wo)
+    len(disks) = len(osd_ids)
+    :return:
+    """
+    if not opts.has_param("disk"):
+        _exit_with_error("Error(610): Invalid input need --disk")
+    disks = opts.disk
+    osd_ids = None
+    cache_size = None
+    log.debug(opts.__dict__)
+    if opts.has_param("osd_ids"):
+        osd_ids = opts.osd_ids
+    if opts.has_param("ssd_cache"):
+        cache_size = opts.ssd_cache
+    return create_osds(disks, osd_ids, cache_size)
+
+
+def get_hostname_list():
+    hostname = []
+    pattern = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(\w*?)(?:#.*)?$")
+    try:
+        with open("/etc/hosts", "r") as fp:
+            lines = fp.readlines()
+    except IOError:
+        return hostname
+
+    for line in lines:
+        m = pattern.match(line)
+        if m is None:
+            continue
+        if m.group(2) == 'localhost localhost.localdomain localhost4 localhost4.localdomain4':
+            continue
+        hostname.append(m.group(2))
+
+    return hostname
+
+
+def sycn_hosts(new_hosts_list):
+    # add the new host
+    with open("/etc/hosts", 'a+') as host_file:
+        for host in new_hosts_list:
+            if not _run_local_cmd("cat /etc/hosts | grep %s" % host)[1]:
+                # get the host name
+                host_name_ret, host_name, host_name_stderr = _run_remote_cmd("hostname", host)
+                if host_name_ret:
+                    return 1, host_name_stderr
+                if _run_local_cmd("cat /etc/hosts | grep %s" % host_name)[1]:
+                    return 1, "have replicate host name %s ip %s in /etc/hosts" % (host_name, host)
+                host_file.write("%s %s" % (host, host_name))
+    # get all host in cluster
+    hosts = get_hostname_list()
+    # publish the hosts file
+    for host in hosts:
+        retcode, stdout, stderr = _run_local_cmd("scp /etc/hosts %s:/etc/hosts" % host)
+        if retcode:
+            return 1, "Error(055): Failed to copy file to remote host:%s. %s" % (host, stderr)
+
+
+def do_remote_osdcreate():
+    """
+    do remote osd create
+    host_list:  inspur01:/dev/sdb,/dev/sdc;inspur02:/dev/sdb,/dev/sdc...
+    icfs-admin-disktool --host_list inspur01:/dev/sdb,/dev/sdc;inspur02:/dev/sdb,/dev/sdc[;hostname:disk1,disk2]
+    :return: result
+    """
+    host_disks_lists = opts.host_list
+    mutil_thread_osdcreate(host_disks_lists)
+
+
+def do_umount():
+    """
+    umount: mount_point
+    icfs-admin-disktool --umount /dev/sdb1,/dev/sdb2,/dev/sdc1,/dev/sdc2
+    :return:
+    """
+    mount_point = opts.umount
+    return umount_mount_point(mount_point)
+
+
+def do_remote_operation():
+    """
+    do remote operation
+    :return:
+    """
+    hosts = opts.host
+    opt_str = ""
+    for key, value in opts.__dict__.items():
+        if key == "host":
+            continue
+        opt_str += " --%s %s" % (key, value)
+    remote_operation(hosts.split(","), opt_str)
+
+
+def usage():
+    print """Help(-h|--help) for icfs-admin-disktool:
+Usage:
+>> icfs-admin-disktool--+ --getdisks +------------------+-+-----------------+--><
+                                     ' --disk disk_list '-' --host host_list'
+>> icfs-admin-disktool--+ --delete_part + --disk disk_path + --parts disk_part +--><
+>> icfs-admin-disktool--+ --create_part + --disk disk_path + --size size_list +-><
+                                                          ' --count part_count'
+>> icfs-admin-disktool--+ --umount mount_points +---><
+>> icfs-admin-disktool--+ --ssd_mon + --host host_list +--><
+>> icfs-admin-disktool--+ --create_osd + --disk disk_list +-------------------------+-><
+                                                           '--ssd_cache cache_value'
+>> icfs-admin-disktool--+ --host_list host_disk_list +--+------------------------+--><
+                                                         '--ssd_cache cache_value'
+Options:
+    -h,--help       show help message
+    --getdisks      get disk info
+    --delete_part   delete partitions
+    --create_part   create new partitions
+    --umount        umount device
+    --ssd_mon       put mon data on ssd partition
+    --create_osd    create osds
+    --host_list     create osds by multithreading way
+    --disk          disk list, more than one disk name split by ','
+    --host          host list, more than one host split by ','
+    --parts         partition list, more than one partition split by ','
+    --size          partition size, more than one size split by ','
+    --count         partition count
+    --json          get output in json format
+Values:
+    disk_list       operation --getdisks and --create_osd, disk_list like this:/dev/sdb[,/dev/sdc[,/dev/sdd1]]
+    host_list       operation --getdisks and --ssd_mon, host_list like this: inspur1[,inspur2]
+    disk_path       operation --delete_part and --create_part, disk_path like this: /dev/sdb[,/dev/sdc]
+    disk_part       operation --delete_part, disk_part can be partition path like: /dev/sdb1 and ALL.
+                    if disk_part=ALL , disk_path cat be /dev/sdb or /dev/sdb,/dev/sdc[,/dev/sdd...]
+                    if disk_part=/dev/sdb1,/dev/sdb2, disk_path should be /dev/sdb
+    size_list       operation --create_part, size_list like this: 10G[,50G]. integer+[K|M|G|T]
+    part_count      operation --create_part, part_count is an integer
+    mount_points    operation --umount, mount_points like this: /dev/sdb1[,/mnt/tmp]
+    host_disk_list  operation --host_list, host_disk_list format: inspur1:/dev/sdb,/dev/sdc1[;inspur2:/dev/sdb,/dev/sdc1]
+                                           should be included by "'" """
+    sys.exit(0)
+
+
+# multithreading lock
+mutex = threading.Lock()
+
+if __name__ == "__main__":
+    opts = None
+    reload(sys)
+    sys.setdefaultencoding("utf-8")
+    try:
+        opts, agrs = getopt.getopt(sys.argv[1:],
+                                   "h",
+                                   ["help",
+                                    "json",
+                                    "debug",
+                                    "host=",
+                                    "getdisks",
+                                    "disk=",
+                                    "umount=",
+                                    "delete_part", "parts=",
+                                    "create_part", "size=", "count=",
+                                    "ssd_mon",
+                                    "create_osd", "osd_ids=",
+                                    "host_list=",
+                                    "checkosd",
+                                    "ssd_cache="])
+    except Exception, e:
+        _exit_with_error("Error(610): Invalid input %s" % str(e))
+    para_dic = {}
+    # delete '-' or '--'
+    for key, value in opts:
+        if key[0] == "-":
+            key = key[1:]
+        if key[0] == "-":
+            key = key[1:]
+        para_dic[key] = value
+    opts = Opts(para_dic)
+    # get hostname
+    # localhost = socket.gethostname()
+    # get log
+    if opts.has_param("debug"):
+        log = icfs_log.get_log("icfs-admin-disktool", level=icfs_log.DEBUG)
+    else:
+        log = icfs_log.get_log("icfs-admin-disktool")
+    # do operation
+    result = None
+    if opts.has_param("h") or opts.has_param("help"):
+        usage()
+    elif opts.has_param("host"):
+        do_remote_operation()
+    elif opts.has_param("getdisks"):
+        result = do_get_list()
+    elif opts.has_param("delete_part"):
+        result = do_delete_part()
+    elif opts.has_param("create_part"):
+        result = do_create_part()
+    elif opts.has_param("ssd_mon"):
+        result = do_ssd_mon()
+    elif opts.has_param("create_osd"):
+        result = do_create_osd()
+    elif opts.has_param("host_list"):
+        do_remote_osdcreate()
+    elif opts.has_param("umount"):
+        result = do_umount()
+    # elif opts.has_param("test"):
+    #     print get_disk_info('/dev/vdc', conver_size=False)[1].parts[0].__dict__
+    #     sys.exit(0)
+    if len(opts.__dict__) == 0:
+        usage()
+    # print result
+    if not result:
+        print "Error(553): Unknown error"
+        sys.exit(1)
+    if result.code == 0 and result.mess == "":
+        result.mess = "success"
+    if opts.has_param("json"):
+        print json.dumps(result.__dict__)
+    else:
+        if result.mess[-1] == "\n":
+            result.mess = result.mess[0:-1]
+        print result.mess
+    sys.exit(result.code)

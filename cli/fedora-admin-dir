@@ -1,0 +1,1525 @@
+#!/usr/bin/python
+#coding:utf-8
+import os
+import sys
+import getopt
+import commands
+import re
+import time
+import sqlite3
+from distutils.log import INFO
+import json
+from ConfigParser import ConfigParser
+from icfs_util import IcfsVersion
+
+'''
+#modify at 2016-12-9 by huper . resove bug:5157 create dir error
+#modify at 2016-12-19 by huper. modify dir_create() before echo ctime >> .dir_ctime add delete old info
+#modify at 2017-01-10 by shaoning. check whether ftp shared directory before delete it
+#modify at 2017-02-23 by shizonghua. Delete the strategy record in .dir_ctime file corresponding to the creating dir name
+ 
+'''
+DEBUG = 0
+
+def usage():
+    print """Help(-h|--help)for icfs-admin-dir:
+Usage:
+>> icfs-admin-dir ----+ --create +----><
+                      + --query  +----><
+                      + --set    +----><
+                      ' --delete '----><
+Functions: Create directory, query directory information, directory editor, delete directory
+Options:
+  --create:    create directory
+  --query:     query directory
+  --set:       directory editor
+  --delete:    delete directory 
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+icfs-admin-dir --create:
+Usage:
+>> icfs-admin-dir ---- --create ---- -p path ---- -u user_name ---- -g group_name ---- --mod mode_value ---->
+>--------------------+------------------------------------------------------------------------------+------><
+                     + --------------------- --rep rep_value ---------------------------------------+
+                     + --eras ---- -k k ---- -m m ---- -n n ------- -s strip_size ------------------+
+                     '  -------------------- --pool poolname ---------------------------------------'
+Functions: Create directory to set the directory name, path, UGO permissions, user/user groups,and data protection policies
+Options:
+  -p:        target absolute path
+  -u:        user name
+  -g:        group name
+  --mod:     UGO 
+  --eras:    correction and deletion strategy and the setting of the strip depth
+  -k:        data block
+  -m:        check block
+  -n:        redundancy node
+  --rep:     replica strategy
+  -s:        strip size
+  --pool:    the pool name
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+icfs-admin-dir --query:
+Usage:
+>> icfs-admin-dir ---- --query ---- -p path ----+    -- list   +----><
+                                                ' --redundancy '
+Functions: Directory information
+Options:
+  --list:       list of basic information
+  --redundancy: directory details and protection policies
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+icfs-admin-dir --set:
+Usage:
+>> icfs-admin-dir --set ---- -p path ----+    -u user_anme ---- -g group_name     +------------><
+                                         + -------- --mod mode_value -------------+
+                                         + -------- --rep re_value ---------------+
+                                         + ----- --rep re_value ---- --redundancy-+
+                                         + -- -k k ---- -m m ---- -n n ---+----+--+
+                                                                          ' -s '
+                                         '-------  --pool poolname ---------------'
+Functions: Modify the directory belongs to the user,the user group,UGO permissions,copy protection policy
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully 
+
+icfs-admin-dir --delete:
+>> icfs-admin-dir --delete ---- -p path
+Functions: Delete directory and storage pool
+Options: As above
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully """
+
+
+# check icfs-fuse, mount it if currently not mount
+def check_fuse():
+    status, output = commands.getstatusoutput("mount |grep -w icfs-fuse |grep -w /mnt/icfs")
+    if status != 0:
+        status, output = commands.getstatusoutput("icfs-fuse /mnt/icfs")
+        if "fuse failed to start" in output:
+            return False
+
+    return True
+
+
+def get_all_snapshot_path():
+    path_list = []
+    status, output = commands.getstatusoutput("icfs-query-snaps all")
+    if status != 0:
+        print "Error(1399): Unknown error icfs-query-snaps failed"
+        sys.exit(1)
+
+    pattern = re.compile("^\s*\"dir\": \"\\\/share(.*)\",\s*$")
+    lines = output.splitlines()
+    for line in lines:
+        match = pattern.match(line)
+        if match is None:
+            continue
+
+        tmp_path = match.group(1)
+        tmp_path = tmp_path.replace("\\/", "/")
+        if tmp_path == "":
+            tmp_path = "/"
+
+        if tmp_path not in path_list:
+            path_list.append(tmp_path)
+
+    return path_list
+
+
+def has_snapshot(relative_path):
+    path_list = get_all_snapshot_path()
+    for tmp_path in path_list:
+        part_list1 = relative_path.split("/")
+        part_list2 = tmp_path.split("/")
+        part_list1 = [i for i in part_list1 if i != ""]
+        part_list2 = [i for i in part_list2 if i != ""]
+
+        min_len = min(len(part_list1), len(part_list2))
+        same_part_list = []
+        for i in range(min_len):
+            if part_list1[i] != part_list2[i]:
+                break
+
+            same_part_list.append(part_list1[i])
+
+        if len(same_part_list) == len(part_list1):
+            return True
+
+    return False
+
+
+def get_fs_datapool_list():
+    # 2.get icfs fs all data pool
+    code, info = commands.getstatusoutput("icfs fs ls 2>/dev/null | awk -F ',' '{print $3}' | awk -F : '{print $2}' |"
+                                          " sed s/'\[\|\]'/''/g | awk '{ while(NR<=NF){print $NR; NR+=1;} }'")
+    if code != 0:
+        print "Error(526): Get pool error: ", info
+        return "error"
+    fs_pool_list = info.splitlines()
+    return fs_pool_list
+
+
+def dir_create(path,user_name, group_name, mode_value):
+    # check icfs-fuse
+    if not check_fuse():
+        Error(504)
+        Error(500)
+    
+    # check whether path exists
+    path_path = '/mnt/icfs' + path
+    if os.path.exists(path_path):
+        Error(501)
+        print path
+        Error(500)
+    
+    # check whether user exists
+    if commands.getstatusoutput("cat /etc/passwd|cut -d ':' -f1|grep -w %s"%(user_name))[1] == "":
+        Error(401)
+        print user_name
+        Error(500)
+    
+    # check whether group exists
+    if commands.getstatusoutput("cat /etc/group|grep -w ^%s|cut -d ':' -f1"%(group_name))[1] == "":
+        Error(401)
+        print group_name
+        Error(500)
+    
+    # mkdir
+    mkdir_output=commands.getoutput("mkdir %s"%(path_path))
+    if mkdir_output:
+        Error(610)
+        print path
+        Error(500)
+    
+    # chown
+    if commands.getstatusoutput("chown %s %s"%(user_name,path_path))[0]:
+        Error(503)
+        print user_name
+        os.system("rm -rf %s"%(path_path))  
+        Error(500)
+    
+    # chgrp
+    if commands.getstatusoutput("chgrp %s %s"%(group_name,path_path))[0]:
+        Error(503)
+        print group_name
+        os.system("rm -rf %s"%(path_path))
+        Error(500)
+    
+    # chmod
+    mode_value_int = parse_mod(mode_value)
+    if commands.getstatusoutput("chmod %s %s"%(mode_value_int,path_path))[0]:
+        Error(503)
+        print mode_value
+        os.system("rm -rf %s"%(path_path))
+        Error(500)
+    
+    # after all done, write dir_ctime
+    if not os.path.exists('/usr/bin/.dir_ctime'):
+        os.system("touch /usr/bin/.dir_ctime")
+    path_1=path.strip('/')
+    path_2=path_1.replace('/','_')  
+    dir_ctime=commands.getstatusoutput("stat %s|sed -n '6p'|awk '{print $2,$3}'|cut -c -19"%(path_path))[1]+" "+commands.getstatusoutput("echo %s"%(path_2))[1]
+    dir_name = dir_ctime.split()[-1]
+    dir_ctimes = commands.getoutput("cat /usr/bin/.dir_ctime")
+    delindex=[]
+    indexline = 1
+    for line in dir_ctimes.splitlines():
+        # delete the strategy record in .dir_ctime
+        if dir_name == line.split()[-1] or dir_name == line.split(':')[0]:
+            delindex.append(indexline)
+        indexline = indexline + 1
+    delindex.reverse()
+    for indexline in delindex:
+        os.system("sed -i '%sd' /usr/bin/.dir_ctime"%(str(indexline)))
+    os.system("echo %s >>/usr/bin/.dir_ctime"%dir_ctime)
+    if has_pool:
+        if pool_name not in get_fs_datapool_list():
+            print "Error(562):The pool %s is not add to the file system" % pool_name
+            sys.exit(1)
+        code, info = commands.getstatusoutput("setfattr -n icfs.dir.layout.pool -v %s %s" % (pool_name, path_path))
+        if code:
+            print "Error(1399):Unkonwn error %s" % info
+    # print "successfully dir create"
+
+
+def set_dir_strategy(path, pool_name):
+    # check icfs-fuse
+    # if not check_fuse():
+    #     Error(504)
+    #     Error(500)
+
+    # check whether path exists
+    path_path = '/mnt/icfs' + path
+    if not os.path.isdir(path_path):
+        print "Error(401): %s No exists" % path_path
+        sys.exit(1)
+    if pool_name not in get_fs_datapool_list():
+        print "Error(562):The pool %s is not add to the file system" % pool_name
+        sys.exit(1)
+    code, info = commands.getstatusoutput("setfattr -n icfs.dir.layout.pool -v %s %s" % (pool_name, path_path))
+    if code:
+        print "Error(1399):Unkonwn error %s" % info
+
+
+class Pool:
+    def __init__(self,*poolinfo):
+        self.name=poolinfo[0]
+        self.type=poolinfo[1]
+        self.size=poolinfo[2]
+    def name(self):
+        return self.name
+    def type(self):
+        return self.type
+    def size(self):
+        return self.size
+
+
+# create by huper
+def get_rep_pool_bysize(revalue, pool_type="replicated"):
+    # 1.check icfs-fuse
+    if not check_fuse():
+        Error(504)
+        return "error"
+    # 2.get all pool pool_type pool_size
+    pool_list = []
+    code,info = commands.getstatusoutput("icfs osd dump 2>/dev/null | grep pool | awk '{printf $3\"\t\"$4\"\t\"$6; print\"\";}' | sed s/\"'\"//g | grep %s"%(pool_type))
+    if code != 0:
+        print "Error(526): Get pool error ",info
+        return "error"
+    for poolinfo in info.splitlines():
+        poolinfo_ = poolinfo.split("\t")
+        if poolinfo_[2]==revalue:
+            pool_list.append(Pool(poolinfo_[0],poolinfo_[1],poolinfo_[2]))
+    # 3.get icfs fs all data pool
+    code,info = commands.getstatusoutput("icfs fs ls 2>/dev/null | awk -F ',' '{print $3}' | awk -F : '{print $2}' | sed s/'\[\|\]'/''/g | awk '{ while(NR<=NF){print $NR; NR+=1;} }'")
+    if code != 0:
+        print "Error(526): Get pool error: ",info
+        return "error"
+    fs_pool_list=info.splitlines()
+    # 4.find first available pool in fs_pool_list
+    for pool in pool_list:
+        if pool.size==revalue and pool.name in fs_pool_list:
+            return pool.name
+    #not find return "null"
+    return "null"
+# path 
+# revalue
+# if there is one pool size=revalue，use it。otherwise ，create a new pool。pool naming rule：pool_rep_repsize
+def set_rep_layout(path,revalue):
+    path_path="/mnt/icfs"+path
+    used_pool = get_rep_pool_bysize(revalue, "replicated")
+    #1.cluster error , rm the dir create before
+    if used_pool == "error":
+        commands.getstatusoutput("rm -rf %s"%(path_path))
+        commands.getstatusoutput("sed -i '/\<%s\>/d' /usr/bin/.dir_ctime"%path_path)
+        sys.exit(1)
+    #2.can't find available pool ,create new pool
+    if used_pool == "null":
+        return dir_rep(path,revalue)
+    #3.find pool , set layout
+    code,info = commands.getstatusoutput("/usr/bin/setfattr -n icfs.dir.layout.pool -v %s %s"%(used_pool,path_path))
+    if code == 0:
+        print "successfully create dir"
+    else:
+        print "create path error: "+info
+        commands.getstatusoutput("rm -rf %s"%(path_path))
+        commands.getstatusoutput("sed -i '/\<%s\>/d' /usr/bin/.dir_ctime"%path_path)
+
+        
+def dir_rep(path, revalue):
+    if not check_fuse():
+        Error(504)
+        Error(500)
+
+    path_path = '/mnt/icfs'+path
+    b=commands.getstatusoutput("icfs osd tree 2>/dev/null|grep osd|grep -w up|awk '{print $4}'")[1]
+    c=len(b.split('\n'))
+    e=(c * 100)/int(revalue)
+    i=0
+    while e>pow(2,i):
+        i=i+1
+    else:
+        e=pow(2,i)
+    pool_name="rep_pool_"+str(revalue)
+    if commands.getstatusoutput("rados lspools|grep -w %s"%(pool_name))[1]:
+        Error(501)
+        print pool_name
+        Error(500)
+    if not commands.getstatusoutput("/usr/bin/icfs osd pool create %s %s %s"%(pool_name,e,e))[0]:
+        if not commands.getstatusoutput("/usr/bin/icfs osd pool set %s size %s"%(pool_name,revalue))[0]:
+            if not commands.getstatusoutput("/usr/bin/icfs mds add_data_pool %s"%(pool_name))[0]:
+                if not commands.getstatusoutput("/usr/bin/setfattr -n icfs.dir.layout.pool -v %s %s"%(pool_name,path_path))[0]:
+#                     strategy=commands.getstatusoutput("echo %s:"%(pool_name))[1]+" rep "+commands.getstatusoutput("echo %s"%(revalue))[1]
+#                     os.system("echo %s >>/usr/bin/.dir_ctime"%strategy)
+                    print "successfully pool create and setfattr"
+                    return 0
+                else:
+                    Error(505)
+                    dir_del(path)
+                    Error(500)
+            else:
+                Error(503)
+                print "mds add_data_pool"
+                dir_del(path)
+                Error(500)
+        else:
+            Error(503)
+            print "osd pool set"
+            dir_del(path)
+            Error(500)
+    else:
+        Error(503)
+        print "osd pool create"
+        dir_del(path)
+        Error(500)
+    osd_capacity_balance_replicate(revalue, pool_name)
+
+
+def dir_eras(path, k, m, n):
+    if not check_fuse():
+        Error(504)
+        Error(500)
+
+    path_path = '/mnt/icfs'+path
+    b=commands.getstatusoutput("icfs osd tree 2>/dev/null|grep osd|grep -w up|awk '{print $4}'")[1]
+    c=len(b.split('\n'))
+    pool_name_1=path.strip("/")
+    pool_name=pool_name_1.replace('/','_')
+    if int(n)==0:
+        e=(c * 100)/(int(k)+int(m))
+        i=0
+        while e>pow(2,i):
+            i=i+1
+        else:
+            e=pow(2,i)
+        if not commands.getstatusoutput\
+        ("icfs_create_erasure_pool -p %s -k %s -m %s -g %s"%(pool_name,k,m,e))[0]:
+            if not commands.getstatusoutput\
+            ("/usr/bin/icfs mds add_data_pool %s"%(pool_name))[0]:
+                if not commands.getstatusoutput\
+                ("/usr/bin/setfattr -n icfs.dir.layout.pool -v %s %s"%(pool_name,path_path))[0]:
+                    strategy=commands.getstatusoutput("echo %s"%(pool_name))[1]+" "+commands.getstatusoutput("echo %s"%(k))[1]+"+"+commands.getstatusoutput("echo %s"%(m))[1]+":"+commands.getstatusoutput("echo %s"%(n))[1]
+                    os.system("echo %s >>/usr/bin/.dir_ctime"%strategy)
+                    print "successfully pool create and setfattr"
+                else:
+                    Error(505)
+                    dir_del(path)
+                    Error(500)
+            else:
+                Error(503)
+                print "add_data_pool"
+                dir_del(path)
+                Error(500)
+        else:
+            Error(503)
+            print "icfs_create_erasure_pool"
+            dir_del(path)
+            Error(500)
+    elif int(n)==1:
+        #m=2
+        e=(c * 100)/(int(k)+int(2))
+        i=0
+        while e>pow(2,i):
+            i=i+1
+        else:
+            e=pow(2,i)
+        if not commands.getstatusoutput("icfs_create_erasure_pool -p %s -k %s -m %s -g %s"%(pool_name,k,m,e))[0]:
+            node_name1=commands.getstatusoutput("cat /etc/hosts|grep -E '([0-9]{1,3}[\.]){3}[0-9]{1,3}'|sed '1d'|awk '{print $2}'")[1]
+            node_name1=node_name1.split('\n')
+            node_name=''
+            for i in node_name1: 
+                node_name= node_name+' '+i
+            k_m=int(k)+int(m)
+            if int(commands.getoutput("icfs osd tree 2>/dev/null|grep _n1$|wc -l"))*2<k_m:
+                if commands.getstatusoutput("icfs_create_diskpool_rule -m %s %s"%(m,node_name))[0]:
+                    Error(503)
+                    print "icfs_create_disk_pool"
+                    dir_del(path)
+                    Error(500)
+            if not commands.getstatusoutput("/usr/bin/icfs mds add_data_pool %s"%(pool_name))[0]:
+                setfattr_stat,setfattr_output=commands.getstatusoutput\
+                ("/usr/bin/setfattr -n icfs.dir.layout.pool -v %s %s"%(pool_name,path_path))
+                #print setfattr_stat
+                #print setfattr_output
+                if not setfattr_stat:
+                    strategy=commands.getstatusoutput("echo %s"%(pool_name))[1]+" "+commands.getstatusoutput("echo %s"%(k))[1]+"+"+commands.getstatusoutput("echo %s"%(m))[1]+":"+commands.getstatusoutput("echo %s"%(n))[1]
+                    os.system("echo %s >>/usr/bin/.dir_ctime"%strategy)
+                    print "successfully pool create"
+                else:
+                    Error(505)
+                    dir_del(path)
+                    Error(500)
+            else:
+                Error(503)
+                print "mds add_data_pool"
+                dir_del(path)
+                Error(500)
+        else:
+            Error(503)
+            print "icfs_create_pool"
+            dir_del(path)
+            Error(500)
+
+        # set "osd crush update on start = false" in icfs.conf
+        cfg_parser = ConfigParser()
+        ok_files = cfg_parser.read("/etc/icfs/icfs.conf")
+        if "/etc/icfs/icfs.conf" not in ok_files:
+            Error(553, "Parse icfs.conf failed")
+        if not cfg_parser.has_option("global", "osd crush update on start") or \
+                cfg_parser.get("global", "osd crush update on start") != "false":
+            if not cfg_parser.has_section("global"):
+                cfg_parser.add_section("global")
+            cfg_parser.set("global", "osd crush update on start", "false")
+            cfg_parser.write(open('/etc/icfs/icfs.conf', 'w'))
+            commands.getoutput("salt-cp '*' /etc/icfs/icfs.conf /etc/icfs/icfs.conf")
+
+
+def dir_check(dir_check_ele):
+    format = '\":\'%[]<>+;?*|@$'
+    if len(dir_check_ele)>32:
+        return False
+    if re.search(u"[\u4e00-\u9fa5]+",dir_check_ele.decode('utf8')):
+        return False
+    for char in format:
+        if char in dir_check_ele:
+            return False
+#   print dir_check_ele
+    return True
+
+
+def remove_dir_query_func():
+    remove_dir_query=""
+    try:
+        remove_dir_conn = sqlite3.connect("/usr/local/db/tasks.db")
+        remove_dir_conn_cu = remove_dir_conn.cursor()
+        remove_dir_list = remove_dir_conn_cu.execute("SELECT name FROM task")
+        for x in remove_dir_list:
+            x=str(x[0])
+            if x.find("Remove_directory")>=0:
+                x=x.replace("Remove_directory(","")
+                remove_dir_query=x.replace(")","")
+                remove_dir_query = "/mnt/icfs"+remove_dir_query
+                #remove_dir_query=remove_dir_query.split("/")[-1]
+                #print remove_dir_query
+        remove_dir_conn.close()
+    except Exception, err:
+        return remove_dir_query 
+    return remove_dir_query
+
+
+# get sub directory number
+# assert( abs_path is directory and startswith '/mnt/icfs' )
+def get_subdir_number(abs_path):
+    # get subdir number from MDS
+    relative_path = abs_path[10:]
+    socket_file = "/run/icfs/icfs-client.admin.asok"
+    status, output = commands.getstatusoutput("icfs daemon %s subdir_number %s 2>/dev/null" % (socket_file, relative_path))
+    if status == 0:
+        try:
+            var_dict = json.loads(output)
+            subdir_num_str = var_dict["subdir_number"]["subdir_number"]
+            subdir_num = int(subdir_num_str)
+        except (ValueError, KeyError):
+            subdir_num = -1
+    else:
+        subdir_num = -1
+
+    if subdir_num >= 0:
+        return subdir_num
+
+    # get subdir number with file system API
+    subdir_num = 0
+    for name in os.listdir(abs_path):
+        path_name = os.path.join(abs_path, name)
+        if os.path.isdir(path_name):
+            subdir_num += 1
+
+    return subdir_num
+
+
+def get_dir_stripe_unit(path):
+    # get dir attribute
+    code, stripe_unit = commands.getstatusoutput("getfattr -n icfs.dir.layout.stripe_unit %s"
+                                                 " --only-values 2>/dev/null" % path)
+    if code == 0 and stripe_unit != "":
+        return stripe_unit
+
+    # get sub_file attribute
+    tmp_file_path = os.path.join(path, ".tmp_file")
+    status, output = commands.getstatusoutput("touch %s" % tmp_file_path)
+    if status != 0:
+        return "none"
+
+    try:
+        status, stripe_unit = commands.getstatusoutput("getfattr -n icfs.file.layout.stripe_unit %s"
+                                                       " --only-values 2>/dev/null" % tmp_file_path)
+    finally:
+        commands.getoutput("rm -f %s" % tmp_file_path)
+
+    if status != 0 or stripe_unit == "":
+        return "none"
+
+    return stripe_unit
+
+
+def dir_query_list(path):
+    salt_test = commands.getoutput("service salt-master status")
+    if "unrecognized service" in salt_test:
+        Error(299)
+        sys.exit(1)
+
+    if not check_fuse():
+        Error(504)
+        Error(500)
+
+    a = '/mnt/icfs'
+    if path == '/':
+        path_path = a
+    else:
+        path_path = a+str(path)
+
+    if not os.path.isdir(path_path):
+        Error(401)
+        print path
+        Error(500)
+
+    query_db_rmdir = remove_dir_query_func()
+    b = commands.getoutput("ls -F %s|grep '/$'" % path_path)
+    b = b.split('\n')
+    dirname_list = []
+    for b_check_space in b:
+        if not b_check_space:
+            continue
+        b_check_format = b_check_space[:-1]
+        query_db_rmdir_check = path_path+'/'+b_check_format
+        if query_db_rmdir_check != query_db_rmdir:
+            dirname_list.append(b_check_format)
+
+    b = dirname_list
+    c = commands.getstatusoutput("ls %s -lht|grep ^d" % path_path)[1]
+    c = c.split('\n')
+    print "Directory".ljust(32), "Size".ljust(15), "Mtime".ljust(20), "Ctime".ljust(20), "UGO".ljust(12), "SDN".ljust(10), "Stripe".ljust(10)
+    if not dirname_list:
+        print "none".ljust(32), "none".ljust(15), "none".ljust(20), "none".ljust(20), "none".ljust(12), "0".ljust(10), "none".ljust(10)
+        sys.exit(1)
+
+    # get parent directory stripe_unit
+    parent_dir_stripe_unit = get_dir_stripe_unit(path_path)
+    for x in c:
+        d = x.split()
+        name = d[-1]
+        if name not in b:
+            continue
+
+        path_path_name = path_path+'/'+name
+        if path == '/':
+            path_name = path+name
+        else:
+            path_name = path+'/'+name
+        pool_name_1 = path_name.strip('/')
+        pool_name = pool_name_1.replace('/', '_')
+        ugo = d[0]
+        size = d[-5]
+        if not size == '0':
+            size += 'B'
+        dir_mtime = commands.getoutput("stat %s|sed -n '6p'|awk '{print $2,$3}'|cut -c -19" % path_path_name)
+        # dir_mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.stat(path_path_name).st_mtime))
+        if os.path.exists('/usr/bin/.dir_ctime'):
+            dir_ctime = commands.getoutput("cat /usr/bin/.dir_ctime|grep -w %s|sed -n '1p'|cut -c -19" % pool_name)
+        else:
+            dir_ctime = 'none'
+        if dir_ctime == '':
+            dir_ctime = 'none'
+        # sdn=commands.getoutput("ls -rlht %s|grep ^d|awk '{print $1}'|wc -l"%(path_path_name))
+        subdir_number = get_subdir_number(path_path_name)
+        sdn = str(subdir_number)
+
+        # get sub_directory stripe_unit
+        code, obj = commands.getstatusoutput("getfattr -n icfs.dir.layout.stripe_unit %s"
+                                             " --only-values 2>/dev/null" % path_path_name)
+        if code != 0 or obj == "":
+            obj = parent_dir_stripe_unit
+
+        try:
+            obj = str(int(obj)/1024/1024) + "MB"
+        except ValueError:
+            pass
+
+        print name.ljust(32), size.ljust(15), dir_mtime.ljust(20), dir_ctime.ljust(20), ugo.ljust(12), sdn.ljust(10), obj.ljust(10)
+
+
+def get_dir_pool(path):
+    code, pool_name_or_pool_id = commands.getstatusoutput("getfattr -n icfs.dir.layout.pool %s"
+                                                          " --only-values 2>/dev/null" % path)
+    if code == 0 and pool_name_or_pool_id != "":
+        return pool_name_or_pool_id
+
+    tmp_file_path = os.path.join(path, ".tmp_file")
+    status, output = commands.getstatusoutput("touch %s" % tmp_file_path)
+    if status != 0:
+        return "none"
+
+    try:
+        status, pool_name_or_pool_id = commands.getstatusoutput("getfattr -n icfs.file.layout.pool %s"
+                                                                " --only-values 2>/dev/null" % tmp_file_path)
+    finally:
+        commands.getoutput("rm -f %s" % tmp_file_path)
+
+    if status != 0 or pool_name_or_pool_id == "":
+        return "none"
+
+    return pool_name_or_pool_id
+
+
+# modify by huper
+def get_pool_strategy(pool_name_or_pool_id):
+    try:
+        int(pool_name_or_pool_id)
+        pool_info = commands.getoutput("icfs osd dump 2>/dev/null | grep pool | awk '{if($2==%s)print}' | "
+                                       "awk '{print $4\"\t\"$6\"\t\"$8\"\t\"$3}'"%(pool_name_or_pool_id))
+    except Exception, e:
+        pool_info = commands.getoutput("icfs osd dump 2>/dev/null | grep -w %s | awk '{print $4\"\t\"$6\"\t\"$8\"\t\"$3}'"
+                                       % pool_name_or_pool_id)
+    if pool_info == "":
+        return "none"
+    pool_info = pool_info.split("\t")
+    if pool_info[0] == "replicated":
+        return pool_info[1]
+    if pool_info[0] == "erasure":
+        k = int(pool_info[2])
+        m = int(pool_info[1])-int(k)
+        b = sys_data_type()
+        return str(k)+"+"+str(m)+":"+str(b)
+
+
+# added by json, get the cluster fs pool reps
+def get_rep_pool_strategy_list():
+    rep_list = []
+    for pool_name_or_pool_id in get_fs_datapool_list():
+        try:
+            int(pool_name_or_pool_id)
+            pool_info = commands.getoutput("icfs osd dump 2>/dev/null | grep replicated | awk '{if($2==%s)print}' | "
+                                           "awk '{print $4\"\t\"$6\"\t\"$8\"\t\"$3}'" % pool_name_or_pool_id)
+        except Exception, e:
+            pool_info = commands.getoutput("icfs osd dump 2>/dev/null | grep -w %s | awk '{print $4\"\t\"$6\"\t\"$8\"\t\"$3}'"
+                                           % pool_name_or_pool_id)
+        if pool_info == "":
+            return "none"
+        pool_info = pool_info.split("\t")
+        if pool_info[0] == "replicated":
+            rep_list.append(pool_info[1])
+    return rep_list
+
+
+# added by json, get the cluster fs pool erasures
+def get_era_pool_strategy_list():
+    eras_list = []
+    for pool_name_or_pool_id in get_fs_datapool_list():
+        try:
+            int(pool_name_or_pool_id)
+            pool_info = commands.getoutput("icfs osd dump 2>/dev/null | grep erasure | awk '{if($2==%s)print}' | "
+                                           "awk '{print $4\"\t\"$6\"\t\"$8\"\t\"$3}'" % pool_name_or_pool_id)
+        except Exception, e:
+            pool_info = commands.getoutput("icfs osd dump 2>/dev/null | grep -w %s | awk '{print $4\"\t\"$6\"\t\"$8\"\t\"$3}'"
+                                           % pool_name_or_pool_id)
+        if pool_info == "":
+            return "none"
+        pool_info = pool_info.split("\t")
+        if pool_info[0] == "erasure":
+            k = int(pool_info[2])
+            m = int(pool_info[1])-int(k)
+            b = sys_data_type()
+            eras_list.append(str(k)+"+"+str(m)+":"+str(b))
+    return eras_list
+
+
+def dir_query_redundancy(path):
+    salt_test = commands.getoutput("service salt-master status")
+    if "unrecognized service" in salt_test or "Active: inactive (dead)" in salt_test:
+        Error(299)
+        sys.exit(1)
+
+    if not check_fuse():
+        Error(504)
+        Error(500)
+
+    a = '/mnt/icfs'
+    if path == '/':
+        path_path = a
+    else:
+        path_path = a+str(path)
+
+    if not os.path.isdir(path_path):
+        Error(401)
+        print path
+        Error(500)
+
+    query_db_rmdir = remove_dir_query_func()
+    b = commands.getoutput("ls -F %s|grep '/$'" % path_path)
+    b = b.split('\n')
+    dirname_list = []
+    for b_check_space in b:
+        if not b_check_space:
+            continue
+        b_check_format = b_check_space[:-1]
+        query_db_rmdir_check = path_path+'/'+b_check_format
+        if query_db_rmdir_check != query_db_rmdir:
+            dirname_list.append(b_check_format)
+
+    b = dirname_list
+    c = commands.getstatusoutput("ls %s -lht|grep ^d" % path_path)[1]
+    c = c.split('\n')
+    print "Directory".ljust(32), "Size".ljust(15), "Mtime".ljust(20), "Ctime".ljust(20), "User".ljust(32), "Group".ljust(32), "UGO".ljust(15), "Strategy".ljust(10), "Pool"
+    if not dirname_list:
+        print " none".ljust(32), "none".ljust(15), "none".ljust(20), "none".ljust(20), "none".ljust(32), "none".ljust(32), "none".ljust(15), "none".ljust(10), "none"
+        sys.exit(1)
+
+    # get parent directory strategy
+    parent_dir_strategy = "none"
+    parent_dir_pool_name = get_dir_pool(path_path)
+    if parent_dir_pool_name != "none":
+        parent_dir_strategy = get_pool_strategy(parent_dir_pool_name)
+
+    for x in c:
+        d = x.split()
+        name = d[-1]
+        if name not in b:
+            continue
+
+        path_path_name = path_path+'/'+name
+        if path == '/':
+            path_name = path+name
+        else:
+            path_name = path+'/'+name
+        pool_name_1 = path_name.strip('/')
+        pool_name = pool_name_1.replace('/', '_')
+        size = d[-5]
+        if not size == '0':
+            size += 'B'
+        ugo = d[0]
+        dir_mtime = commands.getoutput("stat %s|sed -n '6p'|awk '{print $2,$3}'|cut -c -19" % path_path_name)
+        # dir_mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.stat(path_path_name).st_mtime))
+        if os.path.exists('/usr/bin/.dir_ctime'):
+            dir_ctime = commands.getoutput("cat /usr/bin/.dir_ctime|grep -w %s|sed -n '1p'|cut -c -19" % pool_name)
+        else:
+            dir_ctime = 'none'
+        if dir_ctime == '':
+            dir_ctime = 'none'
+
+        code, pool_name_or_pool_id = commands.getstatusoutput("getfattr -n icfs.dir.layout.pool %s"
+                                                              " --only-values 2>/dev/null" % path_path_name)
+        if code == 0 and pool_name_or_pool_id != "" and pool_name_or_pool_id != parent_dir_pool_name:
+            pool_name = pool_name_or_pool_id
+            strategy = get_pool_strategy(pool_name)
+        else:
+            pool_name = parent_dir_pool_name
+            strategy = parent_dir_strategy
+
+        user = d[2]
+        group = d[3:-5]
+        group = " ".join(group)
+        print name.ljust(32), size.ljust(15), dir_mtime.ljust(20), dir_ctime.ljust(20), user.ljust(32), group.ljust(32), ugo.ljust(15), strategy.ljust(10), pool_name
+
+
+def dir_set_chown_chgrp(path, user_name, group_name):
+    if not check_fuse():
+        Error(504)
+        Error(500)
+
+    if path == '/':
+        Error(610)
+        Error(500)
+
+    path_path = '/mnt/icfs'+path
+    pool_name = path.strip('/')
+    pool_name = pool_name.replace('/', '_')
+#   if commands.getstatusoutput("find %s -path %s"%(a,path_path))[1]:
+    if os.path.isdir(path_path):
+        if not commands.getstatusoutput("cat /etc/passwd|grep -w ^%s|cut -d ':' -f1"%(user_name))[1]:
+            Error(401)
+            print user_name
+            Error(500)
+        if commands.getstatusoutput("cat /etc/group|grep -w %s|cut -d ':' -f1"%(group_name))[1]:
+            if not commands.getstatusoutput("chown %s %s"%(user_name,path_path))[0]:
+                if not commands.getstatusoutput("chgrp %s %s"%(group_name,path_path))[0]:
+                    print "0: successfully"
+                else:
+                    Error(503)
+                    print "chgrp"
+                    Error(500)
+            else:
+                Error(503)
+                print "chown"
+                Error(500)
+        else:
+            Error(401)
+            print group_name
+            Error(500)
+    else:
+        Error(401)
+        print path
+        Error(500)
+
+
+def dir_set_ugo(path, mode_value):
+    if not check_fuse():
+        Error(504)
+        Error(500)
+
+    if path == '/':
+        Error(610)
+        Error(500)
+
+    path_path = '/mnt/icfs'+path
+    mode_value_int = parse_mod(mode_value)
+    if not commands.getstatusoutput("chmod %s %s"%(mode_value_int,path_path))[0]:
+        print "0:successfully"
+    else:
+        Error(503)
+        print "chmod"
+        Error(500)
+
+# modify by huper
+def dir_set_rep_revalue(path,revalue):
+    path_path = "/mnt/icfs"+path
+    used_pool = get_rep_pool_bysize(revalue, "replicated")
+    #1.cluster error , rm dir create foregoing 
+    if used_pool == "error":
+        sys.exit(1)
+    #2.create new pool
+    if used_pool == "null":
+        pool_name="rep_pool_"+str(revalue)
+        # calculate pg_num and pgp_num
+        b = commands.getstatusoutput("icfs osd tree 2>/dev/null|grep osd|grep -w up|awk '{print $4}'")[1]
+        c = len(b.split('\n'))
+        e = (c * 100) / int(revalue)
+        i = 0
+        while e > pow(2, i):
+            i = i + 1
+        else:
+            e = pow(2, i)
+        # create new pool
+        code,info = commands.getstatusoutput("/usr/bin/icfs osd pool create %s %s %s"%(pool_name,e,e))
+        if code != 0:
+            print info 
+            print "set rep = "+revalue+" error"
+            sys.exit(1)
+        # set pool size
+        commands.getoutput("/usr/bin/icfs osd pool set %s size %s"%(pool_name,revalue))
+        # get file system name
+        status, output = commands.getstatusoutput("icfs fs ls -f json 2>/dev/null")
+        if status != 0:
+            print output
+            print "get fs name error"
+            sys.exit(1)
+
+        try:
+            fs_info = json.loads(output)
+            fs_name = fs_info[0]["name"]
+        except (ValueError, IndexError, KeyError) as err:
+            print err
+            print "get fs name error"
+            sys.exit(1)
+        # add data pool to file system
+        code,info = commands.getstatusoutput("/usr/bin/icfs fs add_data_pool %s %s"%(fs_name, pool_name))
+        if code != 0:
+            # rollback when failed
+            print "add mds data_pool error , delete pool : "+pool_name
+            commands.getstatusoutput("/usr/bin/icfs osd pool delete %s %s --yes-i-really-really-mean-it"%(pool_name,pool_name))
+            sys.exit(1)
+        # set dir pool
+        code,info = commands.getstatusoutput("/usr/bin/setfattr -n icfs.dir.layout.pool -v %s %s"%(pool_name,path_path))
+        if code != 0:
+            if DEBUG:
+                print info
+            print "Error(505): Failed setfattr pool and directory, try again later"
+            sys.exit(1)
+        print "0: successfully"
+        sys.exit(0)
+    #3.set layout
+    code,info = commands.getstatusoutput("/usr/bin/setfattr -n icfs.dir.layout.pool -v %s %s"%(used_pool,path_path))
+    if code != 0:
+        if DEBUG:
+            print info
+        print "Error(505): Failed setfattr pool and directory, try again later"
+        sys.exit(1)
+    print "0: successfully"
+    sys.exit(0)
+
+
+# modify by huper
+def dir_del(path):
+    # check icfs-fuse
+    if not check_fuse():
+        Error(504)
+        Error(500)
+    
+    # root directory can not be removed
+    if path == "/":
+        Error(610)
+        Error(500)
+    
+    # check whether directory exists
+    path_path = "/mnt/icfs" + path
+    if not os.path.isdir(path_path):
+        Error(401)
+        print path
+        Error(500)
+    
+    # clear directory
+    status, output = commands.getstatusoutput("rm -rf %s/*" % path_path)
+    if status != 0:
+        Error(503)
+        print "del",path
+        Error(500)
+    
+    # delete information in .dir_ctime
+    pool_name_1=path.strip('/')
+    pool_name=pool_name_1.replace('/','_')
+    status, output = commands.getstatusoutput("sed -i '/\<%s\>/d' /usr/bin/.dir_ctime"%pool_name)
+    if status != 0:
+        Error(503)
+        print "del in .dir_ctime"
+        Error(500)
+    
+    # delete directory
+    print "deleting..."
+    status, output = commands.getstatusoutput("rm -rf %s" % path_path)
+    if status != 0:
+        Error(503)
+        print "del",path
+        Error(500)
+    print "successfully"
+
+def Error(num):
+    if num==500:
+#       if commands.getstatusoutput("df -h|grep -w icfs-fuse|grep -w /mnt/path_for_fuse_mount")[1]:
+#           os.system("umount -l /mnt/path_for_fuse_mount")
+#           os.system("rm -rf /mnt/path_for_fuse_mount")    
+        sys.exit(1)
+    if num==3006:
+        print "Error(3006): This type of Tasks is maximizing",
+    if num==501:
+        print "Error(501): Already exists",
+    if num==610:
+        print "Error(610): Invalid input! ",
+    if num==503:
+        print "Error(503): Failed",
+    if num==504:
+        print "Error(504): File system not mount",
+    if num==505:
+        print "Error(505): Failed setfattr pool and directory, try again later",
+    if num==401:
+        print "Error(401): No exists",
+    if num==506:
+        print "Error(506): Directory include subdirectory",
+    if num==507:
+        print "Error(507): NFS shared directory",
+    if num==508:
+        print "Error(508): CIFS shared directory",
+    if num==509:
+        print "Error(509): The system is cleaning up the data,please try again later!",
+    if num==555:
+        print "Error(555): FTP shared directory",
+    if num==299:
+        print "Error(299): Invalid salt service"
+    if num==556:
+        print "Error(556): Cluster is not health, can't execute OSD capacity balance"
+        sys.exit(1)
+    if num==557:
+        print "Error(557): The number of OSD is not same between different nodes in cluster, can't execute OSD capacity balance"
+        sys.exit(1)
+    if num==558:
+        print "Error(558): The weight in crushmap is not same between different nodes in cluster, can't execute OSD capacity balance"
+        sys.exit(1)
+    if num==562:
+        print "Error(562): This will remove snapshots in the directory as well. If you are certain to do this, pass the \"--delete-snap\" parameter."
+        sys.exit(1)
+
+
+def salt_stat_check():
+    salt_ck=commands.getoutput("service salt-master status")
+    if "unrecognized service" in salt_ck:
+        Error(299)
+        sys.exit(1)
+    elif "stopped" in salt_ck:
+        salt_rst=commands.getoutput("service salt-master start")
+        if not salt_rst or "FAILED" in salt_rst:
+            Error(299)
+            sys.exit(1)
+    salt_down=commands.getoutput("salt-run manage.down")
+    if "YPBINDPROC_DOMAIN: Domain not bound" in salt_down:
+        salt_YP=salt_down.lstrip("YPBINDPROC_DOMAIN: Domain not bound")
+    else :
+        salt_YP=salt_down
+    if salt_YP:
+        salt_dd=salt_YP.replace("\n",",")
+        salt_dl=salt_dd.lstrip(',')
+        #print "Invalid: ",salt_dl
+        print "Error(307): Salt service down in %s"%salt_dl
+        sys.exit(1)
+
+    salt_key=commands.getoutput("salt-key -l acc")
+    salt_key_l=salt_key.split('\n')
+    if "Accepted Keys:" in salt_key_l:
+        salt_key_l.remove("Accepted Keys:")
+    if "YPBINDPROC_DOMAIN: Domain not bound" in salt_key_l:
+        salt_key_l.remove("YPBINDPROC_DOMAIN: Domain not bound")
+    if not salt_key_l:
+        Error(299)
+        sys.exit(1)
+
+
+def sys_data_type():
+    osd_dump = commands.getoutput("/usr/bin/icfs osd tree 2>/dev/null|grep _n1")
+    if osd_dump:
+        return 1
+    else:
+        return 0
+
+def check_mod(mod_str):
+    pattern = re.compile("^([r-][w-][x-]){3}$")
+    m = pattern.match(mod_str)
+    if m == None:
+        Error(610)
+        print mode_value
+        Error(500)
+
+def parse_mod(mod_str):
+    if len(mod_str) != 9:
+        Error(610)
+        print mode_value
+        Error(500)
+    
+    mode_u = (4 if mod_str[0] == "r" else 0) + (2 if mod_str[1] == "w" else 0) + (1 if mod_str[2] == "x" else 0)
+    mode_g = (4 if mod_str[3] == "r" else 0) + (2 if mod_str[4] == "w" else 0) + (1 if mod_str[5] == "x" else 0)
+    mode_o = (4 if mod_str[6] == "r" else 0) + (2 if mod_str[7] == "w" else 0) + (1 if mod_str[8] == "x" else 0)
+    return "%d%d%d" % (mode_u, mode_g, mode_o)
+
+def check_rep(rep_str):
+    try:
+        rep_num = int(rep_str)
+    except ValueError, e:
+        Error(610)
+        print rep_str
+        sys.exit(1)
+    
+    if rep_num < 2 or rep_num > 3:
+        Error(610)
+        print rep_str
+        sys.exit(1)
+    
+    output = commands.getoutput("cat /etc/hosts|grep -E '([0-9]{1,3}[\.]){3}[0-9]{1,3}'|sed '1d'|awk '{print $2}'")
+    if rep_num > len(output.split('\n')):
+        Error(610)
+        print rep_str
+        sys.exit(1)
+
+def check_k_m_n(k_str, m_str, n_str):
+    try:
+        k_num = int(k_str)
+        m_num = int(m_str)
+        n_num = int(n_str)
+    except ValueError, e:
+        Error(610)
+        print "k:%s m:%s n:%s" % (k_str, m_str, n_str)
+        sys.exit(1)
+    
+    output1 = commands.getoutput("cat /etc/hosts|grep -E '([0-9]{1,3}[\.]){3}[0-9]{1,3}'|sed '1d'|awk '{print $2}'")
+    num1 = len(output1.split("\n"))
+    output2 = commands.getoutput("icfs osd tree 2>/dev/null|grep _n1$|wc -l")
+    num2 = int(output2)
+    
+    if k_num < m_num or k_num > 16 or k_num <= 1 or m_num < 1:
+        Error(610)
+        print "k:%s m:%s n:%s" % (k_str, m_str, n_str)
+        sys.exit(1)
+    
+    if n_num == 0:
+        if k_num + m_num > num2 * 2 and k_num + m_num > num1:
+            Error(610)
+            print "k:%s m:%s n:%s" % (k_str, m_str, n_str)
+            Error(500)
+    elif n_num == 1:
+        if k_num + m_num > num1 * 2:
+            Error(610)
+            print "k:%s m:%s n:%s" % (k_str, m_str, n_str)
+            Error(500)
+        if m_num != 2:
+            Error(610)
+            print "m:%s" % m_str
+            Error(500)
+#         osd_value = commands.getoutput("icfs osd tree 2>/dev/null|grep -w osd.*|awk '{print $3}'|wc -l")
+#         osd_value = int(osd_value)
+#         if osd_value % m_num != 0:
+#             Error(610)
+#             print "m:%s" % m_str
+#             Error(500)
+        if k_num % m_num != 0 or k_num < 2 or (k_num + m_num) / m_num > num1:
+            Error(610)
+            print "k:%s m:%s" % (k_str, m_str)
+            sys.exit(1)
+    else:
+        Error(610)
+        print "k:%s m:%s n:%s" % (k_str, m_str, n_str)
+        sys.exit(1)
+
+
+def if_cluster_normal():
+    # get cluster status
+    status, output = commands.getstatusoutput("icfs -s 2>/dev/null | grep health")
+    if not status:
+        cluster_status = output.split()[1]
+        if "HEALTH_OK" == cluster_status:
+            return True
+        else:
+            return False
+    else:
+        print output
+        sys.exit(1)
+
+
+def if_osd_num_same():
+    # get osd number
+    status, output = commands.getstatusoutput("icfs node ls -f json 2>/dev/null")
+    if not status:
+        nodes_osd = dict(json.loads(output)['osd']).values()
+        osd_nums = [len(node_osd) for node_osd in nodes_osd]
+        # don't have different osd number
+        if 1 == len(set(osd_nums)):
+            return True, osd_nums[0]
+        else:
+            return False, 0
+    else:
+        print output
+        sys.exit(1)
+
+
+def if_crush_weight_same():
+    # get osd number
+    nodes_osd = {}
+    nodes_weight = []
+    virtual_host_num = []
+    status, output = commands.getstatusoutput("icfs node ls -f json 2>/dev/null")
+    if not status:
+        nodes_osd = dict(json.loads(output)['osd'])
+    else:
+        print output
+        sys.exit(1)
+    # get osd tree
+    status, output = commands.getstatusoutput("icfs osd tree -f json 2>/dev/null")
+    if not status:
+        osd_list = json.loads(output)['nodes']
+        for node in nodes_osd.values():
+            weight_sum = 0
+            for osd_id in node:
+                for osd in osd_list:
+                    dict_osd = dict(osd)
+                    if 'osd.%d' % osd_id == dict_osd['name']:
+                        weight_sum += float(dict_osd['crush_weight'])
+                    elif 'host' == dict_osd['type'] and None != re.match(".+_n1$", dict_osd['name']):
+                        virtual_host_num.append(re.match(".+_n1$", dict_osd['name']).group(0))
+            nodes_weight.append(weight_sum)
+        # don't have different osd number
+        if 1 == len(set(nodes_weight)):
+            return True, len(virtual_host_num)
+        else:
+            return False, len(virtual_host_num)
+    else:
+        print output
+        sys.exit(1)
+
+
+def osd_capacity_balance_replicate(replicate_num, pool_name):
+    # adjudge if the cluster is health
+    pg_number = 0
+    if not if_cluster_normal():
+        Error(556)
+    # get PG number
+    status, output = commands.getstatusoutput("icfs osd dump 2>/dev/null | grep %s" % pool_name)
+    if not status:
+        pg_number = int(output.split('pg_num ')[1].split()[0])
+    else:
+        print output
+        sys.exit(1)
+    # get node number
+    node_num = 0
+    status, output = commands.getstatusoutput("icfs node ls -f json 2>/dev/null")
+    if not status:
+        node_num = len(dict(json.loads(output)['osd']))
+    else:
+        print output
+        sys.exit(1)
+
+    # if node number equal to replicate number and the fault domain is not specified (default:host)
+    if node_num == replicate_num:
+        # adjudge osd num
+        if_num_same,osd_num = if_osd_num_same()
+        if not if_num_same:
+            Error(557)
+        # adjudge crushmap weight
+        if_weight_same, virtual_host_num  = if_crush_weight_same()
+        if not if_weight_same:
+            Error(558)
+    # if the version is newer than 3.5.2.0, then we can use the second method(CRUSH analog)
+    if IcfsVersion.current_version() > IcfsVersion("3.5.2.0"):
+        # use new method
+        status, output = commands.getstatusoutput("reweight_by_crushtool.sh %d %d %s"
+                                                  %(replicate_num, pg_number, pool_name))
+        print output
+        if status:
+            sys.exit(1)
+    else:
+        # use the old method
+        status, output = commands.getstatusoutput(" reweight_pool_osd_by_pg.sh %s" % pool_name)
+        print output
+        if status:
+            sys.exit(1)
+
+
+if __name__ == "__main__":
+    operation = None
+    path = None
+    user_name = None
+    group_name = None
+    mode_value = None
+    revalue = None
+    k = None
+    m = None
+    n = None
+    s = None
+    pool_name = None
+    has_pool = False
+    delete_snap = False
+    try:
+        options, args =getopt.getopt(sys.argv[1:], "hp:u:g:s:k:m:n:", ["help", "create", "mod=", "eras", "rep=",
+                                                                       "query", "list", "redundancy", "delete", "set",
+                                                                       "pool=", "delete-snap"])
+
+    except getopt.GetoptError, err:
+        Error(610)
+        sys.exit(1)
+    if options == [] or args != []:
+        Error(610)
+        sys.exit(1)
+
+    for x, y in options:
+        if x in ("-h", "--help"):
+            if len(sys.argv) != 2:
+                Error(610)
+                sys.exit(1)
+            else:
+                usage()
+                sys.exit(0)
+        elif x == "-p":
+            path = y
+        elif x == "-u":
+            user_name = y
+        elif x == "-g":
+            group_name = y
+        elif x == "-k":
+            k = y
+        elif x == "-m":
+            m = y
+        elif x == "-n":
+            n = y
+        elif x == "-s":
+            s = y
+        elif x == "--pool":
+            has_pool = True
+            pool_name = y
+        elif x == "--mod":
+            mode_value = y
+        elif x == "--rep":
+            revalue = y
+        elif x == "--create":
+            operation = "create"
+        elif x == "--query":
+            operation = "query"
+        elif x == "--delete":
+            operation = "delete"
+        elif x == "--set":
+            operation = "set"
+        elif x == "--delete-snap":
+            delete_snap = True
+    
+    if operation == "create":
+        if len(sys.argv) == 12 and sys.argv[1] == "--create" and sys.argv[2] == "-p" and sys.argv[4] == "-u" and sys.argv[6] == "-g" and \
+            sys.argv[8] == "--mod" and (sys.argv[10] == "--rep" or sys.argv[10] == "--pool"):
+            if has_pool:
+                check_mod(mode_value)
+                dir_create(path, user_name, group_name, mode_value)
+            else:
+                # create rep dir
+                check_mod(mode_value)
+                check_rep(revalue)
+                salt_stat_check()
+                eras_check = sys_data_type()
+                if eras_check == 1:
+                    print "Error(510): The type of pool clash in system, operation Failed"
+                    sys.exit(1)
+                task = commands.getoutput("icfs-admin-task --query")
+                if "set_rep_layout" in task:
+                    Error(3006)
+                    Error(500)
+                dir_create(path, user_name, group_name, mode_value)
+                os.system("python /usr/bin/task-manage %s %s %s > /dev/null &" % ('set_rep_layout', path, revalue))
+            # set_rep_layout(path, revalue)
+        elif len(sys.argv) == 17 and sys.argv[1] == "--create" and sys.argv[2] == "-p" and sys.argv[4] == "-u" and sys.argv[6] == "-g" and \
+            sys.argv[8] == "--mod" and sys.argv[10] == "--eras" and sys.argv[11] == "-k" and sys.argv[13] == "-m" and sys.argv[15] == "-n":
+            # create eras dir
+            check_mod(mode_value)
+            check_k_m_n(k, m, n)
+            salt_stat_check()
+            eras_check = sys_data_type()
+            if int(n) == 1 and eras_check == 0:
+                print "Error(510): The type of pool clash in system, operation Failed"
+                sys.exit(1)
+            if int(n) == 0 and eras_check == 1:
+                print "Error(510): The type of pool clash in system, operation Failed"
+                sys.exit(1)
+            
+            task = commands.getoutput("icfs-admin-task --query")
+            if "Create_directory" in task:
+                Error(3006)
+                Error(500)
+            dir_create(path, user_name, group_name, mode_value)
+            #dir_eras(b1,a1,a2,a3)
+            #os.system("python /usr/bin/task-manage %s %s %s %s %s %s %s %s "%('Create_directory',b1,b2,b3,b4,a1,a2,a3))
+            os.system("python /usr/bin/task-manage %s %s %s %s %s %s> /dev/null &"%('Create_directory', path, k, m, n, 'None'))
+        elif len(sys.argv) == 19 and sys.argv[1] == "--create" and sys.argv[2] == "-p" and sys.argv[4] == "-u" and \
+            sys.argv[6] == "-g" and sys.argv[8] == "--mod" and sys.argv[10] == "--eras" and sys.argv[11] == "-k" \
+                and sys.argv[13] == "-m" and sys.argv[15] == "-n" and sys.argv[17] == "-s":
+            # create eras dir
+            check_mod(mode_value)
+            check_k_m_n(k, m, n)
+            salt_stat_check()
+            eras_check = sys_data_type()
+            if int(n) == 1 and eras_check == 0:
+                print "Error(510): The type of pool clash in system, operation Failed"
+                sys.exit(1)
+            if int(n) == 0 and eras_check == 1:
+                print "Error(510): The type of pool clash in system, operation Failed"
+                sys.exit(1)
+
+            task = commands.getoutput("icfs-admin-task --query")
+            if "Create_directory" in task:
+                Error(3006)
+                Error(500)
+            dir_create(path, user_name, group_name, mode_value)
+            # dir_eras(b1,a1,a2,a3)
+            # os.system("python /usr/bin/task-manage %s %s %s %s %s %s %s %s "%('Create_directory',b1,b2,b3,b4,a1,a2,a3))
+            os.system(
+                "python /usr/bin/task-manage %s %s %s %s %s %s > /dev/null &" % ('Create_directory', path, k, m, n, s))
+        else:
+            Error(610)
+            Error(500)
+    elif operation == "query":
+        if len(sys.argv) == 5 and sys.argv[1] == "--query" and sys.argv[2] == "-p" and sys.argv[4] == "--list":
+            dir_query_list(path)
+        elif len(sys.argv) == 5 and sys.argv[1] == "--query" and sys.argv[2] == "-p" and sys.argv[4] == "--redundancy":
+            dir_query_redundancy(path)
+        else:
+            Error(610)
+            Error(500)
+    elif operation == "set":
+        if len(sys.argv) == 8 and sys.argv[1] == "--set" and sys.argv[2] == "-p" and sys.argv[4] == "-u" and sys.argv[6] == "-g":
+            dir_set_chown_chgrp(path, user_name, group_name)
+        elif len(sys.argv) == 6 and sys.argv[1] == "--set" and sys.argv[2] == "-p" and sys.argv[4] == "--mod":
+            check_mod(mode_value)
+            salt_stat_check()
+            dir_set_ugo(path, mode_value)
+        elif len(sys.argv) == 6 and sys.argv[1] == "--set" and sys.argv[2] == "-p" and sys.argv[4] == "--rep":
+            check_rep(revalue)
+            salt_stat_check()
+            dir_set_rep_revalue(path, revalue)
+        elif len(sys.argv) == 7 and sys.argv[1] == "--set" and sys.argv[2] == "-p" and sys.argv[4] == "--rep" and sys.argv[6] == "--redundancy":
+            if revalue not in get_rep_pool_strategy_list() or get_rep_pool_strategy_list() == "none":
+                print "Error(563):The cluster dose not have the redundancy file system pool, create it first!"
+                sys.exit(1)
+            check_rep(revalue)
+            os.system("python /usr/bin/task-manage %s %s %s > /dev/null &" % ('set_rep_layout', path, revalue))
+        elif len(sys.argv) == 12 and sys.argv[1] == "--set" and sys.argv[2] == "-p" and sys.argv[4] == "-k" and sys.argv[6] == "-m" and sys.argv[8] == "-n" and sys.argv[10] == "-s":
+            if str(k) + "+" + str(m) + ":" + str(n) not in get_era_pool_strategy_list() or get_era_pool_strategy_list() == "none":
+                print "Error(563):The cluster dose not have the redundancy file system pool, create it first!"
+                sys.exit(1)
+            check_k_m_n(k, m, n)
+            eras_check = sys_data_type()
+            if int(n) == 1 and eras_check == 0:
+                print "Error(510): The type of pool clash in system, operation Failed"
+                sys.exit(1)
+            if int(n) == 0 and eras_check == 1:
+                print "Error(510): The type of pool clash in system, operation Failed"
+                sys.exit(1)
+            os.system("python /usr/bin/task-manage %s %s %s %s %s %s > /dev/null &" % ('Create_directory', path, k, m, n, s))
+        elif len(sys.argv) == 10 and sys.argv[1] == "--set" and sys.argv[2] == "-p" and sys.argv[4] == "-k" and sys.argv[6] == "-m" and sys.argv[8] == "-n":
+            if str(k) + "+" + str(m) + ":" + str(n) not in get_era_pool_strategy_list() or get_era_pool_strategy_list() == "none":
+                print "Error(563):The cluster dose not have the redundancy file system pool, create it first!"
+                sys.exit(1)
+            check_k_m_n(k, m, n)
+            eras_check = sys_data_type()
+            if int(n) == 1 and eras_check == 0:
+                print "Error(510): The type of pool clash in system, operation Failed"
+                sys.exit(1)
+            if int(n) == 0 and eras_check == 1:
+                print "Error(510): The type of pool clash in system, operation Failed"
+                sys.exit(1)
+            os.system("python /usr/bin/task-manage %s %s %s %s %s %s > /dev/null &" % ('Create_directory', path, k, m, n, 'None'))
+        elif len(sys.argv) == 6 and sys.argv[1] == "--set" and sys.argv[2] == "-p" and sys.argv[4] == "--pool":
+            set_dir_strategy(path, pool_name)
+        else:
+            Error(610)
+            Error(500)
+    elif operation == "delete":
+        if (len(sys.argv) == 4 and sys.argv[1] == "--delete" and sys.argv[2] == "-p") or \
+            (len(sys.argv) == 5 and sys.argv[1] == "--delete" and sys.argv[2] == "-p" and sys.argv[4] == "--delete-snap"):
+            salt_stat_check()
+            # check fuse
+            if not check_fuse():
+                Error(504)
+                Error(500)
+            dir_path_check = "/mnt/icfs"+path
+            if not os.path.isdir("/mnt/icfs"+path):
+                Error(401)
+                print path
+                Error(500) 
+            if commands.getstatusoutput("ls -rlht %s|grep ^d"%dir_path_check)[1]!='':
+                Error(506)
+                print path
+                Error(500)
+            if commands.getstatusoutput("icfs-admin-nfs --query|grep -w %s"%(path))[1]:
+                Error(507)
+                print path
+                Error(500)
+            if commands.getstatusoutput("icfs-admin-cifs --query|grep -w %s"%(path))[1]:
+                Error(508)
+                print path
+                Error(500)
+            # check whether FTP shared directory
+            if commands.getstatusoutput("icfs-admin-ftp --query|grep -w %s"%(path))[1]:
+                Error(555)
+                print path
+                Error(500)
+            # check whether there is snapshot in directory or subdirectory
+            if len(sys.argv) == 4 and has_snapshot(path):
+                Error(562)
+
+            task = commands.getoutput("icfs-admin-task --query")
+            if "Remove_directory" in task:
+                Error(3006)
+                Error(500)  
+            os.system("python /usr/bin/task-manage %s %s %s > /dev/null &"%('Remove_directory', path, delete_snap))
+        else:
+            Error(610)
+            Error(500)
+    else:
+        Error(610)
+        Error(500)

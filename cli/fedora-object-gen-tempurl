@@ -1,0 +1,141 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+
+import getopt
+import sys
+import socket
+import pdb
+import os
+import re
+import commands
+import hmac
+from hashlib import sha1
+from time import time
+from optparse import OptionParser
+
+def error(error_number, message = ""):
+    if 3643 == error_number:
+        print "Error(3643): Input should contain path of object you want to generate temp url"
+    elif 3644 == error_number:
+        print "Error(3644): Input should contain swift user name"
+    elif 3645 == error_number:
+        print "Error(3645): Input should contain server name or ip of provide rgw service and it's server port"
+    elif 3646 == error_number:
+        print "Error(3646): Input should contain The duration seconds of temp url"
+    elif 3647 == error_number:
+        print "Error(3647): Input should contain temp url key"
+    elif 3601 == error_number:
+        print "Error(3601): Input Error, get help use '-h|--help'"
+    elif 3614 == error_number:
+        print "Error(3614): Parse failed: the option value is invalid"
+
+def usage():
+    print '''Help(-h|--help) for icfs-object-tempurl:
+    Usage:
+    Options:
+      --path          : the path of object you want to generate temp url
+      --user          : swift user name
+      --server        : server name or ip and server port
+      --expires       : The duration seconds of temp url 
+      --key           : temp url key
+    Functions:
+          icfs-object-tempurl --path --expires --server --key --user
+    Exit status:
+      0 if executed successfully
+      1 if executed unsuccessfully
+      '''
+
+rgw_conf = ["help",
+            "path=",
+            "user=",
+            "server=",
+            "expires=",
+            "key=",
+     ]
+
+def handlerRet(ret, messgae):
+    if ret == 5632:
+        if "failed to parse" in messgae:
+            error(3614)
+            sys.exit(1)
+    if ret == 0:
+        print(messgae)
+
+def genurl(options):
+    path = ""
+    swift_user_name = ""
+    server = ""
+    expires = ""
+    key = ""
+    for name, value in options:
+        if name in ("--path"):
+           path = value
+        if name in ("--user"):
+            swift_user_name = value
+        if name in ("--server"):
+            server = value
+        if name in ("--expires"):
+            expires = value
+        if name in ("--key"):
+            key = value
+    if path == "":
+        error(3643)
+        sys.exit(1)
+    if swift_user_name == "":
+        error(3644)
+        sys.exit(1)
+    if server == "":
+        error(3645)
+        sys.exit(1)
+    if expires == "":
+        error(3646)
+        sys.exit(1)
+    if key == "":
+        error(3647)
+        sys.exit(1)
+    method = 'GET'
+    host = 'http://%s/swift' % (server)
+    duration_in_seconds = int(expires)
+    expires_time = int(time() + duration_in_seconds)
+    uid = hmac.new(swift_user_name).hexdigest()
+    user = "zuhu1$%s:%s" %(uid, swift_user_name)
+    s3_user = user[0:user.rfind(':',1)]
+    path = '/v1/%s%s' % (s3_user,path)
+    hmac_body = '%s\n%s\n%s' % (method, expires_time, path)
+    sig = hmac.new(key, hmac_body, sha1).hexdigest()
+    rest_uri = "{host}{path}?temp_url_sig={sig}&temp_url_expires={expires}&swift_user={user}".format(host=host, path=path, sig=sig, expires=expires_time, user=user)
+    print rest_uri
+
+def deal(options):
+    for o, a in options:
+        if o in ("-h", "--help"):
+            usage()
+            sys.exit(0)
+        else:
+            genurl(options)
+            sys.exit(0)
+
+
+def main():
+    try:
+        options, args = getopt.getopt(sys.argv[1:], "h", rgw_conf)
+    except getopt.GetoptError, err:
+        error(3601)
+        sys.exit(1)
+    if len(sys.argv[0:]) == 1:
+        usage()
+        sys.exit(1)
+    elif not options:
+        usage()
+        error(3601)
+        sys.exit(1)
+    elif len(args) != 0:
+        usage()
+        error(3601)
+        sys.exit(1)
+    deal(options)
+
+if __name__ == "__main__":
+    main()
+

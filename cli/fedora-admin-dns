@@ -1,0 +1,227 @@
+#!/usr/bin/python
+# -*- copyright -*-
+#coding:utf-8
+
+import os
+import sys
+import getopt
+import re
+import commands
+
+#code:/usr/local/ism/Agent/src/Cli/ClusterCli/
+#export PATH=$PATH:/usr/local/ism/Agent/src/Cli/ClusterCli/  
+
+def usage():
+    print """Help(-h) for icfs-admin-dns:
+Usage:
+>> icfs-admin-dns ----+ -- query +----><
+                      ' -- set   '
+                      ' -- test  '
+Functions: Query the information of dns; set dns ip; test the connectivity of the dns address.
+Options: 
+  --query: query dns information.
+  --set:   set dns IP.
+  --test:  test dns IP.
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+Usage:
+>> icfs-admin-dns --set ----+-----------+----+------------+----><
+                            '--pdns ip1 '    '--sdns ip2--'
+Functions: Set the primary and standby dns ip.
+Options:
+  --pdns: set primary dns ip.
+  --sdns: set standby dns ip.
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully
+
+Usage:
+>> icfs-admin-dns --test ip_address----><
+Functions: test the connectivity of the dns address.
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully"""
+  
+def Error(num):
+    if num==720:
+        print "Error(720): No primary DNS IP,can't set standby DNS IP."	
+    if num==610:
+        print "Error(610): Invalid input!"
+    if num==716:
+        print "Error(716): Invalid ip address" 
+    if num==718:
+        print "Error(718): Invalid DNS ip"
+    if num==299:
+        print "Error(299): Invalid salt service"
+
+def proc_space(space_str):
+#processing space in str 
+    proc_space_list=[]
+    proc_str_l=space_str.split('\n')
+    for proc_lstrip_slot_str in proc_str_l:
+        proc_lstrip_slot_str=proc_lstrip_slot_str.lstrip()
+        proc_space_list.append(proc_lstrip_slot_str)    
+    proc_str='\n'.join(proc_space_list)
+    return proc_str
+
+def ip_check(ipcheck):
+    if not re.match\
+    (r"^([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-4])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])$",ipcheck):
+        Error(716)
+        sys.exit(1)
+
+def dns_query():
+    dns_list=commands.getoutput("cat /etc/resolv.conf |grep ^nameserver|sed 's/nameserver//g'")
+    if dns_list=='':
+        print "Primary DNS"+"\t"+"Standby DNS"
+    else:
+        dns_list=proc_space(dns_list)
+        dns_list=dns_list.split('\n')
+        if len(dns_list)==1:
+            print "Primary_DNS"+"\t"+"Standby_DNS"
+            print "%-15s"%dns_list[0]
+        else:
+            print "Primary_DNS"+"\t"+"Standby_DNS"
+            dns_standby=",".join(dns_list[1:])
+            print "%-15s"%dns_list[0]+"\t"+"%-15s"%dns_standby
+
+def pdns_set():
+    dns_conf=commands.getoutput("cat /etc/resolv.conf")
+    dns_conf=dns_conf.split("\n")
+    new_conf=[]
+    dns_check=commands.getoutput("cat /etc/resolv.conf|grep ^nameserver")
+    if dns_check!='':
+        flag=True
+        for x in dns_conf:
+            if x.find("nameserver")>=0 and flag:
+                x="nameserver %s" % pdns_ip
+                new_conf.append(x)
+                flag=False
+            else:
+                new_conf.append(x)
+        str="\n".join(new_conf)
+    else:
+        new_conf.append("nameserver %s" % pdns_ip)
+        str="\n".join(new_conf)
+    
+    a=open("/etc/resolv.conf","w")
+    a.write(str)
+    a.close()
+
+def sdns_set():
+    dns_check=commands.getoutput("cat /etc/resolv.conf|grep ^nameserver")
+    if dns_check=='':
+        Error(720)
+        sys.exit(1)
+    else:
+        dns_check=dns_check.split("\n")
+        if len(dns_check)==1:
+            dns_check.append("nameserver %s" % sdns_ip)
+            str="\n".join(dns_check)
+            a=open("/etc/resolv.conf","w")
+            a.write(str)
+            a.close()
+        elif len(dns_check)==2:
+            dns_check[-1]="nameserver %s" % sdns_ip
+            str="\n".join(dns_check)
+            a=open("/etc/resolv.conf","w")
+            a.write(str)
+            a.close()     
+
+def dns_set():
+    salt_test=commands.getoutput("service salt-master status")
+    if "unrecognized service" in salt_test:
+        Error(299)
+        sys.exit(1)
+    if len(sys.argv)==4 and "--set" == sys.argv[1] and "--pdns" == sys.argv[2]:
+        pdns_set()
+    elif len(sys.argv)==4 and "--set" == sys.argv[1] and "--sdns" == sys.argv[2]:
+        sdns_set()
+    elif len(sys.argv)==6 and "--set" == sys.argv[1] and "--pdns" == sys.argv[2] and "--sdns" == sys.argv[4]:
+        pdns_set() 
+        sdns_set()
+    else:
+        Error(610)
+        sys.exit(1)        
+    conf_salt,conf_saltout=commands.getstatusoutput("salt-cp '*' /etc/resolv.conf /etc/resolv.conf")    
+    # new resolv.conf become effective without restarting network service
+    # DO NOT restart network service, because thus may overwrite revlv.conf if user configured DNS in ifconfig-eth*
+    #aa,bb=commands.getstatusoutput("salt '*' cmd.run 'service network restart'")
+
+def dns_test():
+#    dns_test_list=commands.getoutput("cat /etc/resolv.conf |grep nameserver|sed 's/nameserver//g'")
+#    dns_test_list=proc_space(dns_test_list)
+#    dns_test_list=dns_test_list.split('\n')
+#    if test_ip not in dns_test_list:
+#        Error(718)
+#        sys.exit(1)    
+    dns_test_ping=commands.getoutput("ping -c 1 %s;echo $?" % test_ip)
+    dns_test_ping=dns_test_ping.split("\n")[-1].strip()
+    if dns_test_ping=="0":
+        print "Test is successful"
+        pass
+    else:
+        print "Connect failed"
+        sys.exit(1)
+
+if __name__ == '__main__':
+##############################################################
+    operation = None
+    pdns_ip = None
+    sdns_ip = None
+    test_ip = None
+   
+    try:
+        options, args = getopt.getopt(sys.argv[1:],
+          "h",["query","pdns=","sdns=","help","set","test="]
+          )
+    except getopt.GetoptError, err:
+        Error(610)
+        sys.exit(1)
+    
+    if options == [] or args != []:
+        Error(610)
+        sys.exit(1)
+
+    for o,a in options:
+        if o in ("-h", "--help"):
+            if len(sys.argv) != 2:
+                Error(610)
+                sys.exit(1)
+            else:
+                usage()
+                sys.exit(0)
+        elif o == "--query":
+            operation = "dns_query"
+        elif o == "--set":
+            operation = "dns_set"
+        elif o == "--test":
+            test_ip = a
+            ip_check(test_ip)
+            operation = "dns_test"
+        elif o == "--pdns":
+            pdns_ip = a
+            ip_check(pdns_ip)
+        elif o == "--sdns":
+            sdns_ip = a	
+            ip_check(sdns_ip)
+    
+    if operation == "dns_query":
+        if len(sys.argv) == 2 and sys.argv[1] == "--query":
+            dns_query()
+        else:
+            Error(610)
+            sys.exit(1)
+    elif operation == "dns_set":
+        dns_set()
+    elif operation == "dns_test":
+        if len(sys.argv) == 3 and sys.argv[1] == "--test":
+            dns_test()
+        else:
+            Error(610)
+            sys.exit(1)
+    else:
+        Error(610)
+        sys.exit(1)

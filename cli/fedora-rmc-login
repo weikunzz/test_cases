@@ -1,0 +1,17 @@
+#!/usr/bin/expect
+
+set host [lindex $argv 0]
+set user [lindex $argv 1]
+set passwd [lindex $argv 2]
+#log_file /home/log1.txt
+
+spawn ssh $user@$host
+
+expect "password:"
+send "$passwd\r"
+expect "system*"
+send "show summary\r"
+
+
+
+expect eof

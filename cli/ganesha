@@ -1,0 +1,128 @@
+#!/bin/bash
+#chkconfig:- 80 40
+#processname:ganesha
+#version 1.0
+#description:source ganesha.nfsd server daemon
+
+
+PATH=/bin:/sbin:/usr/bin:/usr/sbin:/usr/local/bin:/usr/local/sbin:~/bin
+export PATH
+
+
+SERVICE=ganesha
+DAEMON=/usr/bin/ganesha.nfsd
+CONFIG=/etc/ganesha/ganesha.conf
+LOGFILE=/var/log/ganesha.log
+PIDFILE=/var/run/ganesha.pid
+lockfile=/var/lock/subsys/ganesha
+SCRIPTNAME=/etc/init.d/$SERVICE
+RETVAL=0
+
+#Source function libtrary
+. /etc/rc.d/init.d/functions
+#Source network configuration.
+. /etc/sysconfig/network
+
+#Start ganesha daemons function.
+#[-f <config_file>]  set the config file to be used
+#[-L <logfile>]      set the default logfile for the daemon
+
+usage_exit() {
+    echo "usage: $DAEMON [options] {start|stop|status|restart|}"
+    printf "\t-f ganesha.conf\n"
+    printf "\t-L ganesha.log\n"
+    exit
+}
+
+while getopts "f:L:" arg
+        do
+                case $arg in
+                 f)
+                        CONFIG=$OPTARG;
+                        ;;
+                 L)
+                        LOGFILE=$OPTARG;
+                        ;;
+                ?)
+                        echo "unkonw argument"
+                exit 1
+                        ;;
+                 esac
+        done
+
+shift $[$OPTIND - 1]
+
+start()
+{
+	process_num=$(ps -ef |grep $DAEMON |grep -v "grep" |wc -l)
+	if [[ -e $PIDFILE ]] && [[ $process_num -ge 1 ]];then
+		echo "Ganesha is running."
+		RETVAL=$?		
+    return $RETVAL
+	else
+		[ -x $DAEMON ] || \
+    { echo "FATAL: No such programme";exit 4; }
+		[ -f $CONFIG ] || \
+	  { echo "FATAL:Config file does not exist";exit 6; }
+		[ -e $PIDFILE ] && rm -fr $PIDFILE 
+		echo -n $"Starting $SERVICE:"
+		daemon $DAEMON -f $CONFIG -L $LOGFILE
+    RETVAL=$? 
+    echo
+		process_num=$(ps -ef |grep $DAEMON |grep -v "grep" |wc -l)
+    [ $RETVAL -eq 0 ] && touch /var/lock/subsys/ganesha
+		if [[ -e $PIDFILE ]] && [[ $process_num -ge 1 ]];then
+     echo "Ganesha already running...."
+		else [ $process_num -eq 0 ];
+	 		echo "Ganesha start failed,check $LOGFILE get more info!"          		
+		fi
+    return $RETVAL
+	fi	
+}
+
+stop()
+{
+	process_num=$(ps -ef |grep $DAEMON |grep -v "grep" |wc -l)
+	if [[ -e $PIDFILE ]] && [[ $process_num -ge 1 ]];then
+		echo -n $"Stopping $SERVICE: "
+   	daemon kill -9 `cat ${PIDFILE}`
+    RETVAL=$?  
+    echo   		 
+		[ $RETVAL -eq 0 ] && rm -f ${PIDFILE}
+		echo "Ganesha has stopped..."	
+	else
+     echo "Ganesha is not running." 1>&2
+	fi
+  return $RETVAL
+	}
+
+restart()
+{
+   stop
+   start
+}
+
+case "$1" in
+  "start")
+      start
+      ;;
+  
+  "stop")
+      stop
+      ;;
+  
+  "status")
+      status -p $PIDFILE $DAEMON
+      RETVAL=$?
+      ;;
+
+  "restart")
+      restart
+      ;;
+
+ *)
+      usage_exit
+      exit 2
+     ;;
+esac
+exit $RETVAL

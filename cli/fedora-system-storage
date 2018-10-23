@@ -1,0 +1,161 @@
+#!/usr/bin/python
+# -*- copyright -*-
+# coding:utf-8
+
+import os
+import sys
+import getopt
+import re
+import commands
+import math
+
+# code:/usr/bin/
+# code:/usr/local/ism/Agent/src/Cli/ClusterCli/
+# export PATH=$PATH:/usr/bin/
+
+
+def usage():
+    print """Help(-h|--help) for icfs-system-storage:
+Usage:
+>> icfs-system-storage ----+ --query  +----><
+Functions: query system information about storage
+Options:
+  --query:  query the storage of nodes
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully """
+
+
+def Error(num):
+    if num == 100:
+        print"Error(100): Saltstack anomaly"
+    if num == 610:
+        print "Error(610): Invalid input!"
+    sys.exit(1)
+
+
+def unit_convert(size, unit='B'):
+    units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+    base = 1024
+    i = math.floor(math.log(size, base))
+    i = int(i)
+    return ('%0.2f' + units[i]) % (size/math.pow(1024, i))
+
+
+def get_ip_by_hostname(hostname):
+    ip = ""
+    pattern = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(.*?)(?:#.*)?$")
+    try:
+        with open("/etc/hosts", "r") as fp:
+            lines = fp.readlines()
+    except IOError:
+        return ip
+
+    for line in lines:
+        m = pattern.match(line)
+        if m is None:
+            continue
+
+        hostname_list = m.group(2).split()
+        if hostname in hostname_list:
+            ip = m.group(1)
+            break
+
+    return ip
+
+
+def salt_check():
+    a = commands.getoutput("service salt-master status")
+    if "unrecognized service" in a:
+        sys.exit(1)
+    elif "stoped" in a:
+        c, d = commands.getstatusoutput("service salt-master restart|grep starting")
+        if c or not d or "FAILED" in d:
+            sys.exit(1)
+
+
+def sys_disk_info():
+        total = 0
+        used = 0
+        salt_check()
+        node_name = commands.getoutput("salt-key -l acc | grep -v ccept")
+        has_diskfile = True
+        for n in node_name.splitlines():
+            # filter salt stderror so that output can be parsed correctly
+            addr = get_ip_by_hostname(n)
+            if addr == "":
+                continue
+            if "No minions matched target." in addr:
+                sys.exit(1)
+            addr = addr.strip()
+            diskinfo_status, diskinfo_output = commands.getstatusoutput("ssh -o ConnectTimeout=10 -o \
+            ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no \
+             'root@%s' 'cat /usr/bin/.disk_usage.txt'|grep -v %s|grep osd|awk '{print $2,$3}'" % (n, n))
+
+            if "No such file or directory" in diskinfo_output or diskinfo_status != 0:
+                salt_check()
+                if not os.path.exists('/usr/bin/.disk_usage.txt'):
+                    os.system("touch /usr/bin/.disk_usage.txt")
+                has_diskfile = False
+                # filter salt stderror so that output can be parsed correctly
+                ret, rvtotal = commands.getstatusoutput("salt -S '%s' cmd.run 'df -k > /usr/bin/.disk_usage.txt' \
+                2>/dev/null|grep -v %s |grep osd|awk '{print $2,$3}'" % (addr, n))
+                disktxt_status, disktxt_output = commands.getstatusoutput("ssh -o ConnectTimeout=10 -o \
+                ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no  \
+                'root@%s' 'cat /usr/bin/.disk_usage.txt'|grep -v %s|grep osd|awk '{print $2,$3,$4}'" % (n, n))
+
+            if has_diskfile:
+                for line in diskinfo_output.splitlines():
+                    num = line.split()
+                    total += long(num[0])
+                    used += long(num[1])
+                total = unit_convert(total, 'B')
+                used = unit_convert(used, 'B')
+            else:
+                for line in disktxt_output.splitlines():
+                    num = line.split()
+                    total += long(num[0])
+                    used += long(num[1])
+                total = unit_convert(total * 1024, 'B')
+                used = unit_convert(used * 1024, 'B')
+
+            print "Node".ljust(15, ' '), "Total".ljust(15, ' '), "Used".ljust(15, ' ')
+            print n.ljust(15, ' '), total.ljust(15, ' '), used.ljust(15, ' ')
+            total = 0
+            used = 0
+
+
+if __name__ == '__main__':
+
+    operation = None
+    salt_list = None
+    node = None
+
+    try:
+        options, args = getopt.getopt(sys.argv[1:], "h", ["query"])
+    except getopt.GetoptError, err:
+        Error(610)
+    if options == [] and len(sys.argv[0:]) == 1 and len(args) != 0:
+        Error(610)
+    for o, a in options:
+        if o == "-h":
+            if "-h" == sys.argv[1] and len(sys.argv) == 2:
+                usage()
+            else:
+                Error(610)
+        elif o == "--help":
+            if "--help" == sys.argv[1] and len(sys.argv) == 2:
+                usage()
+            else:
+                Error(610)
+        elif o == "--query":
+            operation = "query"
+        else:
+            Error(610)
+    if operation == "query":
+        if len(sys.argv) == 2 and sys.argv[1] == "--query":
+            sys_disk_info()
+        else:
+            Error(610)
+    else:
+        Error(610)

@@ -1,0 +1,302 @@
+#!/usr/bin/env python
+# -*- copyright -*-
+# coding:utf-8
+
+from ConfigParser import RawConfigParser as Parser
+import sys
+import OptParser
+
+DEBUG = 0
+
+
+def _usage():
+    print """
+>icfs-admin-config ---+--------- --import --- --template=tempfile--------------+---+---------------+-><
+                                                                                   '--config=config'
+                      +---------- --backup --- --bakfile=bakfile---------------+
+                      +----------- --query --- --section=section---------------+
+                      +----- --query --section=section --option=option --------+
+                      +--------------- --add --section=section-----------------+
+                      + --set --section=section --option=option --value=value--+
+                      +------------- --delete --section=section----------------+
+                      '----- --delete --section=section --option=option--------'
+
+--import    import config option from {template}
+--backup    backup icfs config to {bakfile}
+--query     query config in icfs.conf
+--add       add section to icfs.conf
+--set       set option
+--delete    delete section or option
+
+--template  template file path
+--bakfile   backup file path
+--section   section name
+--option    option name
+--value     option value
+
+--config    icfs.conf path, default path is /etc/icfs/icfs.conf
+    """
+    return 0, ""
+
+
+def _get_config_parsser(config_file):
+    """
+    get config_parser object and read config_file
+    :param config_file:
+    :return: conde,obj.  0,parser 1,error info
+    """
+    config_parser = Parser()
+    # read() return a list of file name that read success
+    open_success_file = config_parser.read(config_file)
+    if len(open_success_file) == 0:
+        return 1, "can not open file: " + config_file
+    else:
+        return 0, config_parser
+
+
+def _backup_config(config_file, bak_path=None):
+    """
+    backup config_file to bak_path
+    :param config_file:
+    :param bak_path: default path is config_file.bak
+    :return: code,info  0,success  1,error info
+    """
+    try:
+        if not bak_path:
+            bak_path = config_file+".bak"
+        with open(config_file, 'r') as oldfile, open(bak_path, 'w') as bakfile:
+            tmp = oldfile.read(1024)
+            while tmp:
+                bakfile.write(tmp)
+                tmp = oldfile.read(1024)
+    except Exception, e:
+        return 1, e
+    return 0, "success"
+
+
+def _write_config_parser_to_file(parser, file_path):
+    """
+    flush parser to file_path
+    :param parser:
+    :param file_path:
+    :return: code,info.  0,success  1,error info
+    """
+    try:
+        with open(file_path, mode="w") as f:
+            parser.write(f)
+    except Exception, e:
+        return 1, e
+    return 0, "success"
+
+
+def import_conf_from_template(config_file, template):
+    """
+    import template file
+    :param config_file:icfs.conf path
+    :param template:template file path
+    :return:(code,info). 0:success , 1:errorinfo
+    """
+    parser = Parser()
+    # read template
+    files = parser.read(template)
+    if len(files) == 0:
+        return 1, template+" is not exist"
+    # read icfs.conf rewrite same option or write new option
+    files = parser.read(config_file)
+    if len(files) == 0:
+        return 1, config_file+" is not exist"
+    # backup old config file , backup file name : {icfs_config}.bak
+    _backup_config(config_file)
+    # write new config to config_file
+    return _write_config_parser_to_file(parser, config_file)
+
+
+def backup(config_file, bakfile):
+    """
+    backup config_file to bakfile
+    :param config_file: icfs.conf path
+    :param bakfile: back file path
+    :return: (code,info)  0,success  1,error info
+    """
+    return _backup_config(config_file, bakfile)
+
+
+def query(config_file, section, option=None):
+    """
+    query section or option
+    :param config_file: config file path
+    :param section: section name
+    :param option: option name
+    :return:(0,[])  0,[]  1,error info
+    """
+    error, parser = _get_config_parsser(config_file)
+    if error:
+        return error, parser
+    if option:
+        try:
+            value = parser.get(section, option)
+            return 0, [value]
+        except Exception, e:
+            return 1, e
+    elif section:
+        try:
+            sections = parser.items(section)
+        except Exception, e:
+            return 1, e
+        return 0, sections
+    else:
+        sections = parser.sections()
+        return 0, sections
+
+
+def addsection(config_file, section):
+    """
+    add new section tu config_file
+    :param config_file: config file path
+    :param section: new section name
+    :return: code,info 0,success 1,error info
+    """
+    error, parser = _get_config_parsser(config_file)
+    if error:
+        return error, parser
+    # add section
+    try:
+        parser.add_section(section)
+    except Exception, e:
+        return 1, e
+    # backup config_file
+    _backup_config(config_file)
+    # write new config to file
+    return _write_config_parser_to_file(parser, config_file)
+
+
+def set_option(config_file, section, option, value):
+    """
+    set option value
+    :param config_file: config file path
+    :param section: section name
+    :param option: option name
+    :param value: value
+    :return: code,info  0,success  1,error info
+    """
+    error, parser = _get_config_parsser(config_file)
+    if error:
+        return error, parser
+    # set option
+    try:
+        parser.set(section, option, value)
+    except Exception, e:
+        return 1, e
+    # backup config_file
+    _backup_config(config_file)
+    # write new config to file
+    return _write_config_parser_to_file(parser, config_file)
+
+
+def delete_section_or_option(config_file, section, option=None):
+    """
+    delete section or option
+    :param config_file: config path
+    :param section: section name
+    :param option: option name
+    :return: code,info
+    """
+    error, parser = _get_config_parsser(config_file)
+    if error:
+        return error, parser
+    try:
+        # remove option
+        if option:
+            removed = parser.remove_option(section, option)
+        # remove section
+        else:
+            removed = parser.remove_section(section)
+        if not removed:
+            if option:
+                return 1, "no option"
+            else:
+                return 1, "no section"
+    except Exception, e:
+        return 1, e
+    # back up config file
+    _backup_config(config_file)
+    # write parser to file
+    return _write_config_parser_to_file(parser, config_file)
+
+
+if __name__ == "__main__":
+    # try:
+    #    import pydevd
+        # pydevd.settrace("100.7.16.78", port=6789)
+    # except:
+    #    pass
+    # error, file = read_file("/home/huper/icfs.conf")
+    # default_conf = ConfigParser.RawConfigParser()
+    # default_conf.read("/home/huper/icfs-default.conf")
+    parser = OptParser.OptParser()
+    parser_name = None
+    parser_options = None
+    # icfs.conf default path
+    config_file_default = "/etc/icfs/icfs.conf"
+    operation = None
+    template = None
+    backfile = None
+    section = None
+    option = None
+    cvalue = None
+    try:
+        parser.append("help", "{-h|--help}")
+        parser.append("import", "--import{--template=,[--config=]}")
+        parser.append("backup", "--backup{--bakfile=,[--config=]}")
+        parser.append("query", "--query[--section=,[--option=]][--config=]")
+        parser.append("addsection", "--addsection,--section=,[--config=]")
+        parser.append("set", "--set,--section=,--option=,--value=,[--config=]")
+        parser.append("delete", "--delete,--section=,[--option=][--config=]")
+        parser.append("push", "--push,--node=,[--config=]")
+        parser_name, parser_options = parser.parse(sys.argv[1:])
+    except Exception, errorinfo:
+        print errorinfo
+        sys.exit(1)
+    # get parameters value
+    for key, value in parser_options:
+        if key == "--template":
+            template = value
+        elif key == "--bakfile":
+            backfile = value
+        elif key == "--section":
+            section = value
+        elif key == "--option":
+            option = value
+        elif key == "--value":
+            cvalue = value
+        elif key == "--config":
+            config_file_default = value
+    # do action
+    error = 0
+    info = ""
+    if parser_name == "help":
+        # print help info
+        _usage()
+    elif parser_name == "import":
+        error, info = import_conf_from_template(config_file_default, template)
+        print info
+    elif parser_name == "backup":
+        error, info = backup(config_file_default, backfile)
+        print info
+    elif parser_name == "query":
+        error, info = query(config_file_default, section, option)
+        if not error:
+            for i in info:
+                print i
+        else:
+            print info
+    elif parser_name == "addsection":
+        error, info = addsection(config_file_default, section)
+        print info
+    elif parser_name == "set":
+        error, info = set_option(config_file_default, section, option, cvalue)
+        print info
+    elif parser_name == "delete":
+        error, info = delete_section_or_option(config_file_default, section, option)
+        print info
+    sys.exit(error)

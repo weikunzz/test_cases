@@ -1,0 +1,48 @@
+#!/usr/bin/python
+#coding:utf-8
+
+import commands,sys,re,time
+from icfs_util import error, is_rack
+
+
+if not is_rack():
+    commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"%('SmartRack','The device is not SmartRack.'))
+    sys.exit(1)
+else:
+    does = 0
+    while True:
+
+        rmc = commands.getoutput("cat /usr/local/etc/rack_info.conf")
+        if rmc == '' or 'No such file' in rmc:
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"%('RMCInfo','Cannot Get RMCInfo In rmc_info.conf.'))
+            sys.exit(1)
+    
+        rmc = rmc.splitlines()
+        rmc_ip = rmc[0].split('=')[-1]
+        rmc_usr = rmc[1].split('=')[-1]
+        rmc_passwd = rmc[2].split('=')[-1]
+        if rmc_usr == '' or rmc_passwd == '':
+            rmc_usr = 'admin'
+            rmc_passwd = 'admin'
+        elif rmc_ip == '':
+            commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"%('RMCInfo','Cannot Get RMC_IP In rmc_info.conf.'))
+            sys.exit(1)
+        else:
+
+            exp = commands.getstatusoutput("icfs-rmc-login %s %s %s"%(rmc_ip,rmc_usr,rmc_passwd))
+            
+            if exp[0] != 0 or exp[1] == '':
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"%('RMCInfo','Get Rack Info Error.'))
+                sys.exit(1)
+            elif  "Could not resolve hostname" in exp[1] or "No route to host" in exp[1]:
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"%('RMCInfo','Please Check Your IP Or Hostname For RMC'))
+                sys.exit(1)
+            elif "Permission denied" in exp[1]:
+                commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level 0 --module '%s' --info '%s'"%('RMCInfo','Login RMC Username,Passwd or Hostip Error.'))
+                time.sleep(60)
+                does = 1
+                #sys.exit(1)
+            if does != 1:
+                commands.getoutput("echo \"%s\" > /usr/local/ism/Agent/src/Cache/rack_info.txt"%exp[1])
+                time.sleep(60)
+    

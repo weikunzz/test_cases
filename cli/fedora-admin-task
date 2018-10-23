@@ -1,0 +1,64 @@
+#!/usr/bin/python
+#coding:utf-8
+# -*- copyright -*-
+
+import time,datetime,sqlite3,getopt,sys
+from icfs_util import error
+
+def con_db(): #调用该方法记得要关闭连接、和游标！
+    con = sqlite3.connect('/usr/local/db/tasks.db')
+    cur = con.cursor()
+    cur.execute('''CREATE TABLE IF NOT EXISTS task(
+        id integer primary key,
+        name varchar,
+        state varchar,
+        process varchar,
+        username varchar,
+        start_time varchar
+        )''')  #该表若不存在就创建
+
+    fetch_list = cur.execute("SELECT * FROM task").fetchall()
+    if fetch_list != []:
+        print "%s\t%s\t%s\t%s\t%s\t%s"%("ID","Name","State","Progress","Username","Starttime")
+        for f in fetch_list:
+            print f[0],'\t',f[1],'\t',f[2],'\t',f[3]+'%','\t',f[4],'\t',f[5][:-4]
+
+    cur.close()
+    con.close()
+
+
+def help():
+
+    print '''Help(-h|--help)for icfs-admin-task:
+Usage:
+>> icfs-admin-task --- --query -----------------------------------><
+Functions: Query tasks 
+Options:
+  --query:  query tasks info
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0)
+
+if __name__ == '__main__':
+    
+    try:
+        opts,argv = getopt.getopt(sys.argv[1:],('h'),['query','help'])
+    except getopt.GetoptError,err:
+        error('002')
+
+    if '-h' in sys.argv or '--help' in sys.argv:
+        if len(opts) != 1 or argv != []:
+            error('002')
+        else:help()
+
+    if argv != [] or len(opts) != 1:
+        error('002')
+    for k,v in opts:
+        if k in '--query':
+            if '--query' in sys.argv :
+                con_db() 
+            else:
+                error('002') 
+        else:
+            error('002')

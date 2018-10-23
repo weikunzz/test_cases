@@ -1,0 +1,3169 @@
+#!/usr/bin/python
+# coding:utf-8
+"""
+@author: huper
+Created on 2016-11-17
+#change log list
+modify at 2016-12-07 by huper: add  def expand_mon() def is_mon(), to implementation add mon node
+modify at 2016-12-13 by huper: add expand_mds(), shrink_mds() . implementation expand shrink mds node
+modify at 2016-12-19 by huper: add do_init_osd_without_deploy() add osd whithout icfs-deploy
+modify at 2016-12-28 by huper: add option "ip="
+modify at 2017-01-10 by huper: add function do_init_osd_without_deploy_with_journal_part. add journal device support and add background run
+modify at 2017-02-09 by huper: modify do_init_osd_without_deploy_with_journal_part , when mkfs error , retry three times
+modify at 2017-02-16 by huper: add "hdparm -W 1 {device}" and "hdparm -W 0 {device}"
+modify at 2017-02-16 by huper: add --initcluster and --purge operation
+modify at 2017-02-23 by huper: add --osd --mds,support create cluster by on command.
+modify at 2017-03-03 by huper: add icfs-admin-cluster --expand --host --disk_list  expand metadatapool
+"""
+import os
+import sys
+import json
+import commands
+import re
+import datetime
+import getopt
+import platform
+import time
+import uuid
+from multiprocessing import Process, Lock
+import subprocess
+import sqlite3
+import icfs_log
+from concurrent.futures import ThreadPoolExecutor
+from icfs_util import run_local_cmd, osd_capacity_balance_erasure, osd_capacity_balance_replicate, \
+    get_virtual_hosts, log_to_event_log
+import fcntl
+from ConfigParser import ConfigParser
+
+log = icfs_log.get_log("icfs-admin-cluster")
+
+# icfs-deploy work path
+ICFSDEPLOYWORKPATH = "/home/inspur"
+bucket_dic = {}
+SSHConnectTimeout = 2
+DEBUG = 0
+
+IPV4_REG = "^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[0-9]{1,2})(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[0-9]{1,2})){3}$"
+IPV6_REG = "^([\da-fA-F]{1,4}:){6}((25[0-5]|2[0-4]\d|\
+[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$|\
+^::([\da-fA-F]{1,4}:){0,4}((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}\
+(25[0-5]|2[0-4]\d|[01]?\d\d?)$|^([\da-fA-F]{1,4}:):([\da-fA-F]{1,4}:){0,3}\
+((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$|\
+^([\da-fA-F]{1,4}:){2}:([\da-fA-F]{1,4}:){0,2}((25[0-5]|2[0-4]\d|[01]?\d\d?)\.)\
+{3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$|^([\da-fA-F]{1,4}:){3}:([\da-fA-F]{1,4}:){0,1}\
+((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$|^([\da-fA-F]{1,4}:)\
+{4}:((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$|^([\da-fA-F]{1,4}:)\
+{7}[\da-fA-F]{1,4}$|^:((:[\da-fA-F]{1,4}){1,6}|:)$|^[\da-fA-F]{1,4}:((:[\da-fA-F]{1,4}){1,5}|:)$|\
+^([\da-fA-F]{1,4}:){2}((:[\da-fA-F]{1,4}){1,4}|:)$|^([\da-fA-F]{1,4}:){3}\
+((:[\da-fA-F]{1,4}){1,3}|:)$|^([\da-fA-F]{1,4}:){4}((:[\da-fA-F]{1,4}){1,2}|:)$\
+|^([\da-fA-F]{1,4}:){5}:([\da-fA-F]{1,4})?$|^([\da-fA-F]{1,4}:){6}:$"
+
+
+class Host:
+    domain = ""
+    name = ""
+    ipv4 = None
+    ipv6 = None
+
+    def __init__(self, name=None):
+        if name:
+            self.name = name
+        self.ipv4 = []
+        self.ipv6 = []
+
+
+class Bucket:
+    name = ""
+    id = ""
+    type = ""
+    haveParent = True
+    layer = 0
+    children = None
+
+    def __init__(self, name=None):
+        if name:
+            self.name = name
+        self.children = []
+
+
+class Disk:
+    name = ""
+    mountPoint = ""
+    type = ""
+    isMounted = False
+    partList = None  # disk_list
+    isOsd = False
+    isSystem = False
+
+    def __init__(self, name=None):
+        if name:
+            self.name = name
+        self.partList = []
+
+
+class Osd:
+    id = None
+    name = None
+    path = None
+    device = None
+    parent = None
+
+    def __init__(self, sid=None):
+        if id:
+            self.id = sid
+        self.parent = []
+
+
+class Mon:
+    name = None
+    ipaddr = None
+
+    def __init__(self, name=None, ipaddr=None):
+        if name:
+            self.name = name
+        if ipaddr:
+            self.ipaddr = ipaddr
+
+
+class Mds:
+    standby_for_rank = None
+    export_targets = None
+    name = None
+    incarnation = None
+    standby_replay = None
+    state_seq = None
+    epoch = None
+    standby_for_fscid = None
+    state = None
+    gid = None
+    features = None
+    rank = None
+    standby_for_name = None
+    addr = None
+
+    def __init__(self, name=None):
+        if name:
+            self.name = name
+
+    def getip(self):
+        return self.addr.split(":")[0]
+
+    def setvalue(self, key, value):
+        if key == "standby_for_rank":
+            self.standby_for_fscid = value
+        elif key == "export_targets":
+            self.export_targets = value
+        elif key == "name":
+            self.name = value
+        elif key == "incarnation":
+            self.incarnation = value
+        elif key == "standby_replay":
+            self.standby_replay = value
+        elif key == "state_seq":
+            self.state_seq = value
+        elif key == "epoch":
+            self.epoch = value
+        elif key == "standby_for_fscid":
+            self.standby_for_fscid = value
+        elif key == "state":
+            self.state = value
+        elif key == "gid":
+            self.gid = value
+        elif key == "features":
+            self.features = value
+        elif key == "rank":
+            self.rank = value
+        elif key == "standby_for_name":
+            self.standby_for_name = value
+        elif key == "addr":
+            self.addr = value
+
+
+def con_db():  # get database conn and cur , when you work is done , close conn and cur .
+    commands.getoutput("mkdir -p /usr/local/db/")
+    connect_db = sqlite3.connect('/usr/local/db/tasks.db')  # if not exists so ,create it!
+    cur_db = connect_db.cursor()
+    cur_db.execute('''CREATE TABLE IF NOT EXISTS task(
+        id integer primary key,
+        name varchar,
+        state varchar,
+        process varchar,
+        username varchar,
+        start_time varchar)''')
+    return connect_db, cur_db
+
+
+# update progress
+def update_progress(con, cur, process, starttime, task_name):
+    cur.execute("UPDATE task SET process='%d' WHERE start_time='%s' and name='%s'" % (int(process), starttime, task_name))
+    con.commit()
+
+
+def delete_task(con, cur, starttime, name):
+    cur.execute("DELETE FROM task WHERE start_time='%s' and name='%s'" % (starttime, name))
+    con.commit()
+
+
+# close conn
+def close_conn(con, cur):
+    try:
+        cur.close()
+    except:
+        pass
+    try:
+        con.close()
+    except:
+        pass
+
+
+# recode task log
+def write_log(level, info):
+    try:
+        commands.getoutput("/usr/local/ism/Agent/src/Common/icfs-admin-log --level %s --module 'icfs-admin-cluster' --info '%s'" % (level, info))
+        # with open("/var/log/icfs/icfs-admin-cluster.log", 'a') as log:
+        #     log.write('%sicfs-admin-cluster:%s \n' % (str(datetime.datetime.now()), info))
+        if level == 0:
+            log.error(info)
+        else:
+            log.info(info)
+    except:
+        pass
+
+
+# task done
+def task_done(con, cur, starttime, level, info, task_name):
+    # update progress = 100
+    update_progress(con, cur, 100, starttime, task_name)
+    # write log
+    write_log(level, info)
+    # delete task
+    delete_task(con, cur, starttime, task_name)
+    # close db connection
+    close_conn(con, cur)
+
+
+def run_command(comm, node=None):
+    commstart = '\033[1;32;40m'
+    valuestart = '\033[1;33;40m'
+    end = '\033[0m'
+    begintime = datetime.datetime.now()
+    if node:
+        comstring = "[DEBUG info] remote commands: " + "ssh -o ConnectTimeout=%s -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' \"%s 2>/dev/null\" 2>/dev/null" % (SSHConnectTimeout, node, comm)
+        result = commands.getstatusoutput("ssh -o ConnectTimeout=%s -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' \"%s 2>/dev/null\"  2>/dev/null" % (SSHConnectTimeout, node, comm))
+    else:
+        comstring = "[DEBUG info] local commands: " + comm + " 2>/dev/null"
+        result = commands.getstatusoutput(comm + " 2>/dev/null")
+    endtime = datetime.datetime.now()
+    if DEBUG:
+        print commstart, comstring, end, valuestart, "\n [DEBUG info]", "run time: " + str((endtime - begintime).seconds) + "s ", result, end
+    log.debug(str(comstring) + ":" + str(result) + ". run time:"+str((endtime - begintime).seconds) + "s")
+    return result
+
+
+def Error(code, info=None):
+    if not info:
+        info = ""
+    if code == 610:
+        mess = "Error(610): Invalid input !"
+    elif code == 701:
+        mess = "Error(701): No such path"
+    elif code == 704:
+        mess = "Error(704): Read file /etc/hosts error "
+    elif code == 709:
+        mess = "Error(709): /etc/hosts format error "
+    elif code == 710:
+        mess = "Error(710): Get host name failure "
+    elif code == 711:
+        mess = "Error(711): Push hosts file failure "
+    elif code == 712:
+        mess = "Error(712): Ipaddr is used by other host "
+    elif code == 713:
+        mess = "Error(713): Get system disk error "
+    elif code == 714:
+        mess = "Error(714): Get disk list error "
+    elif code == 722:
+        mess = "Error(722): Disk zap error "
+    elif code == 723:
+        mess = "Error(723): Icfs-deploy osd prepare error "
+    elif code == 724:
+        mess = "Error(724): Get osd tree error "
+    elif code == 725:
+        mess = "Error(725): Get osd id error "
+    elif code == 726:
+        mess = "Error(726): Delete osd error "
+    elif code == 727:
+        mess = "Error(727): Init osd error "
+    elif code == 728:
+        mess = "Error(741): Check mon status error "
+    elif code == 729:
+        mess = "Error(742): Mon already exists "
+    elif code == 730:
+        mess = "Error(730): Mon is not exist "
+    elif code == 731:
+        mess = "Error(731): Get mds info error "
+    elif code == 732:
+        mess = "Error(732): Mds already exists "
+    elif code == 733:
+        mess = "Error(733): Mds is not exist "
+    elif code == 734:
+        mess = "Error(734): Create mon error "
+    elif code == 735:
+        mess = "Error(735): Create mds error "
+    elif code == 736:
+        mess = "Error(736): No mds remainder !!! "
+    elif code == 737:
+        mess = "Error(737): Gatherkeys failed "
+    elif code == 738:
+        mess = "Error(738): Need sync /home/inspur/icfs.conf to mon host "
+    elif code == 739:
+        mess = "Error(739): No mon remainder "
+    elif code == 740:
+        mess = "Error(740): Delete mon data error "
+    elif code == 741:
+        mess = "Error(741): Check mon status error "
+    elif code == 742:
+        mess = "Error(742): Mon already exists "
+    elif code == 744:
+        mess = "Error(744): Make new part error "
+    elif code == 745:
+        mess = "Error(745): mkfs.xfs on disk part error "
+    elif code == 746:
+        mess = "Error(746): Create osd failed "
+    elif code == 747:
+        mess = "Error(747): Make osd data dir error "
+    elif code == 748:
+        mess = "Error(748): Mount osd data dir erro "
+    elif code == 749:
+        mess = "Error(749): Make osd key fs error "
+    elif code == 750:
+        mess = "Error(750): Add osd auth to cluster error "
+    elif code == 751:
+        mess = "Error(751): Invalid hostname "
+    elif code == 752:
+        mess = "Error(752): Disk is mounted "
+    elif code == 1704:
+        mess = "Error(1704): File not exist "
+    elif code == 553:
+        mess = "Error(553): Unknow error: %s" % info
+    else:
+        mess = "Error(553): Unknow error "
+    log.error(mess + str(info) if info else "")
+
+
+def get_all_host_in_hosts():
+    # check all host name ip  in /etc/hosts
+    host_dic = {}
+    flag, host_content = run_command(comm="cat /etc/hosts")
+    if flag == 256:
+        Error(704, host_content)
+        sys.exit(1)
+    if flag != 0:
+        Error(704, host_content)
+        sys.exit(1)
+    hosts_info = host_content.splitlines()
+    line_num = 0
+    for host_info in hosts_info:
+        line_num += 1
+        if "localhost localhost.localdomain" in host_info:
+            continue
+        if host_info == "":
+            continue
+        if host_info.strip().startswith("#"):
+            continue
+        info = host_info.split()
+        domain = None
+        if len(info) == 2:
+            ip = info[0]
+            name = info[1]
+        elif len(info) == 3:
+            ip = info[0]
+            domain = info[1]
+            name = info[2]
+        else:
+            Error(709, "line number:%s" % (str(line_num)))
+            return host_info + "format error"
+        # check ip format
+        if not re.match(IPV4_REG, ip) and not re.match(IPV6_REG, ip):
+            Error(709, "line number:%s" % (str(line_num)))
+            return host_info + "format error"
+        # check host name
+        if host_dic. has_key(name):
+            host = host_dic[name]
+        else:
+            host = Host(name)
+            host_dic[name] = host
+        # set domain
+        if domain:
+            host.domain = domain
+        # check ip address
+        if re.match(IPV4_REG, ip):
+            host.ipv4.append(ip)
+        elif re.match(IPV6_REG, ip):
+            host.ipv6.append(ip)
+    return host_dic
+
+
+def get_host_name(ipaddr=None):
+    # get host name. if ipaddr is not none ,get host name by ipaddr
+    if ipaddr:
+        flag, hostname = run_command(node=ipaddr, comm='hostname')
+    else:
+        flag, hostname = run_command(comm="hostname")
+    if flag:
+        Error(553, hostname)
+        return 1
+    return hostname
+
+
+def sync_hosts(host_dic=None, host_self=None):
+    # sync /etc/hosts file
+    error_happend = 0
+    if not host_dic:
+        host_dic = get_all_host_in_hosts()
+        if type(host_dic) == str:
+            return 1
+    if not host_self:
+        host_self = get_host_name()
+    host_dic.pop(host_self, "noin")
+    for host in host_dic.keys():
+        flag, info = run_command(comm="scp /etc/hosts %s:/etc/hosts" % host)
+        if flag:
+            error_happend = 1
+            Error(711, "to " + info)
+    return error_happend
+
+
+def add_host_to_hosts(ipaddr, hostname=None, domain=None):
+    # add host_name
+    # check ip address
+    inhosts = False
+    if not ipaddr:
+        Error(610, "ipaddr should not be None")
+        return "ipaddr should not be None"
+    if not re.match(IPV4_REG, ipaddr) and not re.match(IPV6_REG, ipaddr):
+        Error(610, "ip address %s is not valid" % ipaddr)
+        return "ip address %s is not valid" % ipaddr
+    # get host name
+    if not hostname:
+        hostname = get_host_name(ipaddr)
+    # check host is in /etc/hosts or not
+    host_dic = get_all_host_in_hosts()
+    if type(host_dic) == str:
+        return host_dic
+    for key in host_dic.keys():
+        ipv4 = host_dic[key].ipv4
+        ipv6 = host_dic[key].ipv6
+        if key == hostname:
+            if ipaddr in ipv4 or ipaddr in ipv6:
+                inhosts = True
+                break
+        if key != hostname:
+            if ipaddr in ipv4 or ipaddr in ipv6:
+                Error(712, "ipaddr is used by other host : %s" % key)
+                return "ipaddr is used by other host"
+    if not inhosts:
+        if domain:
+            run_command(comm="echo '%s %s %s'>>/etc/hosts" % (ipaddr, domain, hostname))
+        else:
+            run_command(comm="echo '%s %s'>>/etc/hosts" % (ipaddr, hostname))
+    # sync hosts file to other hosts
+    return inhosts
+
+
+def get_all_bucket():
+    # get icfs osd tree
+    bucket_list = []
+    error, osd_tree_info = run_command(comm="icfs osd tree -f json")
+    osd_tree_json = json.loads(osd_tree_info)
+    nodes_list = osd_tree_json["nodes"]
+    for node in nodes_list:
+        bucket = Bucket(node["name"])
+        bucket.id = node["id"]
+        bucket.type = node["type"]
+        if node. has_key("children"):
+            bucket.children = node["children"]
+        bucket_list.append(bucket)
+        bucket_dic[node["id"]] = bucket
+    # find root bucket
+    children_list = []
+    for bucket in bucket_list:
+        if len(bucket.children) > 0:
+            children_list.extend(bucket.children)
+    for bucket in bucket_list:
+        if bucket.id not in children_list:
+            bucket.haveParent = False
+    return bucket_list
+
+
+def print_osd_tree(bucket, layer=1, printosd=True):
+    if bucket.type == "osd":
+        if not printosd:
+            return
+    print bucket.id, '\t', bucket.type, layer * "\t", bucket.name
+    if len(bucket.children) != 0:
+        bucket.children.sort()
+        for bid in bucket.children:
+            print_osd_tree(bucket_dic[bid], layer + 1, printosd)
+    return
+
+
+def get_osd_tree(printosd=True):
+    # get bucket tree
+    bucket_list = get_all_bucket()
+    for bucket in bucket_list:
+        if not bucket.haveParent:
+            print_osd_tree(bucket, 1, printosd)
+    sys.exit(0)
+
+
+def get_all_bucket_types():
+    # get all bucket types
+    error, crush_info = run_command(comm="icfs osd crush dump")
+    info_json = json.loads(crush_info)
+    types_list = info_json["types"]
+    return types_list
+
+
+def create_bucket(bucket_name, location=None, btype="Host"):
+    # create bucket
+    # bucket_name: bucket name
+    # location: parent bucket id
+    # type: bucket type
+    run_command(comm="icfs osd crush add-bucket %s %s" % (bucket_name, btype))
+    if location:
+        if len(bucket_dic) == 0:
+            get_all_bucket()
+        bucket = bucket_dic[location]
+        run_command(comm="icfs osd crush move %s %s=%s" % (bucket_name, bucket.type, bucket.name))
+
+
+# import re
+# import commands
+def find_sys_disk(node=None):
+    # find system disk
+    if node:
+        flag, disk_info = run_command(node=node, comm='lsblk -o NAME')
+        flag, mount_info = run_command(node=node, comm='lsblk -o MOUNTPOINT')
+        if flag:
+            Error(713, disk_info)
+            sys.exit(1)
+    else:
+        flag, disk_info = run_command(comm="lsblk -o NAME")
+        flag, mount_info = run_command(comm="lsblk -o MOUNTPOINT")
+    if disk_info == "":
+        Error(713, None)
+        sys.exit(1)
+    disk_label = []
+    root_point = []
+    # check / mount point
+    index = 0
+    for mountpoint in mount_info.splitlines():
+        if mountpoint == "/":
+            root_point.append(index)
+        index += 1
+    index = 0
+    # check disk name
+    for disk_name in disk_info.splitlines():
+        if re.match("^\w.*", disk_name):
+            disk_label.append(disk_name)
+        else:
+            if index > 0:
+                disk_label.append(disk_label[index - 1])
+            else:
+                disk_label.append(disk_name)
+        index += 1
+    sys_disk = []
+    # find system disk
+    for index in root_point:
+        sys_disk.append("/dev/" + disk_label[index])
+    return sys_disk
+
+
+def get_disk_mountpoint(disk_name, node=None):
+    # success return 0,disk  error !0,errorinfo
+    disk = Disk(disk_name)
+    if not disk_name or disk_name == "":
+        Error(610, "disk name is none")
+        return 1, "disk name is none"
+    # run command get disk mount info
+    # info like this :  NAME="/dev/sdb1" TYPE="part" MOUNTPOINT="/var/lib/icfs/osd/icfs-0"
+    if node:
+        flag, mountinfo = run_command(node=node, comm='lsblk %s -P -o name,type,mountpoint' % disk_name)
+    else:
+        flag, mountinfo = run_command(comm="lsblk %s -P -o name,type,mountpoint" % disk_name)
+    # handel return info
+    if flag != 0:
+        return flag, mountinfo
+    else:
+        infos = mountinfo.splitlines()
+        for info in infos:
+            diskinfo = info.split()
+            name = diskinfo[0].split("=")[1].replace("\"", "")
+            mtype = diskinfo[1].split("=")[1].replace("\"", "")
+            mountpoint = diskinfo[2].split("=")[1].replace("\"", "")
+            if mtype == "disk":
+                if mountpoint != "":
+                    disk.mountPoint = mountpoint
+                    disk.isMounted = True
+            if mtype == "part":
+                disk_part = Disk("/dev/" + name)
+                disk_part.type = mtype
+                if mountpoint != "":
+                    disk_part.isMounted = True
+                    disk.isMounted |= True
+                    disk_part.mountPoint = mountpoint
+                disk.partList.append(disk_part)
+    return 0, disk
+
+
+def get_all_data_disk(node=None):
+    # get date disk list ,return disk_list,error_list
+    flag, disk_info = run_command(comm="ls /sys/block/", node=node)
+    if flag == 0:
+        disk_info_list = disk_info.splitlines()
+        # disk name : sd*(sata)  hd*(ide)  vd*(virtio)
+        disk_info_list = ["/dev/" + i for i in disk_info_list if re.match("^(sd|hd|vd).*$", i)]
+    else:
+        Error(714, disk_info)
+        return 0, 0
+    # remove system disk
+    sys_disk = find_sys_disk(node)
+    for sys_disk_name in sys_disk:
+        try:
+            disk_info_list.remove(sys_disk_name)
+        except Exception:
+            pass
+            # print "can't find disk : " + sys_disk_name
+    # get all data disk mount info
+    disk_list = []
+    error_list = []
+    for disk_name in disk_info_list:
+        error, disk = get_disk_mountpoint(disk_name, node)
+        if not error:
+            disk_list.append(disk)
+        else:
+            error_list.append("NODE:%s ; DISKNAME:%s ; ERRORCODE:%s ; ERRORINFO:%s " % (node, disk_name, error, disk))
+    return disk_list, error_list
+
+
+def zeroing(dev):
+    lba_size = 4096
+    size = 33 * lba_size
+    with open(dev, 'wb') as f:
+        f.seek(-size, os.SEEK_END)
+        f.write(size * b'\0')
+    f.close()
+
+
+def _get_parttion_info(node, part_dic):
+    code = 0
+    part_info = ""
+    icfs_fsid_cluster = run_command("icfs-conf --lookup fsid")[1]
+    # get partition name
+    try:
+        part_info = part_dic["path"]
+    except:
+        pass
+    # get mount info
+    mount = ""
+    icfs_fsid = ""
+    data_type = ""    # type
+    whoami = ""
+    fs_type = ""
+    state = ""
+    cluster = ""
+    if "mount" in part_dic.keys():
+        mount = part_dic["mount"]
+    if "icfs_fsid" in part_dic.keys():
+        icfs_fsid = part_dic["icfs_fsid"]
+    if "type" in part_dic.keys():
+        data_type = part_dic["type"]
+    if "fs_type" in part_dic.keys():
+        fs_type = part_dic["fs_type"]
+    if "state" in part_dic.keys():
+        state = part_dic["state"]
+    if "whoami" in part_dic.keys():
+        whoami = part_dic["whoami"]
+    if "cluster" in part_dic.keys():
+        cluster = part_dic["cluster"]
+    # is osd or not
+    if fs_type and fs_type == "LVM2_member":
+        code = 1
+        part_info += ": is lvm_member"
+    elif data_type == "data":     # is osd part
+        if not icfs_fsid_cluster:
+            if cluster and cluster == "unknown":    # can use as new osd
+                code = 0
+            else:
+                code = 1
+                part_info += ": is osd " + whoami
+        else:
+            if icfs_fsid != icfs_fsid_cluster:      # can use as new osd
+                code = 0
+            else:
+                code = 1
+                part_info += ": is osd " + whoami
+    elif data_type == "journal":
+        code = 0
+    elif data_type == "swap":
+        code = 1
+        part_info += ": is swap "
+    elif mount:
+        code = 1
+        part_info += ": is mounted at " + mount
+    if code == 0 and state == "active":
+        run_command(node=node, comm="umount " + part_dic["path"])
+    elif code == 1 and state == "prepared":
+        run_command(node=node, comm="mount " + part_dic["path"] + " /var/lib/icfs/osd/icfs-" + str(whoami))
+        run_command(node=node, comm="systemctl start icfs-osd@" + whoami)
+        run_command(node=node, comm="systemctl enable icfs-osd@" + whoami)
+    return code, part_info
+
+
+def can_use_as_osd(node, disk_info_dic):
+    code = 0
+    disk_name = disk_info_dic["path"]
+    info = disk_name+": "
+    if "partitions" in disk_info_dic.keys():
+        parts = disk_info_dic["partitions"]
+        for part in parts:
+            tmp, info_tmp = _get_parttion_info(node, part)
+            code |= tmp
+            if tmp:
+                info += info_tmp + ";"
+    else:
+        mount = None
+        fs_type = None
+        data_type = None
+        if "mount" in disk_info_dic.keys():
+            mount = disk_info_dic["mount"]
+        if "fs_type" in disk_info_dic.keys():
+            fs_type = disk_info_dic["fs_type"]
+        if "type" in disk_info_dic.keys():
+            data_type = disk_info_dic["type"]
+        if mount:
+            code = 1
+            info += "is mounted at " + mount + ";"
+        if fs_type and fs_type == "LVM2_member":
+            code = 1
+            info += "is lvm_member;"
+        if data_type and data_type == "swap":
+            code = 1
+            info += "is swap;"
+    return code, info
+
+
+def check_disk(node, disk_list=None):
+    """
+    get disk list on node
+    :param node: node name
+    :param disk_list: user specify disk_label list
+    :return: disk label list which can be used as osd, and error list
+    """
+    # 1. get disk list
+    result = run_command(node=node, comm="icfs-disk list --format json 2>/dev/null")
+    error = result[0]
+    stdout = result[1]
+    stderr = result[1]
+    osd_disk_list = []
+    wring_disk_list = []
+    if error:
+        # log.error(stderr)
+        print >> sys.stderr, stderr
+        return [], []
+    try:
+        disk_infos = json.loads(stdout)
+        for disk in disk_infos:
+            if re.match("^/dev/(sd|hd|vd).*", disk["path"]):
+                error, info = can_use_as_osd(node, disk)
+                if error:
+                    wring_disk_list.append(info)
+                else:
+                    osd_disk_list.append(info)
+        can_init_disk_list = [disk_label.split(":")[0] for disk_label in osd_disk_list]
+        if disk_list:
+            can_init_disk_list = [disk_tmp.split(":")[0] for disk_tmp in disk_list if disk_tmp.split(":")[0] in can_init_disk_list]
+        return can_init_disk_list, wring_disk_list
+    except Exception, e:
+        # log.error(e)
+        # log.error(stderr)
+        print >> sys.stderr, e
+        print >> sys.stderr, stderr
+        return [], []
+
+
+def mount_disk(disk, osd_path, node=None, retry=3):
+    run_command(comm="mount -t xfs -o noatime,inode64 {0} {1}".format(disk, osd_path), node=node)
+    time.sleep(3)
+    error, mount_info = run_command(comm="cat /proc/mounts  | grep -w %s | grep %s" % (disk, osd_path), node=node)
+    log.info("cat /proc/mounts  | grep -w %s | grep %s" % (disk, osd_path) + " result:"+mount_info)
+    if mount_info.strip() == "":
+        retry -= 1
+        if retry > 0:
+            return mount_disk(disk, osd_path, node=node, retry=retry)
+        else:
+            return 1, "mount %s error." % disk
+    else:
+        return 0, "mount success."
+
+
+def check_osd_data_flush(disk, osdid, node):
+    tmp = str(uuid.uuid4())
+    osd_path = "/var/lib/icfs/osd/icfs-%s" % str(osdid)
+    tmp_path = "/tmp/%s" % tmp
+    run_command("mkdir %s" % tmp_path, node=node)
+    error, info = mount_disk(disk, tmp_path, node=node)
+    if error:
+        return 1, "create osd error: osd data part format error."
+    # check files
+    error, whoami = run_command("cat %s/whoami" % tmp_path, node=node)
+    # files are in /var/lib/icfs/osd/icfs-N. move them to disk
+    if error and "No such file or directory" in whoami:
+        error, info = run_command("mv -f %s/* %s" % (osd_path, tmp_path), node=node)
+        log.info("command:mv -f %s/* %s. result(code:%s, info:%s)" % (osd_path, tmp_path, str(error), info))
+        error, info = run_command("umount %s" % tmp_path, node=node)
+        if not error:
+            run_command("rm -rf %s" % tmp_path, node=node)
+        return 0, "success"
+    # disk mkfs error
+    elif whoami != str(osdid):
+        error, info = run_command("umount %s" % tmp_path, node=node)
+        if not error:
+            run_command("rm -rf %s" % tmp_path, node=node)
+        return 1, "icfs-osd --mkkey --mkfs error."
+    else:
+        error, info = run_command("umount %s" % tmp_path, node=node)
+        if not error:
+            run_command("rm -rf %s" % tmp_path, node=node)
+        return 0, "success"
+
+
+def do_init_osd_without_deploy_with_journal_part(node, disk, osd_id):
+    # resut info (success ): node:disk_name:osd_id[:osd_weight]:info
+    # 1.create osd path
+    osd_id = str(osd_id)
+    osd_path = "/var/lib/icfs/osd/icfs-{0}".format(osd_id)
+    result_info = node + ":" + disk.name + ":" + osd_id
+    # 2.zap disk
+    print "clear disk", node + ":" + disk.name
+    error, info = run_command(comm="icfs-disk zap %s" % disk.name, node=node)
+    if error:
+        Error(722, info)
+        return result_info + ":ERROR:" + info
+    time.sleep(1)
+    # run_command(comm="dd if=/dev/zero of={0} bs=1M count=100 conv=fdatasync".format(disk.name), node=node)
+#     zeroing(disk.name)
+    # 3.reload disk part info .  this can get nonezero exit code.
+    run_command(comm="flock -s {0} partprobe {0}".format(disk.name), node=node)
+    # 4.get part uuid
+    data_part_uuid = str(uuid.uuid4())
+    journal_part_uuid = str(uuid.uuid4())
+    # 5.get journal size
+    error, journal_size = run_command(comm="icfs-osd --show-config-value=osd_journal_size", node=None)
+    if error:
+        journal_size = "+5120M"
+    else:
+        journal_size = "+" + journal_size + "M"
+    # 6.make journal part
+    error, info = run_command(comm="sgdisk --new='2:0:{0}' --change-name='2:icfs journal' --partition-guid='2:{1}' --typecode='2:45b0969e-9b03-4f30-b4c6-b4b80ceff106' --mbrtogpt {2}".format(journal_size, journal_part_uuid, disk.name), node=node)
+    if error:
+        Error(744, info)
+        return result_info + ":ERROR:" + info
+    time.sleep(1)
+    # 7.make data part
+    error, info = run_command(comm="sgdisk --largest-new=1 --change-name='1:icfs data' --partition-guid='1:{0}' --typecode='1:89c57f98-2fe5-4dc0-89c1-f3ad0ceff2be' --mbrtogpt {1}".format(data_part_uuid, disk.name), node=node)
+    if error:
+        Error(744, info)
+        return result_info + ":ERROR:" + info
+    time.sleep(1)
+
+    # 8.reload disk part info .  this can get nonezero exit code.
+    run_command(comm="flock -s {0} partprobe {0}".format(disk.name), node=node)
+    wait_time = [1, 2, 2, 3, 3, 5, 5, 10, 10]
+    wait_step = 0
+    journal_error = None
+    data_error = None
+    while wait_step < len(wait_time):
+        if DEBUG:
+            print "wait for update %s part times:" % disk.name, wait_step
+        time.sleep(wait_time[wait_step])
+        # check journal part
+        error, info = run_command(comm="ls -l {0}".format(disk.name + "2"), node=node)
+        if error:
+            wait_step += 1
+            journal_error = disk.name + "2" + " does not be created"
+            continue
+        # journal part is common file, udev error ,need rm this file , reload parttable
+        elif "-" == info[0]:
+            run_command(comm="rm -rf {0}".format(disk.name + "2"), node=node)
+            run_command(comm="flock -s {0} partprobe {0}".format(disk.name), node=node)
+            wait_step += 1
+            journal_error = disk.name + "2" + " is a common file"
+            continue
+        journal_error = None
+        # check data part
+        error, info = run_command(comm="ls -l {0}".format(disk.name + "1"), node=node)
+        if error:
+            wait_step += 1
+            data_error = disk.name + "1 does not be created"
+            continue
+        elif "-" == info[0]:
+            run_command(comm="rm -rf {0}".format(disk.name + "1"), node=node)
+            run_command(comm="flock -s {0} partprobe {0}".format(disk.name), node=node)  # wait system update new disk part
+            wait_step += 1
+            data_error = disk.name + "1 does not be created"
+            continue
+        else:
+            data_error = None
+            break
+    # check disk part error
+    if journal_error:
+        return result_info + ":ERROR:" + journal_error
+    if data_error:
+        return result_info + ":ERROR:" + data_error
+    # time.sleep(5)
+    print "prepare disk", node + ":" + disk.name
+
+    # 9.make fs on the new disk part. the first part     retry three times
+    wait_time = [5, 5, 10]
+    wait_step = 0
+    error, info = run_command(comm="mkfs.xfs -f -s size=2048 {0}".format(disk.name + "1"), node=node)
+    # retry mkfs.xfs
+    while error != 0 and wait_step < len(wait_time):
+        print "wait mkfs on " + disk.name + "1"
+        time.sleep(wait_time[wait_step])
+        wait_step += 1
+        error, info = run_command(comm="mkfs.xfs -f -s size=2048 {0}".format(disk.name + "1"), node=node)
+    if error:
+        Error(745, info)
+        return result_info + ":ERROR:" + info
+    time.sleep(1)
+
+    # 11.create osd data path
+    error, info = run_command(comm="mkdir -p {0}".format(osd_path), node=node)
+    if error:
+        if "File exists" not in info:
+            # run_command(comm="icfs osd rm {0}".format(osd_id),node=None)
+            Error(747, info)
+            return result_info + ":ERROR:" + info
+    # 12.mount disk
+    error, info = mount_disk(disk.name + "1", osd_path, node=node)
+    if error:
+        # run_command(comm="icfs osd rm {0}".format(osd_id),node=None)
+        run_command(comm="rm -rf {0}".format(osd_path), node=node)
+        Error(748, info)
+        return result_info + ":ERROR:" + info
+    # get disk size
+    error, osd_weight = run_command(comm="icfs-system-disk --disksize %s" % (disk.name+"1:"+osd_path), node=node)
+    # 13. mkdir ln to journal part
+    run_command(comm="ln -sf {0} {1} ".format("/dev/disk/by-partuuid/" + journal_part_uuid, osd_path + "/journal"), node=node)
+    # 14. init osd data dir
+    error, info = run_command(comm="icfs-osd --mkfs --mkkey --mkjournal -i {0} --osd-data {1} --osd-journal {2} --osd-uuid {3}".format(osd_id, osd_path, osd_path + "/journal", data_part_uuid), node=node)
+    if error:
+        run_command(comm="umount {0}".format(disk.name + "1"), node=node)
+        run_command(comm="rm -rf {0}".format(osd_path), node=node)
+        Error(749, info)
+        return result_info + ":ERROR:" + info
+    # 15. chown to icfs:icfs
+    run_command(comm="chown -hR icfs:icfs {0}".format(osd_path), node=node)
+    run_command(comm="chown -hR icfs:icfs {0}".format(disk.name + "1"), node=node)
+    run_command(comm="chown -hR icfs:icfs {0}".format(disk.name + "2"), node=node)
+    # 16. set osd parttypeuuid
+    run_command(comm="umount {0}".format(disk.name + "1"), node=node)
+    # 16.5 check osd init data write on disk or not
+    error, info = check_osd_data_flush(disk.name + "1", osd_id, node=node)
+    if error:
+        write_log(0, info)
+        run_command(comm="rm -rf {0}".format(osd_path), node=node)
+        Error(749, info)
+        return result_info + ":ERROR:" + info
+    # after this icfs-disk will start osd auto
+    run_command(comm="sgdisk --typecode='1:4fbd7e29-9d25-41b8-afd0-062c0ceff05d' {0}".format(disk.name), node=node)
+    run_command(comm="/usr/bin/udevadm trigger --action=add --name-match {0}".format(str(disk.name)+"1"), node=node)
+    return result_info + ":" + str(osd_weight) + ":success"
+
+
+# Deprecated
+def do_init_osd_without_deploy(node, disk, queue,):
+    # 1.umount disk if mounted
+    if disk.isMounted:
+        if disk.mountPoint != "":
+            error, info = run_command("umount %s" % disk.mountPoint, node)
+            if error:
+                queue.put(disk.name + ":ERROR:" + info)
+                return
+        for disktmp in disk.partList:
+            if disktmp.mountPoint != "":
+                error, info = run_command("umount %s" % disktmp.mountPoint, node)
+                if error:
+                    queue.put(disk.name + ":ERROR:" + info)
+                    return
+    # 2.zap disk
+    print "clear disk", disk.name
+    error, info = run_command(comm="icfs-disk zap %s" % disk.name, node=node)
+    if error:
+        queue.put(disk.name + ":ERROR:" + info)
+        Error(722, info)
+        return
+    time.sleep(2)
+    # 3.reload fstab .  this can get nonezero exit code.
+    run_command(comm="flock -s {0} partprobe {0}".format(disk.name), node=node)
+    # 4.make new part
+    error, info = run_command(comm="sgdisk --largest-new=1 --change-name=1:data --typecode=1:4fbd7e29-9d25-41b8-afd0-062c0ceff05d --mbrtogpt {0}".format(disk.name), node=node)
+    if error:
+        queue.put(disk.name + ":ERROR:" + info)
+        Error(744, info)
+        return
+    # 5.reload fstab .  this can get nonezero exit code.
+    run_command(comm="flock -s {0} partprobe {0}".format(disk.name), node=node)
+    # wait system update new disk part
+    time.sleep(3)
+    print "prepare disk", disk.name
+    # 6.make fs on the new disk part. the first part
+    error, info = run_command(comm="mkfs.xfs -f -K -s size=2048 {0}".format(disk.name + "1"), node=node)
+    if error:
+        queue.put(disk.name + ":ERROR:" + info)
+        Error(745, info)
+        return
+    # 7.create new osd
+    error, info = run_command(comm="icfs osd create", node=None)
+    if error:
+        queue.put(disk.name + ":ERROR:" + info)
+        Error(746, info)
+        return
+    else:
+        osd_id = info
+        osd_path = "/var/lib/icfs/osd/icfs-{0}".format(osd_id)
+    # 8.create osd data path
+    error, info = run_command(comm="mkdir {0}".format(osd_path), node=node)
+    if error:
+        if "File exists" not in info:
+            run_command(comm="icfs osd rm {0}".format(osd_id), node=None)
+            queue.put(disk.name + ":ERROR:" + info)
+            Error(747, info)
+            return
+    # 9.mount disk
+    error, info = run_command(comm="mount -t xfs -o noatime,inode64 {0} {1}".format(disk.name + "1", osd_path), node=node)
+    if error:
+        run_command(comm="icfs osd rm {0}".format(osd_id), node=None)
+        run_command(comm="rm -rf {0}".format(osd_path), node=node)
+        queue.put(disk.name + ":ERROR:" + info)
+        Error(748, info)
+        return
+    # 10. init osd data dir
+    error, info = run_command(comm="icfs-osd --mkfs --mkkey -i {0}".format(osd_id), node=node)
+    if error:
+        run_command(comm="umount {0}".format(disk.name + "1"), node=node)
+        run_command(comm="icfs osd rm {0}".format(osd_id), node=None)
+        run_command(comm="rm -rf {0}".format(osd_path), node=node)
+        queue.put(disk.name + ":ERROR:" + info)
+        Error(749, info)
+        return
+    # 11. chown to icfs:icfs
+    run_command(comm="chown -hR icfs:icfs {0}".format(osd_path), node=node)
+    run_command(comm="chown -hR icfs:icfs {0}".format(disk.name + "1"), node=node)
+    # 12.add osd keyring
+    error, info = run_command(comm="icfs auth add osd.{0} osd 'allow *' mon 'allow profile osd' -i {1}".format(osd_id, osd_path + "/keyring"), node=node)
+    if error:
+        queue.put(disk.name + ":ERROR:" + info)
+        Error(750, info)
+        return
+    # 13.enable icfs-osd@id.service
+    run_command(comm="systemctl enable icfs-osd@{0}".format(osd_id), node=node)
+    # 14.start icfs-osd@id.service
+    run_command(comm="systemctl start icfs-osd@{0}".format(osd_id), node=node)
+    queue.put(disk.name + ":success")
+    # 15.change disk mount info
+    error, info = run_command(comm="cat /proc/mounts | grep -w '{0}' ".format(disk.name + "1"), node=node)
+    run_command(comm="sed -i '/{0}/d' /etc/fstab".format(disk.name + "1".replace("/", "\/")), node=node)
+    run_command(comm="echo {0} >> /etc/fstab".format(info), node=node)
+    return
+
+
+def init_all_disk(node, disk_name_list=None):
+    errorhappend = 0
+    node_name = get_host_name(node)
+    if node_name == 1:
+        return 1
+    # push conf
+    run_command("cp /etc/icfs/icfs.conf /home/inspur/icfs.conf")
+    os.chdir(ICFSDEPLOYWORKPATH)
+    run_command(comm="icfs-deploy --overwrite-conf config push {0}".format(node), node=None)
+    run_command(comm="icfs-deploy --overwrite-conf admin {0}".format(node), node=None)
+    # run_command(comm="scp /etc/icfs/* {0}:/etc/icfs/".format(node_name), node=None)
+    # get all data disk on node
+    disk_list, error_list = get_all_data_disk(node)
+    if disk_list == 0:
+        return 1
+    if len(error_list) != 0:
+        errorhappend = 1
+        for tmp in error_list:
+            Error(727, tmp)
+    # remove do not need init disk
+    if disk_name_list:
+        disk_list = [disk for disk in disk_list if disk.name not in disk_name_list]
+    # deploy admin.keyring
+    os.chdir(ICFSDEPLOYWORKPATH)
+    run_command(comm="icfs-deploy --overwrite-conf admin %s" % node, node=None)
+    # fix bug multi-osd
+    ok_disk_labels, error_disk_labels = check_disk(node)
+    for disk_info in error_disk_labels:
+        write_log(0, disk_info)
+    disk_list = [disk for disk in disk_list if disk.name in ok_disk_labels]
+    # fix bug multi-osd get osd ids
+    current_osd_numbers = get_numb_of_osds()
+    if current_osd_numbers == -1:
+        return 1
+    # log.debug("icfs osd batch_create %d %d" % (current_osd_numbers, len(disk_list)))
+    result = run_command("icfs osd batch_create %d %d" % (current_osd_numbers, len(disk_list)))
+    # log.debug(result)
+    retcode = result[0]
+    stderr = result[1]
+    stdout = result[1]
+    if retcode:
+        Error(746, stderr)
+        return 1
+    osd_id_list = [int(osdid) for osdid in stdout.split(",")[0:-1]]
+    osd_id_list.sort()
+    # fix above
+    # start create osd
+    hosts = [node] * len(disk_list)
+    executor = ThreadPoolExecutor(len(disk_list))
+    try:
+        future = executor.map(do_init_osd_without_deploy_with_journal_part, hosts, disk_list, osd_id_list)
+    except Exception, e:
+        write_log(0, str(e))
+        return 1
+    # check init result if have ERROR , need wait osd be start
+    wait_list = []
+    need_wait = False
+    for tmp in future:
+        if ":ERROR:" in tmp:
+            errorhappend |= 1
+            need_wait = True
+            write_log(0, tmp)
+            osd_id = tmp.split(":")[2]
+            if osd_id != "-1":
+                run_command(comm="icfs osd rm {0}".format("osd." + osd_id), node=None)
+        elif ":WARNING:" in tmp:
+            write_log(0, tmp)
+        else:
+            disk_name = tmp.split(":")[1]
+            osd_id = tmp.split(":")[2]
+            wait_list.append([disk_name, osd_id])
+        print tmp
+    # do not return until all success osd be started. just wait
+    wait_time = [5, 5, 10, 30, 30, 30, 30, 20, 20, 10, 10, 10, 5, 5, 2, 2, 1, 1]
+    wait_step = 0
+    up_count = 0
+    while need_wait and wait_step < len(wait_time):
+        time.sleep(wait_time[wait_step])
+        # get mount info
+        flag, info = run_command(comm="cat /proc/mounts", node=node)
+        for disk_name, osd_id in wait_list:
+            osd_device = disk_name + "1"
+            osd_path = "/var/lib/icfs/osd/icfs-" + osd_id
+            mountinfo = osd_device + " " + osd_path + " "
+            if mountinfo in info:
+                up_count += 1
+        if up_count == len(wait_list):
+            break
+        else:
+            up_count = 0
+            wait_step += 1
+    # return error code
+    return errorhappend
+
+
+def get_all_osd(node=None):
+    # find osd by cat /proc/mounts
+    osd_list = []
+    error, osd_infos = run_command(comm="cat /proc/mounts 2>/dev/null | grep '/var/lib/icfs/osd/.*'", node=node)
+    if osd_infos == "":
+        return osd_list
+    if not error:
+        osd_info = osd_infos.splitlines()
+        for info in osd_info:
+            path = info.split()[1]
+            oid = path.replace("/var/lib/icfs/osd/icfs-", "")
+            name = "osd." + oid
+            device = info.split()[0]
+            osd = Osd()
+            osd.path = path
+            osd.id = oid
+            osd.name = name
+            osd.device = device
+            osd_list.append(osd)
+    else:
+        Error(code=724, info=osd_infos)
+        return 1
+    # check osd crush location
+    bucket_list = get_all_bucket()
+    for osd in osd_list:
+        try:
+            osdid = int(osd.id)
+        except:
+            Error(725, osd.id)
+            return 1
+        for bucket in bucket_list:
+            if osdid in bucket.children:
+                osd.parent.append(bucket.id)
+    return osd_list
+
+
+def stop_osd(osd, node=None, retry=3):
+    error = 1
+    info = "unknow linux version"
+    if platform.linux_distribution()[1].startswith("7"):
+        run_command(comm="systemctl stop icfs-osd@" + osd.id, node=node)
+        # flag == 0. osd is activate
+        flag, info = run_command(comm="systemctl status icfs-osd@" + osd.id, node=node)
+        if flag == 0:
+            retry -= 1
+            if retry > 0:
+                time.sleep(5)
+                return stop_osd(osd, node=node, retry=retry)
+            else:
+                write_log(0, "stop osd error: osd."+osd.id)
+                return 1, "stop osd error: osd." + osd.id
+        run_command(comm="systemctl disable icfs-osd@" + osd.id, node=node)
+        return 0, "stop success"
+    elif platform.linux_distribution()[1].startswith("6"):
+        error, info = run_command(comm="service icfs stop " + osd.name, node=node)
+    return error, info
+
+
+def umount_osd_path(osd, node=None, retry=3):
+    error, info = run_command(comm="umount " + osd.path, node=node)
+    if error:
+        write_log(0, "node:%s, osd:%s, umount error:%s, mount point:%s" % (
+            "localhost" if not node else node, str(osd.id), info, osd.path))
+        retry -= 1
+        if retry > 0:
+            time.sleep(5)
+            return umount_osd_path(osd, node=node, retry=retry)
+        else:
+            return 1, "node:%s, osd:%s, umount data dir error:%s, mount point:%s" % \
+                   ("localhost" if not node else node, str(osd.id), info, osd.path)
+    else:
+        return 0, "success"
+
+
+def rm_osd_data(osd, node=None):
+    error, info = run_command(comm="rm -f " + osd.path + "/whoami", node=node)
+    if error:
+        errorinfo = "rm " + osd.path + "/whoami" + " error. node:" + "localhost" if not node else node + " info:" + info
+        write_log(0, errorinfo)
+    error, info = run_command(comm="rm -f " + osd.path + "/fsid", node=node)
+    if error:
+        errorinfo = "rm " + osd.path + "/fsid" + " error. node:" + "localhost" if not node else node + " info:" + info
+        write_log(0, errorinfo)
+    error, info = run_command(comm="rm -f " + osd.path + "/icfs_fsid", node=node)
+    if error:
+        errorinfo = "rm " + osd.path + "/icfs_fsid" + " error. node:" + "localhost" if not node else node + " info:" + info
+        write_log(0, errorinfo)
+    error, info = run_command(comm="rm -f " + osd.path + "/superblock", node=node)
+    if error:
+        errorinfo = "rm " + osd.path + "/superblock" + " error. node:" + "localhost" if not node else node + " info:" + info
+        write_log(0, errorinfo)
+    error, info = umount_osd_path(osd, node)
+    if error:
+        return 1, info
+    error, info = run_command(comm="rm -rf " + osd.path, node=node)
+    if error:
+        write_log(0, "node:%s, osd:%s, rm data dir error:%s, mount point:%s" % ("localhost" if not node else node, str(osd.id), info, osd.path))
+    osd_device = osd.device
+    device_name = re.match("(^/dev/[A-Za-z]+)([0-9]*)$", osd_device)
+    disk_name = device_name.group(1)
+    part_number = device_name.group(2)
+    # mark data part type as linux filesystem type
+    error, info = run_command(comm="sgdisk --typecode='{0}:0fc63daf-8483-4772-8e79-3d69d8477de4' {1}".format(part_number, disk_name), node=node)
+    if error:
+        return 1, info
+    return 0, "success"
+
+
+def rm_osd_crush_auth(osd):
+    error, info = run_command(comm="icfs osd crush rm " + osd.name)
+    if error:
+        write_log(0, "osd:%s, osd crush rm error:%s" % (str(osd.id), info))
+    error, info = run_command(comm="icfs osd rm " + osd.name)
+    if error:
+        run_command(comm="icfs osd down " + osd.name)
+        error, info = run_command(comm="icfs osd rm " + osd.name)
+        if error:
+            write_log(0, "osd:%s, osd rm error:%s" % (str(osd.id), info))
+    error, info = run_command(comm="icfs auth del " + osd.name)
+    if error:
+        write_log(0, "osd:%s, auth del error:%s" % (str(osd.id), info))
+    return 0, "success"
+
+
+def destroy_all_osd(runindex, hostcount, starttime, con, node=None):
+    # runindex :index of the node
+    # hostcount :host count
+    # starttime :task start time
+    # con :db handle
+    # node :the host need to destroy
+    # task name in db
+    task_name = "shrink_osd"
+    try:
+        current_progress = (runindex - 1) * (100 / hostcount)
+        task_progress_max = runindex * (100 / hostcount)
+        errorhapend = 0
+        osd_list = get_all_osd(node)
+        # get osd list error
+        if osd_list == 1:
+            return 1
+        step = (100 / hostcount) / 2.0
+        nodes = [node] * len(osd_list)
+        # stop , rm data , rm cursh ,rm auth
+        index = 1
+        # stop all osd
+        executor = ThreadPoolExecutor(len(osd_list))
+        futher = executor.map(stop_osd, osd_list, nodes)
+        for result in futher:
+            code = result[0]
+            info = result[1]
+            if code:
+                errorhapend = 1
+                print info
+        if errorhapend:
+            return 1
+        time.sleep(10)
+        # rm osd crush info an auth
+        executor = ThreadPoolExecutor(len(osd_list))
+        futher = executor.map(rm_osd_crush_auth, osd_list)
+        for result in futher:
+            code = result[0]
+            info = result[1]
+            if code:
+                errorhapend = 1
+                print info
+        if errorhapend:
+            return 1
+        update_progress(con, con.cursor(), current_progress + index * step, starttime, task_name)
+        index += 1
+        # rm osd data
+        executor = ThreadPoolExecutor(len(osd_list))
+        futher = executor.map(rm_osd_data, osd_list, nodes)
+        for result in futher:
+            code = result[0]
+            info = result[1]
+            if code:
+                errorhapend = 1
+                print info
+        if errorhapend:
+            return 1
+        update_progress(con, con.cursor(), current_progress + index * step, starttime, task_name)
+        run_command(comm="rm -rf /var/lib/icfs/bootstrap-osd/*", node=node)
+        # rm osd start script
+        error, info = run_command(comm="rm -f /etc/systemd/system/icfs-osd.target.wants/*", node=node)
+        log.info("rm -f /etc/systemd/system/icfs-osd.target.wants/*" + str((error, info)))
+        error, info = run_command(comm="rm -rf /var/lib/icfs/osd", node=node)
+        log.info("rm -rf /var/lib/icfs/osd" + str((error, info)))
+        # delete host bucket
+        parent_list = []
+        # find all host bucket
+        for osd in osd_list:
+            for parent_id in osd.parent:
+                if parent_id not in parent_list:
+                    parent_list.append(parent_id)
+        # update bucket_dic
+        get_all_bucket()
+        for bucket_id in parent_list:
+            if bucket_dic. has_key(bucket_id):
+                bucket = bucket_dic.get(bucket_id)
+                if len(bucket.children) == 0:
+                    run_command(comm="icfs osd crush rm " + bucket.name)
+                else:
+                    for osdid in bucket.children:
+                        run_command(comm="icfs osd crush rm osd.%s" % str(osdid))
+                        run_command(comm="icfs osd rm osd.%s" % str(osdid))
+                        run_command(comm="icfs auth del osd.%s" % str(osdid))
+                    run_command(comm="icfs osd crush rm " + bucket.name)
+        update_progress(con, con.cursor(), task_progress_max, starttime, task_name)
+        return 0
+    except Exception, e:
+        write_log(0, e)
+        if DEBUG:
+            task_done(con, con.cursor(), starttime, 0, "task has some error.", task_name)
+            raise e
+        return 1
+
+
+def modify_mon_conf():
+    # 1. get all mon info from cluster
+    error, moninfos = run_command(comm="icfs mon dump -f json ", node=None)
+    if error:
+        Error(741, moninfos)
+        return 1
+    # 2. com config file and mon map dump
+    try:
+        monjson = json.loads(moninfos)
+        # mons list
+        mons = monjson["mons"]
+        mon_list = []
+        for m in mons:
+            mon = Mon(name=m["name"], ipaddr=m["addr"].split(":")[0])
+            mon_list.append(mon)
+
+        config_file_path = "/etc/icfs/icfs.conf"
+        cfg_parser = ConfigParser()
+        ok_files = cfg_parser.read(config_file_path)
+        if config_file_path not in ok_files:
+            Error(553, "Parse icfs.conf failed")
+
+        conf_mons = []
+        if cfg_parser.has_option("global", "mon_initial_members"):
+            cfg_mon_str = cfg_parser.get("global", "mon_initial_members")
+            conf_mons = cfg_mon_str.split(",")
+            conf_mons = [i.strip() for i in conf_mons if i.strip() != ""]
+
+        if len(mon_list) != len(conf_mons):
+            name_list = []
+            addr_list = []
+            for mon_obj in mon_list:
+                name_list.append(mon_obj.name)
+                addr_list.append(mon_obj.ipaddr)
+
+            name_str = ",".join(name_list)
+            addr_str = ",".join(addr_list)
+            if not cfg_parser.has_section("global"):
+                cfg_parser.add_section("global")
+            cfg_parser.set("global", "mon_initial_members", name_str)
+            cfg_parser.set("global", "mon_host", addr_str)
+            cfg_parser.write(open(config_file_path, "w"))
+
+            hosts = " ".join(name_list)
+            run_command("cp /etc/icfs/icfs.conf /home/inspur/icfs.conf")
+            os.chdir(ICFSDEPLOYWORKPATH)
+            error, info = run_command(comm="icfs-deploy --overwrite-conf admin %s" % hosts, node=None)
+            if error:
+                Error(738)
+            return 0
+    except Exception, e:
+        Error(741, e)
+        return 1
+
+
+def is_mon(node):
+    # find mon data , if isnot a mon node ,return None
+    error, info = run_command(comm="icfs mon dump -f json", node=None)
+    if error:
+        Error(741, info)
+    try:
+        mons = json.loads(info)["mons"]
+        for mon in mons:
+            if mon["name"] == node:
+                return node
+        return None
+    except Exception, e:
+        Error(553, e)
+        return None
+
+
+def expand_mon(node):
+    # 1. check this host have mon or not
+    if is_mon(node):
+        Error(742)
+        return 1
+    # 2. if not , icfs-deploy admin node  push icfs-client-admin.keyring
+    run_command("cp /etc/icfs/icfs.conf /home/inspur/icfs.conf")
+    os.chdir(ICFSDEPLOYWORKPATH)
+    error, info = run_command(comm="icfs-deploy --overwrite-conf admin %s" % node, node=None)
+    if error:
+        Error(553, info)
+        return 1
+    error, info = run_command(comm="icfs-deploy --overwrite-conf mon create %s" % node)
+    if error:
+        Error(734, info)
+        return 1
+    # modify icfs.conf
+    time.sleep(10)
+    run_command(comm="icfs -s", node=None)
+    if modify_mon_conf():
+        return 1
+    print "add mon success %s !" % node
+    print "wait more than 10 seconds to check mon status"
+    return 0
+
+
+def shrink_mon(node):
+    errorhappend = 0
+    # 1. check this host have mon or not
+    if not is_mon(node):
+        Error(730)
+        return 1
+    # 2. check mon numbers ,if this is only one mon , can't remove
+    error, info = run_command(comm="icfs mon dump -f json ", node=None)
+    if error:
+        Error(741, info)
+        return 1
+    try:
+        monnumbers = len(json.loads(info)["mons"])
+        if monnumbers == 1:
+            Error(739)
+            return 1
+    except Exception, e:
+        Error(553, e)
+        return 1
+    # 3. destroy mon
+    os.chdir(ICFSDEPLOYWORKPATH)
+    run_command(comm="icfs mon remove %s" % node, node=None)
+    # 4.stop mon thread
+    run_command(comm="systemctl stop icfs-mon@%s" % node, node=node)
+    # 5. remove mon data
+    error, info = run_command(comm="rm -rf /var/lib/icfs/mon/*", node=node)
+    if error:
+        run_command(comm="killall icfs-mon", node=node)
+        error, info = run_command(comm="rm -rf /var/lib/icfs/mon/*", node=node)
+        if error:
+            Error(740, "delete /var/lib/icfs/mon/*  on %s" % node)
+            errorhappend = 1
+    time.sleep(5)  # wait mon status
+    run_command(comm="icfs -s", node=None)
+    # #modify icfs.conf
+    if modify_mon_conf():
+        return 1
+    if errorhappend:
+        return 1
+    print "shrink mon success!"
+    print "wait more than 10 seconds to check mon status"
+    return 0
+
+
+def cat_file(path, node):
+    error, info = run_command(comm="cat %s" % path, node=node)
+    if error:
+        Error(1704, path)
+        return None
+    else:
+        return info
+
+
+def get_all_mds():
+    # return Mds list
+    error, info = run_command(comm="icfs mds stat -f json ", node=None)
+    mds_list = []
+    if error:
+        Error(731, info)
+        return 1
+    try:
+        infos = json.loads(info)
+        # search all stanby mds
+        stanbys = infos["fsmap"]["standbys"]
+        for stanby in stanbys:
+            keys = stanby.keys()
+            mds = Mds()
+            for key in keys:
+                mds.setvalue(key, stanby[key])
+            mds_list.append(mds)
+        # search all active:up mds
+        for mdsmap in infos["fsmap"]["filesystems"]:
+            keys = mdsmap["mdsmap"]["info"].keys()
+            for key in keys:
+                upmds = mdsmap["mdsmap"]["info"][key]
+                names = upmds.keys()
+                mds = Mds()
+                for name in names:
+                    mds.setvalue(name, upmds[name])
+                mds_list.append(mds)
+        return mds_list
+    except Exception, e:
+        Error(731, e)
+        return 1
+
+
+def print_all_mds():
+    # print mds info
+    mds_list = get_all_mds()
+    l1 = len("mds_node_name")
+    l2 = len("mds_node_ip")
+    info = []
+    if mds_list == 1:
+        # print "mds_node_name    mds_node_ip    mds_stat"
+        return 1
+    for mds in mds_list:
+        mds_ip = mds.getip()
+        mds_host = get_host_name(mds_ip)
+        mds_stat = mds.state
+        l1 = max(l1, len(mds_host))
+        l2 = max(l2, len(mds_ip))
+        info.append([mds_host, mds_ip, mds_stat])
+    print "mds_node_name", (l1 - len("mds_node_name") + 4) * " ", "mds_node_ip", (l2 - len("mds_node_ip") + 4) * " ", "mds_stat"
+    for line in info:
+        print line[0], (l1 - len(line[0]) + 4) * " ", line[1], (l2 - len(line[1]) + 4) * " ", line[2]
+    return 0
+
+
+def mds_exist(mds_name):
+    # check node is a mds or not , True or False
+    mds_list = get_all_mds()
+    if mds_list == 1:
+        return False
+    for mds in mds_list:
+        # mds_ip = mds.getip()
+        # host_name = get_host_name(mds_ip)
+        if mds_name == mds.name:
+            return True
+    return False
+
+
+def expand_mds(mdsid):
+    mdsinfo = mdsid.split(":")
+    hostname = mdsinfo[0]
+    try:
+        mdsname = mdsinfo[1]
+    except:
+        mdsname = hostname
+    # check this host is a mds or not
+    if mds_exist(mdsname):
+        Error(732)
+        return 1
+    # create mds
+    run_command("cp /etc/icfs/icfs.conf /home/inspur/icfs.conf")
+    os.chdir(ICFSDEPLOYWORKPATH)
+    error, info = run_command(comm="icfs-deploy --overwrite-conf mds create %s" % mdsid, node=None)
+    if error:
+        Error(735, info)
+        return 1
+    # print "add mds success!"
+    # print "wait more than 10 seconds to check mds status"
+    return 0
+
+
+def shrink_mds(mdsid):
+    mdsinfo = mdsid.split(":")
+    hostname = mdsinfo[0]
+    all_mds_list = get_all_mds()
+    if all_mds_list == 1:
+        return 1
+    del_mds_list = []
+    if len(mdsinfo) == 2:
+        # mdsid like this :  inspur01:1
+        mdsname = mdsinfo[1]
+        if mds_exist(mdsname):
+            del_mds_list.append(Mds(mdsname))
+    else:
+        # mdsid like this: inspur01  (mean delete all mds on inspur01)
+        for mds_instance in all_mds_list:
+            mds_ip = mds_instance.getip()
+            mds_hostname = get_host_name(mds_ip)
+            if hostname == mds_hostname:
+                del_mds_list.append(mds_instance)
+    # find mds will be delete or not
+    if not del_mds_list:
+        Error(733)
+        return 1
+    # check mds number
+    if len(del_mds_list) == len(all_mds_list):
+        Error(736, "if delete all mds on %s , cluster will have no mds." % hostname)
+        return 1
+    # do shrink mds
+    errorhappend = 0
+    for mds_instance in del_mds_list:
+        mdsname = mds_instance.name
+        # stop mds
+        error, info = run_command(comm="systemctl stop icfs-mds@%s" % mdsname, node=hostname)
+        if error:
+            Error(553, info)
+            errorhappend |= 1
+            continue
+        # delete mds auth info
+        error, info = run_command(comm="icfs auth del mds.%s" % mdsname, node=None)
+        if error:
+            Error(553, info)
+            errorhappend |= 1
+            continue
+        # delete mds data dir
+        run_command(comm="rm -rf /var/lib/icfs/mds/icfs-%s" % mdsname, node=hostname)
+        run_command(comm="rm -rf /etc/systemd/system/icfs-mds.target.wants/icfs-mds@%s.service" % mdsname, node=hostname)
+        print "shrink mds %s:%s success !" % (hostname, mdsname)
+    if not errorhappend:
+        print "wait more than 10 seconds to check mds status"
+    return errorhappend
+
+
+def icfs_deploy_gatherkey(host):
+    # host : must be the mon host , normally is the host which icfs-deploy is run
+    os.chdir(ICFSDEPLOYWORKPATH)
+    if not host:
+        host = get_host_name()
+    error, info = run_command("icfs-deploy gatherkeys %s" % host, node=None)
+    Error(737, info)
+    return 1
+
+
+def check_bootstrap_keyring(daemo, mon=None, host=None):
+    needgatherkey = False
+    needdel_lib_icfs_boot = False
+    keyring_str = ""
+    keyring_file = ""
+    keyring_icfs = ""
+    error = 0
+    if daemo == "osd":
+        keyring_file = ICFSDEPLOYWORKPATH + "/icfs.bootstrap-osd.keyring"
+        keyring_icfs = "/var/lib/icfs/bootstrap-osd/icfs.keyring"
+        error, keyring_str = run_command("icfs auth get client.bootstrap-osd 2>/dev/null | grep 'key = '", node=None)
+    if daemo == "mds":
+        keyring_file = ICFSDEPLOYWORKPATH + "/icfs.bootstrap-mds.keyring"
+        keyring_icfs = "/var/lib/icfs/bootstrap-mds/icfs.keyring"
+        error, keyring_str = run_command("icfs auth get client.bootstrap-mds 2>/dev/null | grep 'key = '", node=None)
+    if daemo == "rgw":
+        keyring_file = ICFSDEPLOYWORKPATH + "/icfs.bootstrap-rgw.keyring"
+        keyring_icfs = "/var/lib/icfs/bootstrap-rgw/icfs.keyring"
+        error, keyring_str = run_command("icfs auth get client.bootstrap-rgw 2>/dev/null | grep 'key = '", node=None)
+    if error:
+        Error(738, keyring_str)
+        return 1
+#     # 1. check file exists or not
+#     if not os.path.exists(keyring_file):
+#         needgatherkey = True
+    # 2. /home/inspur/icfs.bootstrap-osd.keyring  file exists , check keyring eq or not
+    else:
+        error, keyring_file_key = run_command(comm="cat %s 2>/dev/null | grep 'key = '" % keyring_file, node=None)
+        if keyring_file_key == "":
+            needgatherkey = False
+        elif keyring_file_key.strip() != keyring_str.strip():
+            needgatherkey = True
+    # 3. check /var/lib/icfs/bootstrap-DAEMO/icfs.keyring exists or not
+    if needgatherkey:
+        # if file exist, return code = 0
+        if not run_command(comm="cat %s" % keyring_icfs, node=host)[0]:
+            needdel_lib_icfs_boot = True
+    else:
+        error, keyring_icfs_key = run_command(comm="cat %s 2>/dev/null | grep 'key = '" % keyring_icfs, node=host)
+        if error:
+            if "Connection timed out" in keyring_icfs_key:
+                Error(610, keyring_icfs_key)
+                return 1
+            elif keyring_icfs_key == "":
+                needdel_lib_icfs_boot = False
+            else:
+                Error(553, keyring_icfs_key)
+                return 1
+        if keyring_file_key.strip() != keyring_icfs_key.strip():
+            needdel_lib_icfs_boot = True
+    # 4. do keyring file create or not
+    if needgatherkey:
+        if not mon:
+            mon = get_host_name()
+            if type(mon) != str:
+                return 1
+        if icfs_deploy_gatherkey(mon):
+            return 1
+    if needdel_lib_icfs_boot:
+        run_command(comm="rm -f %s" % keyring_icfs, node=host)
+        run_command(comm="scp %s %s:%s" % (keyring_file, node, keyring_icfs), node=None)
+    return 0
+
+
+def destroy_icfs_thread(node):
+    # stop all icfs mon,osd,mds thread
+    run_command(comm="systemctl stop icfs-mon.*", node=node)
+    run_command(comm="systemctl stop icfs-mds.*", node=node)
+    run_command(comm="systemctl stop icfs-osd.*", node=node)
+    run_command(comm="systemctl stop icfs.*", node=node)
+    run_command(comm="systemctl stop icfs-mon.target", node=node)
+    run_command(comm="systemctl stop icfs-mds.target", node=node)
+    run_command(comm="systemctl stop icfs-osd.target", node=node)
+    run_command(comm="systemctl stop icfs.target", node=node)
+    time.sleep(15)
+    # check status
+    error, info = run_command(comm="ps aux |grep -v grep |  grep -E '/usr/bin/(icfs-osd|icfs-mon|icfs-mds)' | awk '{print $2}'", node=node)
+    if error:
+        return "ssherror:" + info
+    pids = info.splitlines()
+    for pid in pids:
+        run_command(comm="kill -9 {0}".format(pid), node=node)
+    time.sleep(5)
+    error, info = run_command(comm="ps aux |grep -v grep |  grep -E '/usr/bin/(icfs-osd|icfs-mon|icfs-mds)' | awk '{print $2}'", node=node)
+    if info != "":
+        pids = info.splitlines()
+        for pid in pids:
+            return "pid:" + pid
+    return ""
+
+
+def umount_osd_dir(node):
+    run_command(comm="rm -rf /var/lib/icfs/osd/*/whoami")
+    run_command(comm="rm -rf /var/lib/icfs/osd/*/superblock")
+    run_command(comm="rm -rf /var/lib/icfs/osd/*/fsid")
+    run_command(comm="rm -rf /var/lib/icfs/osd/*/icfs_fsid")
+    run_command(comm="umount /var/lib/icfs/osd/*", node=node)
+    error, info = run_command(comm="cat /proc/mounts | grep '/var/lib/icfs/osd/icfs'", node=node)
+    if info != "":
+        time.sleep(5)
+    # retry
+    run_command(comm="umount /var/lib/icfs/osd/*", node=node)
+    time.sleep(2)
+    error, info = run_command(comm="cat /proc/mounts | grep '/var/lib/icfs/osd/icfs'", node=node)
+    if info != "":
+        mountinfos = info.splitlines()
+        for mountinfo in mountinfos:
+            return mountinfo
+    return ""
+
+
+def destroy_icfs_data(node):
+    # clear data dir
+    error, info = run_command(comm="rm -rf /var/lib/icfs/*/*", node=node)
+    if error:
+        return info
+    # clear deploy dir
+    error, info = run_command(comm="rm -rf /home/inspur/*", node=node)
+    if error:
+        return info
+    # clear start script dir
+    error, info = run_command(comm="rm -rf /etc/systemd/system/icfs-*/*", node=node)
+    if error:
+        return info
+    # clear conf dir
+    if error:
+        return info
+    error, info = run_command(comm="rm -rf /etc/icfs/*", node=node)
+    # clear .dir_ctime .disk_usage.txt
+    if error:
+        return info
+    error, info = run_command(comm="rm -rf /usr/bin/.dir_ctime /usr/bin/.disk_usage.txt", node=node)
+    if error:
+        return info
+    # clear run dir
+    error, info = run_command(comm="rm -rf /var/run/icfs/*", node=node)
+    if error:
+        return info
+    # clear systemctl.target
+    error, info = run_command(comm="rm -rf  /etc/systemd/system/icfs-*/*", node=node)
+    if error:
+        return info
+    return ""
+
+
+def purge(force=False, node=None):
+    # 1.confirm operation
+    if not force:
+        force = raw_input("this operation will destroy all of the data on the hosts and irrevocable !!! [yes|no]:")
+        if force != "yes":
+            return 0
+    if not node:
+        # 2.get all node
+        error, node_str = run_command(comm="icfs node ls -f json", node=None)
+        if error:
+            print node_str
+            return 1
+        node_list = []
+        try:
+            node_json = json.loads(node_str)
+            nodetypes = node_json.keys()
+            for key in nodetypes:
+                hosts = node_json[key]
+                for host_name in hosts.keys():
+                    if host_name not in node_list:
+                        node_list.append(host_name)
+        except Exception, e:
+            print e
+            return 1
+    else:
+        node_list = node.split(",")
+        node_list = [node.strip() for node in node_list if node.strip() != ""]
+    # 3.destroy thread
+    executor = ThreadPoolExecutor(len(node_list))
+    futher = executor.map(destroy_icfs_thread, node_list)
+    errorhappend = False
+    for tmp in futher:
+        if tmp:
+            errorhappend = True
+            print tmp
+    # 4.umount_osd_dir
+    executor = ThreadPoolExecutor(len(node_list))
+    futher = executor.map(umount_osd_dir, node_list)
+    for tmp in futher:
+        if tmp:
+            errorhappend = True
+            print tmp
+    # 5.destroy data
+    executor = ThreadPoolExecutor(len(node_list))
+    futher = executor.map(destroy_icfs_data, node_list)
+    for tmp in futher:
+        if tmp:
+            errorhappend = True
+            print tmp
+    # check error info
+    if errorhappend:
+        return 1
+    else:
+        return 0
+
+
+def initCluster(mons, public_network, cluster_network):
+    mon_list = mons.split(" ")
+    for mon in mon_list:
+        error, info = run_command(comm="hostname", node=mon)
+        if error:
+            print info
+            return 1
+
+    # check /home/inspur  deploy work path
+    deploy_path = ICFSDEPLOYWORKPATH
+    run_command(comm="mkdir -p {0}".format(deploy_path), node=None)
+    os.chdir(deploy_path)
+    # create new config
+    params = ""
+    if public_network:
+        params = params + " --public-network " + public_network
+    if cluster_network:
+        params = params + " --cluster-network " + cluster_network
+    error, info = run_command(comm="icfs-deploy new {0} {1}".format(mons, params), node=None)
+    if error:
+        print info
+        return 1
+    error, info = run_command(comm="icfs-deploy mon create-initial", node=None)
+    if error:
+        print info
+        return 1
+    return 0
+
+
+def get_numb_of_osds():
+    osd_numbers = -1
+    result = run_command(comm="icfs osd tree --format json")
+    retcode = result[0]
+    stdout = result[1]
+    stderr = result[1]
+    if retcode:
+        print >> sys.stderr, stderr
+        Error(724)
+    else:
+        try:
+            osd_count = {}
+            osd_tree = json.loads(stdout)
+            for bucket in osd_tree["nodes"]:
+                if bucket["type"] == "osd":
+                    osd_count[bucket["id"]] = "osd"
+            for bucket in osd_tree["stray"]:
+                if bucket["type"] == "osd":
+                    osd_count[bucket["id"]] = "osd"
+            osd_numbers = len(osd_count)
+        except:
+            Error(724)
+    return osd_numbers
+
+
+def get_osd_weight(host, device):
+    # wait osd up
+    # info : /dev/sdc1 /var/lib/icfs/osd/icfs-0
+    retcode, info = wait_osd_up(host, device)
+    if retcode:
+        return 1, info, None
+    # get disk weight
+    else:
+        gp = re.match("/var/lib/icfs/osd/icfs-(\d+)", info.split()[1])
+        if not gp:
+            return 1, "not find osd num in /pro/mounts", None
+        else:
+            osd_num = gp.group(1)
+        osd_path = info.replace(" ", ":")
+        result = run_command("icfs-system-disk --disksize %s" % osd_path, host)
+        if result[0]:
+            return 1, result[1], None
+        else:
+            return 0, float(result[1]), osd_num
+
+
+def get_hostname_list():
+    hostname = []
+    pattern = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(\w*?)(?:#.*)?$")
+    try:
+        with open("/etc/hosts", "r") as fp:
+            lines = fp.readlines()
+    except IOError:
+        return hostname
+    for line in lines:
+        m = pattern.match(line)
+        if m is None:
+            continue
+        if m.group(2) == 'localhost localhost.localdomain localhost4 localhost4.localdomain4':
+            continue
+        hostname.append(m.group(2))
+    return hostname
+
+
+def sycn_hosts(new_hosts_list):
+    # add the new host
+    need_added_hosts = ""
+    for host in new_hosts_list:
+        if not commands.getstatusoutput("cat /etc/hosts | grep -w %s | grep -v '^#'" % host)[1]:
+            # get the host name
+            host_name_ret, host_name = commands.getstatusoutput("ssh %s 'hostname'" % host)
+            if host_name_ret:
+                return 1, host_name
+            if commands.getstatusoutput("cat /etc/hosts | grep -w %s | grep -v '^#'" % host_name)[1]:
+                return 1, "have replicate host name %s ip %s in /etc/hosts" % (host_name, host)
+            need_added_hosts += "%s %s\n" % (host, host_name)
+    # write names to file
+    if need_added_hosts == "":
+        return 0, None
+    with open("/etc/hosts", 'a') as host_file:
+        host_file.write(need_added_hosts)
+    host_out = commands.getstatusoutput("cat /etc/hosts")[1]
+    write_log(2, "%s" % host_out)
+    # get all host in cluster
+    hosts = get_hostname_list()
+    write_log(2, "get all host in cluster %s" % hosts)
+    # publish the hosts file
+    errorinfo = ""
+    for host in hosts:
+        write_log(2, "publish hosts file to host %s" % host)
+        retcode, stdout = commands.getstatusoutput("scp /etc/hosts root@%s:/etc/hosts" % host)
+        if retcode:
+            errorinfo += "Error(055): Failed to copy file to remote host:%s. %s\n" % (host, stdout)
+    if errorinfo != "":
+        return 1, errorinfo
+    return 0, None
+
+
+def init_osd_and_move_crush_location(host, disk_list):
+    """
+    inti osd and move it to specific host location.  host=hostname_mp or host=hostname_n1
+    :param host: host name
+    :param disk_list:  disk list like this: /dev/sdb:meta,/dev/sdc:meta,/dev/sdd:b1,/dev/sde:b1,/dev/sdf:b1
+    :return: (errorcode,info)
+    """
+    # ######################################################
+    # get db handle .
+    con, cur = con_db()
+    task_name = "expand_osd"
+    # get all task named 'expand_osd'
+    result = cur.execute('SELECT * FROM task where name=?', (task_name,))
+    tasks = result.fetchall()
+    # start new task
+    if len(tasks) != 0:
+        print "there is one expand osd task is running"
+        write_log(0, "there is an expand osd task is running")
+        close_conn(con, cur)
+        sys.exit(1)
+    else:
+        # there is no task . insert a new one .
+        starttime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+        cur.execute("INSERT INTO task (name,state,process,username,start_time) VALUES (?,?,?,?,?)", (task_name, 'running', '0', 'root', starttime))
+        con.commit()
+    # =======================================================
+    returninfo = "expand success"
+    # check host is available or not
+    if not host:
+        # ###############################################
+        task_done(con, cur, starttime, 0, "need --host", task_name)
+        # ===============================================
+        Error(610, "need --host")
+        return 1, ""
+    errorcode, info = run_command(comm="hostname", node=host)
+    if errorcode != 0:
+        # ###############################################
+        task_done(con, cur, starttime, 0, "host is not available: " + host, task_name)
+        # ===============================================
+        Error(751, host)
+        return 1, ""
+    # get disk info
+    # metapool osd list
+    meta_list = []
+    # k+m:1 osd list
+    b1_list = []
+    # normal osd list
+    default_list = []
+    # all disk_name list
+    tmp_list = []
+    # push conf
+    run_command("cp /etc/icfs/icfs.conf /home/inspur/icfs.conf")
+    os.chdir(ICFSDEPLOYWORKPATH)
+    run_command(comm="icfs-deploy --overwrite-conf config push {0}".format(host), node=None)
+    run_command(comm="icfs-deploy --overwrite-conf admin {0}".format(host), node=None)
+    # run_command(comm="scp /etc/icfs/* {0}:/etc/icfs/".format(host), node=None)
+    try:
+        disk_info = disk_list.split(",")
+        for disk in disk_info:
+            info = disk.split(":")
+            # handle info like this: /dev/sdb,/dev/sdc,/dev/sdd
+            if len(info) == 1:
+                if disk in tmp_list:
+                    # ###############################################
+                    task_done(con, cur, starttime, 0, "disk:{0} appears twice".format(disk) + info, task_name)
+                    # ===============================================
+                    Error(610, disk_list)
+                    return 1
+                else:
+                    default_list.append(disk)
+                    tmp_list.append(disk)
+            # handle info like this: /dev/sdb:meta,/dev/sdc:meta,/dev/sdd:b1,/dev/sde:b1
+            elif len(info) == 2:
+                crush_type = info[1]
+                disk_name = info[0]
+                if crush_type == "meta":
+                    # disk name can't repeat
+                    if disk_name in tmp_list:
+                        # ###############################################
+                        task_done(con, cur, starttime, 0, "disk:{0} appears twice".format(disk_name) + info, task_name)
+                        # ===============================================
+                        Error(610, disk_list)
+                        return 1
+                    else:
+                        meta_list.append(disk_name)
+                        tmp_list.append(disk_name)
+                elif crush_type == "b1":
+                    # disk name can't repeat
+                    if disk_name in tmp_list:
+                        # ###############################################
+                        task_done(con, cur, starttime, 0, "disk:{0} appears twice".format(disk_name) + info, task_name)
+                        # ===============================================
+                        Error(610, disk_list)
+                        return 1
+                    else:
+                        b1_list.append(disk_name)
+                        tmp_list.append(disk_name)
+                else:
+                    # disk name can't repeat
+                    if disk_name in tmp_list:
+                        # ###############################################
+                        task_done(con, cur, starttime, 0, "disk:{0} appears twice".format(disk_name) + info, task_name)
+                        # ===============================================
+                        Error(610, disk_list)
+                        return 1
+                    else:
+                        default_list.append(disk_name)
+                        tmp_list.append(disk_name)
+            # format error
+            else:
+                # ###############################################
+                task_done(con, cur, starttime, 0, "--disk_list format error :".format(disk_list) + info, task_name)
+                # ===============================================
+                Error(610, disk_list)
+                return 1, ""
+    except:
+        # ###############################################
+        task_done(con, cur, starttime, 0, "--disk_list format error :".format(disk_list), task_name)
+        # ===============================================
+        Error(610, disk_list)
+        return 1, ""
+    update_progress(con, cur, 25, starttime, task_name)
+    # b1 and default can't use default with b1
+    if len(b1_list) != 0 and len(default_list) != 0:
+        # ###############################################
+        task_done(con, cur, starttime, 0, "--disk_list format error: {0}".format(disk_list), task_name)
+        # ===============================================
+        Error(610, disk_list)
+        return 1
+    # get all data disk
+    data_disk_list, error_list = get_all_data_disk(host)
+    data_disk_dic = {}
+    for disk in data_disk_list:
+        data_disk_dic[disk.name] = disk.isMounted
+    init_list = []
+    # check disk parameters
+    for disk in tmp_list:
+        # can't find disk named @disk
+        if disk not in data_disk_dic.keys():
+            # ###############################################
+            task_done(con, cur, starttime, 0, "can not find disk named: {0}".format(disk), task_name)
+            # ===============================================
+            Error(701, disk)
+            return 1, ""
+        init_list.append(disk)
+    data_disk_list = [disk for disk in data_disk_list if disk.name in init_list]
+    # fix bug multi-osd
+    ok_disk_labels, error_disk_labels = check_disk(host, disk_list=disk_list.split(","))
+    for disk_info in error_disk_labels:
+        write_log(0, disk_info)
+    data_disk_list = [disk for disk in data_disk_list if disk.name in ok_disk_labels]
+    # fix above
+    # ###############################################
+    update_progress(con, cur, 37, starttime, task_name)
+    # ===============================================
+    # init all disk
+    os.chdir(ICFSDEPLOYWORKPATH)
+    # fix bug multi-osd get osd ids
+    current_osd_numbers = get_numb_of_osds()
+    if current_osd_numbers == -1:
+        # ###############################################
+        task_done(con, cur, starttime, 0, "get osd tree error", task_name)
+        return 1, "get osd tree error"
+        # ===============================================
+    result = run_command("icfs osd batch_create %d %d" % (current_osd_numbers, len(data_disk_list)))
+    retcode = result[0]
+    stderr = result[1]
+    stdout = result[1]
+    if retcode:
+        Error(746, stderr)
+        task_done(con, cur, starttime, 0, "batch_create osd error", task_name)
+        return 1, stderr
+    osd_id_list = [int(osdid) for osdid in stdout.split(",")[0:-1]]
+    osd_id_list.sort()
+    # fix above
+    hosts = [host] * len(data_disk_list)
+    executor = ThreadPoolExecutor(len(data_disk_list))
+    future = executor.map(do_init_osd_without_deploy_with_journal_part, hosts, data_disk_list, osd_id_list)
+    # ###############################################
+    update_progress(con, cur, 78, starttime, task_name)
+    # ===============================================
+    # get disk name and osd number
+    error_list = []
+    osd_dic = {}
+    for tmp in future:
+        if ":ERROR:" in tmp:
+            errorcode |= 1
+            # #####################
+            write_log(0, tmp)
+            # =====================
+            disk_name = tmp.split(":")[1]
+            osd_id = tmp.split(":")[2]
+            if osd_id != "-1":
+                run_command(comm="icfs osd rm {0}".format("osd." + osd_id), node=None)
+            error_list.append(disk_name)
+            # remove error disk
+            if disk_name in meta_list:
+                meta_list.remove(disk_name)
+            if disk_name in b1_list:
+                b1_list.remove(disk_name)
+            if disk_name in default_list:
+                default_list.remove(disk_name)
+        elif "this disk is already an osd" in tmp:
+            write_log(0, tmp)
+            disk_name = tmp.split(":")[1]
+            if disk_name in meta_list:
+                meta_list.remove(disk_name)
+            if disk_name in b1_list:
+                b1_list.remove(disk_name)
+            if disk_name in default_list:
+                default_list.remove(disk_name)
+        elif ":WARNING:" in tmp:
+            write_log(0, tmp)
+            disk_name = tmp.split(":")[1]
+            if disk_name in meta_list:
+                meta_list.remove(disk_name)
+            if disk_name in b1_list:
+                b1_list.remove(disk_name)
+            if disk_name in default_list:
+                default_list.remove(disk_name)
+        else:
+            disk_name = tmp.split(":")[1]
+            osd_id = tmp.split(":")[2]
+            osd_weight = tmp.split(":")[3]
+            osd_dic[disk_name] = osd_id+":"+osd_weight
+    # ###############################################
+    update_progress(con, cur, 83, starttime, task_name)
+    # ===============================================
+    error_str = ''
+    meta_list = [tmp for tmp in meta_list if tmp in ok_disk_labels]
+    b1_list = [tmp for tmp in b1_list if tmp in ok_disk_labels]
+    default_list = [tmp for tmp in default_list if tmp in ok_disk_labels]
+    if len(meta_list) > 0:
+        error_str += move_osd_location(host, meta_list, osd_dic, "meta")
+    if len(b1_list) > 0:
+        error_str += move_osd_location(host, b1_list, osd_dic, "b1")
+    if len(default_list) > 0:
+        error_str += move_osd_location(host, default_list, osd_dic, "default")
+    # ###############################################
+    update_progress(con, cur, 99, starttime, task_name)
+    task_done(con, cur, starttime, 2, returninfo, task_name)
+    # ===============================================
+    # return error code
+    return errorcode, returninfo
+
+
+def wait_osd_up(host, disk_name):
+    # wait for osd start
+    wait_time = [0.1, 1, 2, 2, 2, 2, 2, 5, 10, 10, 10, 10, 20, 20, 30, 30]
+    wait_step = 0
+    while wait_step < len(wait_time):
+        time.sleep(wait_time[wait_step])
+        flag, info = run_command(
+            "cat /proc/mounts | grep -E '^%s[0-9]+' | grep '/var/lib/icfs/osd/'| awk '{print \\$1,\\$2}'" % disk_name,
+            host)
+        if info:
+            return 0, info
+        else:
+            wait_step += 1
+    return 1, "can't find disk-osd %s on host %s" % (disk_name, host)
+
+
+def batch_init_osd_and_move_crush_location(disk_host_list):
+    # print sys.argv
+    # print sys.argv[0:]
+    # sys.exit(0)
+    # inti osd and move it to specific host location.  host=hostname_mp or host=hostname_n1
+    # @host: host name
+    # @disl_list: disk list like this: /dev/sdb:meta,/dev/sdc:meta,/dev/sdd:b1,/dev/sde:b1,/dev/sdf:b1
+    # return (errorcode,info)
+    # ######################################################
+    # get db handle .
+    errorhappend = 0
+    errorinfo = ""
+    con, cur = con_db()
+    task_name = "expand_osd"
+    # get all task named 'expand_osd'
+    result = cur.execute('SELECT * FROM task where name=?', (task_name,))
+    tasks = result.fetchall()
+    # start new task
+    if len(tasks) != 0:
+        print "there is one expand osd task is running"
+        write_log(0, "there is an expand osd task is running")
+        close_conn(con, cur)
+        sys.exit(1)
+    else:
+        # there is no task . insert a new one .
+        starttime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+        cur.execute("INSERT INTO task (name,state,process,username,start_time) VALUES (?,?,?,?,?)", (task_name, 'running', '0', 'root', starttime))
+        con.commit()
+    # =======================================================
+    returninfo = "expand success"
+    # check host is available or not
+    if not disk_host_list:
+        # ###############################################
+        task_done(con, cur, starttime, 0, "need --host_list", task_name)
+        # ===============================================
+        Error(610)
+        return 1, "need --host"
+    # get disk info
+    # metapool osd list
+    meta_dict = {}
+    # k+m:1 osd list
+    b1_dict = {}
+    # all disk_name list
+    tmp_dict = {}
+    # normal osd list
+    default_dict = {}
+    disk_host_list = disk_host_list.split(";")
+    hosts_list = []
+    try:
+        for host_disks in disk_host_list:
+            host, disks = host_disks.split(":")
+            if disks.strip() == "" or host.strip() == "":
+                # ###############################################
+                task_done(con, cur, starttime, 0, "--host list format is incorrect", task_name)
+                # ===============================================
+                print("Error(610): Invalid input. %s" % disk_host_list)
+                sys.exit(1)
+            # initial the dict
+            tmp_dict[host] = []
+            default_dict[host] = []
+            meta_dict[host] = []
+            b1_dict[host] = []
+            hosts_list.append(host.strip())
+            disk_list = [disk.strip() for disk in disks.split(",") if disk.strip() != ""]
+            for disk in disk_list:
+                info = disk.split("-")
+                # handle info like this: /dev/sdb,/dev/sdc,/dev/sdd
+                if len(info) == 1:
+                    if disk in tmp_dict[host]:
+                        # ###############################################
+                        task_done(con, cur, starttime, 0, "{0}:disk:{1} appears twice".format(host, disk) + info, task_name)
+                        # ===============================================
+                        Error(610)
+                        return 1, ""
+                    else:
+                        default_dict[host].append(disk)
+                        tmp_dict[host].append(disk)
+                # handle info like this: /dev/sdb-meta,/dev/sdc-meta,/dev/sdd-b1,/dev/sde-b1
+                elif len(info) == 2:
+                    crush_type = info[1]
+                    disk_name = info[0]
+                    if crush_type == "meta":
+                        # disk name can't repeat
+                        if disk_name in tmp_dict[host]:
+                            # ###############################################
+                            task_done(con, cur, starttime, 0, "{0}:disk:{1} appears twice".format(host, disk) + info,
+                                      task_name)
+                            # ===============================================
+                            Error(610, disk_name)
+                            return 1, ""
+                        else:
+                            meta_dict[host].append(disk_name)
+                            tmp_dict[host].append(disk_name)
+                    elif crush_type == "b1":
+                        # disk name can't repeat
+                        if disk_name in tmp_dict[host]:
+                            # ###############################################
+                            task_done(con, cur, starttime, 0, "{0}:disk:{1} appears twice".format(host, disk) + info,
+                                      task_name)
+                            # ===============================================
+                            Error(610, disk_name)
+                            return 1, ""
+                        else:
+                            b1_dict[host].append(disk_name)
+                            tmp_dict[host].append(disk_name)
+                    else:
+                        # disk name can't repeat
+                        if disk_name in tmp_dict:
+                            # ###############################################
+                            task_done(con, cur, starttime, 0, "{0}:disk:{1} appears twice".format(host, disk) + info,
+                                      task_name)
+                            # ===============================================
+                            Error(610, disk_name)
+                            return 1, ""
+                        else:
+                            default_dict[host].append(disk_name)
+                            tmp_dict[host].append(disk_name)
+                # format error
+                else:
+                    # ###############################################
+                    task_done(con, cur, starttime, 0, "--disk_list format error :".format(disk_host_list) + info, task_name)
+                    # ===============================================
+                    Error(610, disk_host_list)
+                    return 1, ""
+    except Exception, e:
+        # ###############################################
+        task_done(con, cur, starttime, 0, "expand excute fail, fail info %s" % e, task_name)
+        # ===============================================
+        write_log(0, "catch the error in process %s" % e)
+        Error(553, e)
+        return 1, ""
+    update_progress(con, cur, 25, starttime, task_name)
+    try:
+        # b1 and default can't use default with b1
+        for host in hosts_list:
+            if len(b1_dict[host]) != 0 and len(default_dict[host]) != 0:
+                # ###############################################
+                task_done(con, cur, starttime, 0, "--disk_list format error: {0}".format(disk_host_list), task_name)
+                # ===============================================
+                Error(610, disk_host_list)
+                return 1, ""
+        # constructor command line
+        cmd = sys.argv[0:]
+        cmd[0] = "icfs-admin-disktool"
+        if "-meta" in cmd[3]:
+            cmd[3] = cmd[3].replace("-meta", "")
+        if "-b1" in cmd[3]:
+            cmd[3] = cmd[3].replace("-b1", "")
+        if "-default" in cmd[3]:
+            cmd[3] = cmd[3].replace("-default", "")
+        cmd[3] = "'" + cmd[3] + "'"
+        cmd.remove("--expand")
+        execute_cmd = " ".join(cmd) + " --json 2>/dev/null"
+        write_log(2, "execute_cmd: %s" % execute_cmd)
+        # sys.exit(0)
+        # run create osd command
+        # success: return list[dict]
+        # error: return dict[]
+        ret, output = commands.getstatusoutput(execute_cmd)
+        write_log(2, "create osd return info: %s" % output)
+        returnjson = json.loads(output)
+        if type(returnjson) == dict:
+            write_log(0, "create osd error: %s" % returnjson["mess"])
+            task_done(con, cur, starttime, 0, returnjson["mess"], task_name)
+            return 1, returnjson["mess"]
+        # remove error disk
+        for hostinfo in returnjson:
+            hostname = hostinfo["host"]
+            disks = hostinfo["mess"]
+            for disk, value in disks.items():
+                # is osd or create error don't need to move crush
+                if re.match(r"is osd osd.\d+", value) or value != "success":
+                    errorhappend = 1
+                    errorinfo += value + "\n"
+                    write_log(0, "node:%s, disk:%s. create osd error: %s" % (hostname, disk, value))
+                    try:
+                        meta_dict[hostname].remove(disk)
+                    except:
+                        pass
+                    try:
+                        b1_dict[hostname].remove(disk)
+                    except:
+                        pass
+                    try:
+                        default_dict[hostname].remove(disk)
+                    except:
+                        pass
+        # create success
+        # ###############################################
+        update_progress(con, cur, 83, starttime, task_name)
+        # ===============================================
+        # wait all osd up
+        error_str = ''
+        for host in hosts_list:
+            if len(meta_dict[host]) > 0:
+                meta_osd_dic = {}
+                tmp = meta_dict[host]
+                for item in meta_dict[host]:
+                    ret, output, osd_id = get_osd_weight(host, item)
+                    if ret:
+                        tmp.remove(item)
+                        errorhappend = 1
+                        errorinfo += output + "\n"
+                        write_log(0, "node:%s, disk:%s get osd weight error:%s" % (host, item, output))
+                    else:
+                        meta_osd_dic[item] = osd_id+":"+str(output)
+                error_str += move_osd_location(host, tmp, meta_osd_dic, "meta")
+            if len(b1_dict[host]) > 0:
+                b1_osd_dic = {}
+                tmp = b1_dict[host]
+                for item in b1_dict[host]:
+                    ret, output, osd_id = get_osd_weight(host, item)
+                    if ret:
+                        tmp.remove(item)
+                        errorhappend = 1
+                        errorinfo += output + "\n"
+                        write_log(0, "hostname:%s, disk:%s create osd error:%s" % (host, item, output))
+                    else:
+                        b1_osd_dic[item] = osd_id + ":" + str(output)
+                error_str += move_osd_location(host, tmp, b1_osd_dic, "b1")
+            if len(default_dict[host]) > 0:
+                default_osd_dic = {}
+                tmp = default_dict[host]
+                for item in default_dict[host]:
+                    ret, output, osd_id = get_osd_weight(host, item)
+                    if ret:
+                        errorhappend = 1
+                        errorinfo += output + "\n"
+                        tmp.remove(item)
+                        write_log(0, "hostname:%s, disk:%s create osd error:%s" % (host, item, output))
+                    else:
+                        default_osd_dic[item] = osd_id + ":" + str(output)
+                error_str += move_osd_location(host, tmp, default_osd_dic, "default")
+        # ###############################################
+        update_progress(con, cur, 99, starttime, task_name)
+        # sync hosts file
+        ret_code, ret_info = sycn_hosts(hosts_list)
+        write_log(2, "sync_hosts ret_code: %s and ret_info: %s" % (ret_code, ret_info))
+        task_done(con, cur, starttime, 2, returninfo, task_name)
+        # ===============================================
+        # retcode, info = run_command("/usr/local/ism/Agent/src/Common/icfs-set-gmond --add %s" % ",".join(hosts_list))
+        # subprocess.call(
+        #     "/usr/sbin/php /usr/local/ism/Agent/src/Common/icfs-set-gmond --add %s 1>/dev/null 2>/dev/null &" % ",".join(
+        #         hosts_list), shell=True)
+        if errorhappend:
+            return 1, errorinfo + error_str
+        return 0, returninfo
+    except Exception, e:
+        task_done(con, cur, starttime, 0, str(e), task_name)
+        return 1, e
+
+
+def move_osd_location(host_or_ip, disk_list, osd_dic, crush_type):
+    # @host: disk's host name
+    # @disk_list: [diskname,diskname,]
+    # @osd_dic: {diskname:osd.id,diskname:osd.id}
+    # @crush_type: "meta","b1","default"
+    # 1.create bucket
+    error, host = run_command(comm="hostname", node=host_or_ip)
+    error_str = ""
+    rootbucket = "default"
+    chassbucket = host + "_cs"
+    hostbucket = host
+    if crush_type == "meta":
+        rootbucket = "mpool_root"
+        hostbucket = host + "_mp"
+    elif crush_type == "b1":
+        hostbucket = host + "_n1"
+    # 2.get osd weight
+    disk_weight_osd_list = []
+    for disk in disk_list:
+        osdid = osd_dic[disk].split(":")[0]
+        try:
+            weight = float(osd_dic[disk].split(":")[1])
+        except:
+            weight = -1
+        # if can't get osd weight , will doesn't add it to host bucket
+        if weight > 0:
+            disk_weight_osd_list.append((osdid, weight, disk))
+    # sort by osd.id
+    disk_weight_osd_list.sort(key=lambda i: int(i[0]))
+    # 3.move crush
+    if crush_type == "b1":
+        # check now osd tree status
+        default_osd_count = 0
+        n1_osd_count = 0
+        try:
+            error, osd_tree = run_command(comm="icfs osd tree -f json", node=None)
+            nodes_json = json.loads(osd_tree)
+            nodes_list = nodes_json["nodes"]
+            for node in nodes_list:
+                if node["name"] == host:
+                    default_osd_count = len(node["children"])
+                elif node["name"] == host + "_n1":
+                    n1_osd_count = len(node["children"])
+                if default_osd_count != 0 and n1_osd_count != 0:
+                    break
+        except:
+            pass
+        osd_count = len(disk_weight_osd_list)
+        osd_total = osd_count + (default_osd_count + n1_osd_count)
+        pre_host_osd_num = osd_total / 2
+        # print "default_osd_count,n1_osd_count,osd_count,osd_total,pre_host_osd_num",default_osd_count,n1_osd_count,osd_count,osd_total,pre_host_osd_num
+        # allocate osd to host host_n1
+        for j in range(osd_count):
+            osdinfo = disk_weight_osd_list[j]
+            osdid = osdinfo[0]
+            osdweight = osdinfo[1]
+            # add half of osd to default host bucket
+            if (j + 1 + default_osd_count) <= pre_host_osd_num:
+                hostbucket = host
+            # add half of osd to host_n1 bucket
+            else:
+                hostbucket = host + "_n1"
+            run_command(comm="icfs osd crush rm osd.{0} ".format(osdid), node=None)
+            run_command(comm="icfs osd crush add osd.{0} {1} host={2}".format(osdid, osdweight, hostbucket), node=None)
+        # move host to chassis
+        run_command(comm="icfs osd crush move {0} chassis={1}".format(host, chassbucket), node=None)
+        run_command(comm="icfs osd crush move {0} chassis={1}".format(host + "_n1", chassbucket), node=None)
+        # move chassis to root
+        run_command(comm="icfs osd crush move {0} root={1}".format(chassbucket, rootbucket), node=None)
+    # crush_type == "meta" or crush_type == "default":
+    else:
+        # add osd to host bucket
+        for osdinfo in disk_weight_osd_list:
+            osdid = osdinfo[0]
+            osdweight = osdinfo[1]
+            run_command(comm="icfs osd crush rm osd.{0} ".format(osdid), node=None)
+            run_command(comm="icfs osd crush add osd.{0} {1} host={2}".format(osdid, osdweight, hostbucket), node=None)
+        # add host bucket to root bucket
+        run_command(comm="icfs osd crush move {0} root={1}".format(hostbucket, rootbucket), node=None)
+    return error_str
+
+
+def usage():
+    print '''>>---icfs-admin-cluster---+ --host host+---+ --expand +--+ --node_type osd +--+-- --disk_type hdd--+----------------------------+--><
+                          ' --ip   ip  '   ' --shrink '                                            '-- --disk disk_label_list--'
+>>---icfs-admin-cluster---+ --host host +---+ --expand +---+ --disk_list diskname:crushtype-------><
+Options:
+    -h,--help        show help message
+    --host          host name , more than one hostname split by ','
+    --ip            host ip , more than one ip split by ','
+    --expand        expand operation
+    --shrink        shrink operation
+    --disk_type     hard disk type : hdd , ssd , hdd-ssd
+    --node_type     node run what kind of service : osd , mds , mon
+    --disk          disk label list'''
+    return
+
+
+def mutex_judg(mutex, action):
+    if mutex is None:
+        return action
+    else:
+        Error(610, "--" + action + " cannot use with --" + mutex)
+        sys.exit(1)
+
+
+def check_disk_type(disk_type):
+    if disk_type not in ("hdd", "ssd", "hdd-ssd"):
+        Error(610, "disk_type must be hdd or ssd or hdd-ssd")
+        sys.exit(1)
+    else:
+        return disk_type
+
+
+def check_node_type(node_type):
+    if node_type not in ("osd", "mds", "mon"):
+        Error(610, "node_type must be osd or mds or mon")
+        sys.exit(1)
+    else:
+        return node_type
+
+
+class ClusterPool:
+    def __init__(self, pool_name, pool_size, pg_num, pool_type, min_szie):
+        self.pool_name = pool_name
+        self.pool_size = pool_size
+        self.pg_num = pg_num
+        self.pool_type = pool_type
+        self.min_szie = min_szie
+
+    def get_pool_info(self):
+        return self.pool_name, self.pool_size, self.pg_num, self.pool_type, self.min_szie
+
+
+def get_all_pools_in_cluster():
+    try:
+        # get all pools to do osd re-weight
+        ret = run_local_cmd("icfs osd dump -f json")
+        if ret["retcode"]:
+            raise Exception("icfs osd dump -f json execute fail, fail info %s" % ret["stdout"] if ret["stdout"] else
+                            ret["stderr"])
+        else:
+            temp = json.loads(ret["stdout"])
+            pools = temp["pools"]
+            for item in pools:
+                p = ClusterPool(item["pool_name"], item["size"], item["pg_num"], item["type"], item["min_size"])
+                pools_info.append(p)
+            return 0, pools_info
+    except Exception, err:
+        log_to_event_log(0, "get_all_pools_in_cluster", err)
+        return 1, None
+
+
+def re_weight(pool_name, size, pg_num, pool_type, min_size, lock):
+
+    ret = None
+    n = None
+    log_to_event_log(2, "start process {0} to expand_re-weight".format(os.getpid()), "{0}:{1} {2} {3} {4}".
+                     format(pool_name, size, pg_num, pool_type, min_size))
+    connect = None
+    cursor = None
+    task_start_time = None
+    # this for file lock
+    f1_open = open("/var/lib/cli/inspur_icfs_create_lock.conf", 'w')
+    try:
+        count = 60
+        # wait osd crush syn complete
+        while count:
+            ret = run_local_cmd("icfs osd stat -f json 2>/dev/null")
+            if ret["retcode"]:
+                log_to_event_log(2, "re-weight(%s)" % pool_name, "execute icfs osd stat -f json 2>/dev/null fail, "
+                                                                   "fail info: %s"
+                                                                   % ret["stderr"] if ret["stderr"] else ret["stdout"])
+                sys.exit(1)
+            else:
+                osds = json.loads(ret["stdout"].strip())
+                osd_num = int(osds["num_osds"])
+                num_up_osds = int(osds["num_up_osds"])
+                num_in_osds = int(osds["num_in_osds"])
+                if osd_num == num_up_osds and osd_num == num_in_osds:
+                    break
+                count -= 1
+                log_to_event_log(2, "re-weight(%s)" % pool_name, "wait %d times" % count)
+                time.sleep(5)
+        # check if have the same type task running
+        ret = run_local_cmd("icfs-admin-task --query")
+        if not ret["retcode"]:
+            if "re-weight(%s)" % pool_name in ret["stdout"]:
+                log_to_event_log(0, "re-weight(%s)" % pool_name, "have the same type task runing")
+                sys.exit(1)
+        else:
+            log_to_event_log(0, "re-weight(%s)" % pool_name, "execute icfs-admin-task --query fail info %s" % (ret["stderr"] + ret["stdout"]))
+        # record the database
+        # lock the commit action
+        fcntl.flock(f1_open, fcntl.LOCK_EX)
+        time.sleep(1)
+        # log_to_event_log(2, "re-weight( %s )" % pool_name, "get the lock1")
+        connect, cursor = con_db()
+        task_start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+        cursor.execute("INSERT INTO task (name,state,process,username,start_time) VALUES (?,?,?,?,?)", (
+                       "re-weight(%s)" % pool_name, 'running', '37', 'root', task_start_time))
+        connect.commit()
+
+        cursor.close()
+        connect.close()
+        # unlock
+        fcntl.flock(f1_open, fcntl.LOCK_UN)
+        # log_to_event_log(2, "re-weight( %s )" % pool_name, "unlock1")
+
+        # replicate pool
+        if pool_type == 1:
+            osd_capacity_balance_replicate(size, pool_name, task_start_time, f1_open, None)
+        elif pool_type == 3:
+            ret, vr_host = get_virtual_hosts()
+            if not ret:
+                if not vr_host:
+                    # :0 mode
+                    n = 0
+                elif vr_host:
+                    # :1 mode
+                    n = 1
+                k = size - min_size
+                m = min_size
+                osd_capacity_balance_erasure(k, m, n, pool_name, task_start_time, f1_open, None)
+            else:
+                sys.exit(1)
+        else:
+            log_to_event_log(0, "re-weight(%s)" % pool_name, "unknown pool type %s" % pool_type)
+    except Exception, err:
+        log_to_event_log(0, "re-weight(%s)" % pool_name, err)
+
+    finally:
+        try:
+            # get lock to commit file
+            fcntl.flock(f1_open, fcntl.LOCK_EX)
+            time.sleep(1)
+            # log_to_event_log(2, "re-weight( %s )" % pool_name, "get the lock2")
+            connect, cursor = con_db()
+            cursor.execute("DELETE FROM task WHERE start_time='%s'" % task_start_time)
+            connect.commit()
+
+            cursor.close()
+            connect.close()
+            # release lock
+            f1_open.close()
+            # log_to_event_log(2, "re-weight( %s )" % pool_name, "unlock2")
+        except Exception, err:
+            log_to_event_log(0, "re-weight(%s)" % pool_name,
+                             "fail to commit database in finally, fail info %s" % err)
+
+
+def do_re_weight():
+    # get the process lock
+    lock = Lock()
+
+    ret, pools = get_all_pools_in_cluster()
+    if not ret:
+        for item in pools:
+            pool_name, size, pg_num, pool_type, min_size = item.get_pool_info()
+            # if pg number less than 100, don't do reweight
+            if int(pg_num) < 100:
+                continue
+            p = Process(target=re_weight, args=(pool_name, size, pg_num, pool_type, min_size, lock))
+            # if DEBUG:
+            #     log_to_event_log(2, "start process {0} to expand_re-weight", "{1}:{2} {3} {4} {5}".
+            #                      format(p.pid, pool_name, size, pg_num, pool_type, min_size))
+            p.start()
+            # log_to_event_log(2, "re_weight", "%s, pid is %d" % (pool_name, p.pid))
+    else:
+        log_to_event_log(0, "do_re_weight", "fail to get all pools info")
+
+
+if __name__ == "__main__":
+    operation = None  # shrink expand
+    node = None  # host name --host=
+    disk_type = "hdd"  # hdd , ssd , hdd-ssd
+    ip = None  # ipv4 ,host ip
+    node_type = None  # osd,mds,mon
+    operation_mutex = None
+    node_type_mutex = None
+    path = None
+    name = None
+    disk = None  # disk labels split by ','
+    background = False
+    force = False
+    # initial mon , split by ',' . icfs-deploy will run on the first mon
+    mon = None
+    # public network
+    public_network = None
+    # cluster network
+    cluster_network = None
+    # osd node list , split by ','
+    osd = None
+    # mds node list, split by ','  like: inspur01:mds1,inspur02:mds2,inspur03,inspur04
+    mds = None
+    # disk list that need be created osd
+    disk_list = None
+    host_disk_list = None
+    # crush_type: meta,ec1,default
+    # crush_type="default"
+    global pools_info
+    pools_info = []
+    try:
+        options, agrs = getopt.getopt(sys.argv[1:], "hp:n:", ["help", "shrink", "expand", "host=", "disk_type=", "node_type=",
+                                                              "nfs", "cifs", "disk=", "querymds", "ip=", "bg", "purge", "force", "initcluster",
+                                                              "mon=", "osd=", "mds=", "public_network=", "cluster_network=", "disk_list=", "host_list="])
+        if not options:
+            Error(610)
+            sys.exit(1)
+        for key, value in options:
+            if key in ("-h", "--help"):
+                usage()
+                sys.exit(0)
+            # operation
+            elif key == "--shrink":
+                operation = mutex_judg(operation_mutex, "shrink")
+                operation_mutex = "shrink"
+            elif key == "--expand":
+                operation = mutex_judg(operation_mutex, "expand")
+                operation_mutex = "expand"
+            elif key == "--querymds":
+                operation = mutex_judg(operation_mutex, "querymds")
+                operation_mutex = "querymds"
+            elif key == "--purge":
+                operation = mutex_judg(operation_mutex, "purge")
+                operation_mutex = "purge"
+            elif key == "--initcluster":
+                operation = "initcluster"
+                operation_mutex = "initcluster"
+            # node_type
+            elif key == "--nfs":
+                node_type = mutex_judg(node_type_mutex, "nfs")
+                node_type_mutex = "nfs"
+            elif key == "--cifs":
+                node_type = mutex_judg(node_type_mutex, "cifs")
+                node_type_mutex = "cifs"
+            elif key == "--node_type":
+                node_type = check_node_type(mutex_judg(node_type_mutex, value))
+                node_type_mutex = node_type
+            # host name or ip
+            elif key == "--host":
+                node = value
+            elif key == "--ip":
+                ip = value
+            # disk type non-essential default hdd
+            elif key == "--disk_type":
+                disk_type = check_disk_type(value)
+            elif key == "-n":
+                name = value
+            elif key == "-p":
+                path = value
+            # disks should not be initialize
+            elif key == "--disk":
+                disk = value
+            elif key == "--bg":
+                background = True
+            elif key == "--force":
+                force = True
+            elif key == "--mon":
+                mon = value
+            elif key == "--public_network":
+                public_network = value
+            elif key == "--cluster_network":
+                cluster_network = value
+            elif key == "--mds":
+                mds = value
+            elif key == "--osd":
+                osd = value
+            elif key == "--disk_list":
+                disk_list = value
+            elif key == "--host_list":
+                host_disk_list = value
+    except Exception, e:
+        Error(610, e)
+        sys.exit(1)
+    # do work
+    # check is background task or not
+    if background:
+        parameters = " ".join(sys.argv[1:])
+        parameters = parameters.replace("--bg", "")
+        # run command in background
+        subprocess.call("icfs-admin-cluster %s > /dev/null &" % parameters, shell=True)
+        sys.exit(0)
+    if operation == "expand":
+        # expand osd node
+        if node_type == "osd":
+            # get disk list
+            disk_name_list = None
+            if disk:
+                disk_name_list = disk.split(",")
+            #
+            if disk_type != "hdd":
+                print "comming soon !"
+                write_log(0, "not support " + disk_type + " this time")
+                sys.exit(0)
+            # get node list
+            if not node and not ip:
+                Error(610, "need --ip or --host")
+                write_log(0, "need --ip or --host")
+                sys.exit(1)
+            node_list = []
+            ip_list = []
+            if node:
+                node_list = node.split(",")
+            if ip:
+                ip_list = ip.split(",")
+                for ip in ip_list:
+                    if not re.match(IPV4_REG, ip):
+                        Error(610, "ip " + ip + " format error")
+                        write_log(0, "ip " + ip + " format error")
+                        sys.exit(1)
+            # get db handle .
+            con, cur = con_db()
+            task_name = "expand_osd"
+            # get all task named 'expand_osd'
+            starttime = ""
+            result = cur.execute("SELECT * FROM task where name=?", (task_name,))
+            tasks = result.fetchall()
+            # start new task
+            if len(tasks) != 0:
+                print "there is one expand osd task is running"
+                write_log(0, "there is an expand osd task is running")
+                close_conn(con, cur)
+                sys.exit(1)
+            else:
+                # there is no task . insert o new one .
+                starttime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+                cur.execute("INSERT INTO task (name,state,process,username,start_time) VALUES (?,?,?,?,?)", (task_name, 'running', '0', 'root', starttime))
+                con.commit()
+            node_count = len(node_list) + len(ip_list)
+            step = 100 / node_count
+            process = 0
+            error = 0
+            # init osd
+            for node in node_list:
+                if "" == node.strip():
+                    continue
+                update_progress(con, cur, (process + step - 1) / 2, starttime, task_name)
+                # expand osd need /home/inspur/icfs.bootstrap-osd.keyring,first check those keyring files
+#                 if check_bootstrap_keyring("osd", mon=None, host=node):
+#                     task_done(con, cur, starttime, 0, "check bootstrapkey error", task_name)
+#                     sys.exit(1)
+                error |= init_all_disk(node, disk_name_list)
+            for node in ip_list:
+                update_progress(con, cur, process + step - 1, starttime, task_name)
+                # expand osd need /home/inspur/icfs.bootstrap-osd.keyring and /var/lib/icfs/bootstrap-osd/icfs.keyring eq icfs `icfs auth get client.bootstrap-osd`
+#                 if check_bootstrap_keyring("osd", mon=None, host=node):
+#                     task_done(con, cur, starttime, 0, "check bootstrapkey error", task_name)
+#                     sys.exit(1)
+                error |= init_all_disk(node, disk_name_list)
+            if error:
+                task_done(con, cur, starttime, 0, "expand osd has some error", task_name)
+                sys.exit(1)
+            else:
+                task_done(con, cur, starttime, 2, "expand osd success", task_name)
+                # osd capability re-weight
+                do_re_weight()
+                os._exit(0)
+                #sys.exit(0)
+        if node_type == "mon":
+            if not node:
+                Error(610, "need --host")
+            sys.exit(expand_mon(node))
+        if node_type == "mds":
+            if not node:
+                Error(610, "need --host")
+            code = 0
+            for node_name in node.split(","):
+                if node_name.strip() == "":
+                    continue
+                # check_bootstrap_keyring("mds", mon=None, host=node.split(":")[0])
+                tmp = expand_mds(node_name)
+                if tmp != 0:
+                    code |= 1
+                else:
+                    print "mds:{0} create success".format(node_name)
+            print "wait more than 10 seconds to check mds status"
+            sys.exit(code)
+        if node_type == "nfs":
+            print "comming soon"
+            sys.exit(0)
+        if node_type == "cifs":
+            print "comming soon"
+            sys.exit(0)
+        # expand osd , con
+        if disk_list:
+            error, info = init_osd_and_move_crush_location(node, disk_list)
+            if not error:
+                print info
+            # osd capability re-weight
+            do_re_weight()
+            os._exit(0)
+            #sys.exit(0)
+        elif host_disk_list:
+            error, info = batch_init_osd_and_move_crush_location(host_disk_list)
+            if error:
+                print info
+            else:
+                print "success"
+            sys.exit(error)
+        else:
+            Error(610, "need --node_type or --nfs or --cifs")
+            sys.exit(1)
+    elif operation == "shrink":
+        if node_type == "osd":
+            node_list = []
+            ip_list = []
+            if node:
+                node_list = node.split(",")
+            if ip:
+                ip_list = ip.split(",")
+                for ip in ip_list:
+                    if not re.match(IPV4_REG, ip):
+                        Error(610, "ip " + ip + " format error")
+                        sys.exit(1)
+            # calc host count to set progress
+            error = 0
+            hostcount = len(node_list) + len(ip_list)
+            # check db, if there is one task in running , return .
+            con, cur = con_db()
+            task_name = "shrink_osd"
+            # get all task named 'shrink_osd'
+            starttime = ""
+            result = cur.execute("SELECT * FROM task where name=?", (task_name,))
+            tasks = result.fetchall()
+            # start new task
+            if len(tasks) != 0:
+                print "there is one shrink osd task is running"
+                write_log(0, "there is shrink osd task is running")
+                close_conn(con, cur)
+                sys.exit(1)
+            else:
+                # there is no task . insert o new one .
+                starttime = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[0:-3]
+                cur.execute("INSERT INTO task (name,state,process,username,start_time) VALUES (?,?,?,?,?)", (task_name, 'running', '0', 'root', starttime))
+                con.commit()
+            # destroy osd
+            run_index = 0
+            for node in node_list:
+                if "" == node.strip():
+                    continue
+                run_index += 1
+                error |= destroy_all_osd(run_index, hostcount, starttime, con, node)
+            for node in ip_list:
+                run_index += 1
+                error |= destroy_all_osd(run_index, hostcount, starttime, con, node)
+            if error:
+                task_done(con, cur, starttime, 0, "task has some error.", task_name)
+                print "shrink error."
+                sys.exit(1)
+            else:
+                print "success"
+                task_done(con, cur, starttime, 2, "shrink osd success", task_name)
+                # osd capability re-weight
+                do_re_weight()
+                os._exit(0)
+                #sys.exit(0)
+        if node_type == "mon":
+            if not node:
+                Error(610, "need --host")
+            sys.exit(shrink_mon(node))
+        if node_type == "mds":
+            if not node:
+                Error(610, "need --host")
+            sys.exit(shrink_mds(node))
+        if node_type == "nfs":
+            print "comming soon"
+            sys.exit(0)
+        if node_type == "cifs":
+            print "comming soon"
+            sys.exit(0)
+    # query mds info
+    elif operation == "querymds":
+        sys.exit(print_all_mds())
+    # destroy icfs cluster
+    elif operation == "purge":
+        error = purge(force, node)
+        if not error:
+            print "purge success"
+        sys.exit(error)
+    # init icfs cluster
+    elif operation == "initcluster":
+        # init mon
+        if not mon:
+            Error(610, "need --mon")
+        # checkout ",,"
+        mons = mon.split(",")
+        monstr = ""
+        for tmp in mons:
+            if tmp.strip() != "":
+                monstr = monstr + tmp.strip() + " "
+        error = initCluster(monstr, public_network, cluster_network)
+        if error:
+            sys.exit(1)
+        else:
+            print "init mon success"
+        # init osd
+        error = 0
+        if osd:
+            disk_name_list = None
+            if disk:
+                disk_name_list = disk.split(",")
+            node_list = osd.split(",")
+            for node in node_list:
+                if "" == node.strip():
+                    continue
+                error |= init_all_disk(node, disk_name_list)
+            if error:
+                sys.exit(1)
+            else:
+                print "init osd success"
+        # init mds
+        if mds:
+            for node_name in mds.split(","):
+                if "" == node_name.strip():
+                    continue
+                # check_bootstrap_keyring("mds", mon=None, host=node.split(":")[0])
+                tmp = expand_mds(node_name)
+                if tmp != 0:
+                    print "mds:{0} init error".format(node_name)
+                else:
+                    print "mds:{0} create success".format(node_name)
+        sys.exit(0)
+    # elif operation == "re_weight":
+    #     do_re_weight()
+    #     # clean the unused process
+    #     mgr.shutdown()
+    #     os._exit(0)
+    else:
+        usage()

@@ -1,0 +1,305 @@
+#!/usr/bin/python
+# -*- copyright -*-
+#coding:utf-8
+'''
+modify by huper at 2017-1-10  fit rack
+'''
+
+import os
+import sys
+import getopt
+import re
+import commands
+from icfs_util import run_command
+
+#code:/usr/bin/
+#code:/usr/local/ism/Agent/src/Cli/ClusterCli/
+#export PATH=$PATH:/usr/bin/  
+
+DEBUG = 0
+
+def usage():
+    print """Help(-h|--help) for icfs-rack-slot:
+Usage:
+>> icfs-rack-slot ----+ --ip ip_address +----><
+Functions: query Smartrack disk slot information
+Options:
+  --ip:   Ip address of node
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully """
+  
+def Error(num):
+    if num==100:
+        print "Error(100): Saltstack anomaly"
+    if num==610:
+        print "Error(610): Invalid input!"
+    if num==716:
+        print "Error(716): Invalid ip address" 
+# 
+# def sys_mon_mds():
+# #mon stat
+#     print "mon_node:"
+#     mon_stat=commands.getoutput\
+#     ("icfs mon stat|grep mon|grep -v fault$|awk '{print $5}'|sed -r 's/(\{|\})//g'|sed -r 's/,/\\n/g'")
+#     mon_stat=mon_stat.split("\n")
+#     mon_x_list=[] 	
+#     for mon_x in mon_stat:
+#         if not mon_x.find("fault")>=0 and not mon_x.find("dumped")>=0:
+#             mon_x_list.append(mon_x)
+#     mon_stat="\n".join(mon_x_list)			
+#     print mon_stat
+#  	
+#     print "normal_mon:"
+#     normal_mon=commands.getoutput("icfs mon stat|grep mon|grep -v fault$|awk '{print $NF}'")
+#     normal_mon=normal_mon.split("\n")	
+#     normal_mon_list=[]	
+#     for normal_mon_x in	normal_mon:
+#         if not normal_mon_x.find("fault")>=0 and not normal_mon_x.find("dumped")>=0:
+#             normal_mon_list.append(normal_mon_x)
+#    	normal_mon="\n".join(normal_mon_list)		
+#     print normal_mon+'\n'	
+# 
+# #mds stat
+#     mds_out=commands.getoutput(" icfs mds dump|grep seq|awk '{print $2,$5}'")
+#     mds_out=mds_out.split('\n')
+#     mds_=[]
+#     for x in mds_out:
+#         if not x.find('dumped')>=0 and not x.find('fault')>=0:
+#             mds_.append(x)
+#     print "mds_node_name"+"\t"+"mds_node_ip"+"\t"+"state"
+#     mds_a=[]
+#     for y in mds_:
+#         y=y.split(" ")
+#         y_exe=y[0].split(":")
+#         y[0]=y_exe[0]
+#         mds_stat,mds_node_id=commands.getstatusoutput("cat /etc/hosts|grep -v '^#'|grep -E '\<%s\>'|awk '{print $2}'"%y[0])
+#         if not mds_node_id:
+#             # filter salt stderror so that output can be parsed correctly
+#             mds_node_id=commands.getoutput("salt -S '%s' cmd.run 'echo $HOSTNAME' 2>/dev/null|grep -v ':'"%y[0])
+#             mds_node_id=mds_node_id.strip()
+#         if not mds_node_id:
+#             mds_node_id='unknow_host'
+#         if not y[-1] in ("up:active","up:standby"):
+#             y[-1]="up:inactive"
+#         y="\t".join(y)
+#         print mds_node_id+'\t'+y
+# 
+# def proc_space(space_str):
+# #processing space in str 
+#     proc_space_list=[]
+#     proc_str_l=space_str.split('\n')
+#     for proc_lstrip_slot_str in proc_str_l:
+#         proc_lstrip_slot_str=proc_lstrip_slot_str.lstrip()
+#         proc_space_list.append(proc_lstrip_slot_str)    
+#     proc_str='\n'.join(proc_space_list)
+#     return proc_str	
+# 	
+# def salt_check():
+#     value=commands.getoutput("service salt-master status")
+#     if "unrecognized service" in value:
+#         sys.exit(1)
+#     elif "stoped" in value:
+#         c,d=commands.getstatusoutput("service salt-master restart|grep starting")
+#         if c or not d or "FAILED" in d:
+#             sys.exit(1) 
+# 
+# 
+# def convertrack(p_str):
+#     if  p_str=="8":
+#         p_str="0"
+#     elif  p_str=="9":
+#         p_str="1"
+#     elif  p_str=="10":
+#         p_str="2"
+#     elif  p_str=="11":
+#         p_str="3"
+#     elif  p_str=="12":
+#         p_str="4"
+#     elif  p_str=="13":
+#         p_str="5"
+#     elif  p_str=="14":
+#         p_str="6"
+#     elif  p_str=="15":
+#         p_str="7"
+#     elif  p_str=="16":
+#         p_str="8"
+#     elif  p_str=="17":
+#         p_str="9"
+#     elif  p_str=="18":
+#         p_str="10"
+#     elif  p_str=="19":
+#         p_str="11"
+#     return p_str
+# 
+# 
+# def slot_dict(s_str):
+#     s_str_l=s_str.split("\n")
+#     slot_dic=dict()
+#     for x in s_str_l:
+#         x=re.split("\s+",x)
+#         slot_dic[x[0]]=x[-1]
+#     return slot_dic		
+# 
+def ip_check(ipcheck):
+    if not re.match\
+    (r"^([1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-4])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])\.([0-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5])$",ipcheck):
+        Error(716)
+        sys.exit(1) 
+def query_slot(node):
+    error,info = run_command(comm="icfs-system-disk --disk --checkosd | sort -n -k 5", node=node, debug=DEBUG)
+    if not error:
+        print "%-10s\t%-10s\t%-10s\t%-10s\t%-10s"%("DiskID","Status","Osd","OsdStatus","Slot")
+    print info
+    sys.exit(error)
+    
+# def query_slot():
+# #check ip_ping
+#     try:
+#         ip_ping_stat,ip_ping = commands.getstatusoutput("ping -c 2 %s|grep '0 received'|wc -l"%rack_ip)
+#         if ip_ping_stat:
+#             print "Error(rack01): Host Unreachable"
+#             sys.exit(1)
+#         if ip_ping != '0':
+#             print "Error(rack01): Host Unreachable"
+#     except Exception, err:
+#         print "Error(rack01): Host Unreachable"
+#         sys.exit(1)
+#     try:
+#         # filter salt stderror so that output can be parsed correctly
+#         osd_UpDown_slot_stat,osd_UpDown_slot = commands.getstatusoutput\
+#         ("salt -S '%s' cmd.run '/usr/bin/icfs-rack-slot --rackslot' 2>/dev/null|grep -v :"%rack_ip)
+#         if not osd_UpDown_slot_stat:
+#             osd_UpDown_slot=proc_space(osd_UpDown_slot)
+#             print osd_UpDown_slot
+#         else:
+#             print "Error(rack03): Operation FAILED"
+#             sys.exit(1)
+#     except Exception,err:
+#         print "Error(rack03): Operation FAILED"
+#         sys.exit(1)
+# 
+# def rack_slot():
+# ####osd_list 
+#     try:
+#         osd_list_stat,osd_list = commands.getstatusoutput\
+#         ("ls /var/lib/icfs/osd/|grep -v ':'|grep -v No")
+# #        print osd_list_stat
+#         if osd_list == '' or osd_list_stat:
+#             osd_list_stat,osd_list = commands.getstatusoutput\
+#             ("ls /var/lib/ceph/osd/|grep -v ':'")
+#         osd_list = osd_list.split()
+#         pattern = re.compile(r'^[ceph|icfs]*-\d+$')
+#         osdlist = []
+#         for x in osd_list:
+#             if pattern.match(x):
+#                 x = re.sub("^.*-","osd.",x)
+#                 osdlist.append(x)
+# #        print osdlist
+#     except Exception,err:
+#         print "Error(rack02): OSD operation FAILED",err
+#         sys.exit(1)
+# ####target_sdb target_phynum  sdb osd.11
+#     sdb_target = {}
+#     target_phynum = {}
+#     try:
+#         sdx_t_stat1,t_sdx=commands.getstatusoutput\
+#         ("/usr/bin/lsiutilx86_64 -p1 -value 42,0|grep Disk|awk '{print $2,$(NF-1)}'|sed 's/\/dev\///g'")
+#         t_phynum_stat1,t_phynum=commands.getstatusoutput\
+#         ("/usr/bin/lsiutilx86_64 -p1 -value 8,0,0|grep -w Disk|grep -v Logical|grep -v PhyDisk|awk '{print $2,$NF}'")
+# 
+#         t_sdx_lines = t_sdx.split("\n")
+#         for t_sdx_line in t_sdx_lines:
+#             t_sdx_strs = re.split('\s+',t_sdx_line)
+#             sdx_name = t_sdx_strs[-1]
+#             sdb_target[sdx_name] = t_sdx_strs[0]
+# 
+#         t_phynum_lines = t_phynum.split("\n")
+#         for t_phynum_line in t_phynum_lines:
+#             t_phynum_strs = re.split('\s+',t_phynum_line)
+#             t_num = t_phynum_strs[0]
+#             target_phynum[t_num] = t_phynum_strs[-1]
+# 
+#     except Exception, err:
+#         print err
+#         sys.exit(1)
+# #    print sdb_target,target_phynum
+# ####sdx_osd osd.11 sdb
+#     try:
+#         osd_sdx_dict = {} 
+#         osd_sdx_s,osd_sdx=commands.getstatusoutput\
+#         ("mount|sed 's/\/dev\///g'|grep 'osd/icfs'|awk '{print $1,$3}'|sed 's/\/var.*osd\/icfs-/osd./g'| awk '{print $2,$1}'|sed 's/.$//g'")
+#         if osd_sdx=='':
+#             osd_sdx_s,osd_sdx=commands.getstatusoutput\
+#             ("mount|sed 's/\/dev\///g'|grep 'osd/ceph'|awk '{print $1,$3}'|sed 's/\/var.*osd\/ceph-/osd./g'| awk '{print $2,$1}'|sed 's/.$//g'")            
+#         osd_sdx_lines = osd_sdx.split("\n")
+#         for osd_sdx_line in osd_sdx_lines:
+#             osd_sdx_line = re.split("\s+",osd_sdx_line)
+#             sdx_name = osd_sdx_line[0]
+#             osd_sdx_dict[sdx_name] = osd_sdx_line[-1]
+#     except Exception,err:
+#         print err
+#         sys.exit(1)
+# #    print osd_sdx_dict
+# #### osd_status
+#  
+#     osd_s_s,osd_s=commands.getstatusoutput("icfs osd tree|grep osd|awk '{print $3,$4}'")
+#     osd_status_dict = slot_dict(osd_s)
+# #    print sdb_target,target_phynum,osd_sdx_dict,osd_status_dict
+#     print 'DiskID'+'\t'+'Status'+'\t'+'Slot'
+#     for osd_name in osdlist:
+#         if osd_status_dict.has_key(osd_name):
+#             osd_status = osd_status_dict[osd_name]
+#         else:
+#             continue
+#         if osd_sdx_dict.has_key(osd_name):
+#             sdx_name_ = osd_sdx_dict[osd_name]
+#             if sdb_target.has_key(sdx_name_):
+#                 rack_target = sdb_target[sdx_name_]
+#                 if target_phynum.has_key(rack_target):
+#                     rack_phynum = target_phynum[rack_target]
+#                     rack_phynum = convertrack(rack_phynum)
+#                 else:    
+#                     rack_phynum = '-1'                
+#             else:
+#                 rack_phynum = '-1'
+#         else:
+#             rack_phynum = '-1'
+# #        rack_slot = 
+#         print osd_name,"\t",osd_status,"\t",rack_phynum
+
+if __name__ == '__main__':
+##############################################################
+    operation = None
+    rack_ip = None	
+   
+    try:
+        options, args = getopt.getopt(sys.argv[1:],
+          "h",["ip=","help"]
+          )
+    except getopt.GetoptError, err:
+        Error(610)
+        sys.exit(1)
+    if options==[]:
+        Error(610)
+        sys.exit(1)
+    if len(sys.argv[0:])==1:
+        Error(610)
+        sys.exit(1)
+    if len(args)!=0:
+        if "-" in args:
+            Error(610)
+            sys.exit(1)
+        else:
+            Error(610)
+            sys.exit(1)
+    for key, value in options:
+        if key in ("--help",'-h'):
+            usage()
+            sys.exit(1)
+        if key == "--ip":
+            rack_ip = value
+            ip_check(value)
+            operation = "check_slot"
+    if operation == "check_slot":
+        query_slot(rack_ip)

@@ -1,0 +1,79 @@
+#!/usr/bin/python
+# coding:utf-8
+
+import os
+import sys
+import commands
+import OptParser
+
+
+def usage():
+    print '''Help(-h|--help)for icfs-admin-fs:
+Usage:
+>> icfs-admin-fs ---- --info node_name--><
+Functions: Query file system info
+Options:
+  -info:               specify the node name
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0)
+
+
+def error(num, *description):
+    if num == 500:
+        print "Error(500): Can not get cluster version! "
+    elif num == 553:
+        print "Error(553):Unknow error %s" % description
+    elif num == 610:
+        print "Error(610): Invalid input!"
+    elif num == 721:
+        print "Error(721): Invalid path"
+    sys.exit(1)
+
+
+def fs_info(node_name):
+    fs_status = "dead"
+    # query the filesystem version
+    ver_stat, ver_relt = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o "
+                                                  "PasswordAuthentication=no -o StrictHostKeyChecking=no %s "
+                                                  "'icfs -v'|awk '$1~/icfs/&&$2~/version/{print $3}'" % node_name)
+    if not ver_relt:
+        error(500)
+    elif ver_stat != 0:
+        error(553, ver_relt)
+    file_status, file_output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o "
+                                                        "PasswordAuthentication=no -o StrictHostKeyChecking=no %s "
+                                                        "ps -ef|grep -v grep|grep icfs-fuse" % node_name)
+    if file_status != 0:
+        if file_output != "":
+            error(553, file_output)
+    if file_output != "":
+        fs_status = "running"
+    print "Nodename".ljust(15, ' '), "Version".ljust(15, ' '), "Status".ljust(15, ' ')
+    print node_name.ljust(15, ' '), ver_relt.ljust(15, ' '), fs_status.ljust(15, ' ')
+
+
+if __name__ == '__main__':
+    node_name = None
+    f_path = None
+    try:
+        parser = OptParser.OptParser()
+        parser.append("help", "{-h|--help}")
+        parser.append("info", "--info=")
+        m_name, m_opts = parser.parse(sys.argv[1:])
+    except Exception, err:
+        print err
+        error(610)
+        sys.exit(1)
+
+    for k, v in m_opts:
+        if "--info" == k:
+            node_name = v
+
+    if m_name == "help":
+        usage()
+    elif m_name == "info":
+        fs_info(node_name)
+    else:
+        error(610)

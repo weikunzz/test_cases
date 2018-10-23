@@ -1,0 +1,198 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+
+# import getopt
+import sys
+import commands
+import re
+from icfs_util import get_remote_host_list, run_remote_ping, error, run_local_cmd, run_remote_cmd, is_rack
+from FunctionTimeout import FunctionTimeout
+import OptParser
+
+def remote_host_stat_check():
+    host_list = get_remote_host_list()
+    if not host_list:
+        print "Error(056): Remote hosts list is empty"
+        sys.exit(1)
+
+    ret_dict = run_remote_ping("*")
+    fail_list = [name for name, ret in ret_dict.items() if ret["status"] is False]
+    if fail_list:
+        print "Error(057): Remote hosts %s is not accessable" % ",".join(fail_list)
+        sys.exit(1)
+
+
+# def run_remote_cmd(tgt, cmd):
+#     try:
+#         ret_dict = {}
+#         status, output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+#                                   -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+#                                   'root@%s' \"%s\"" % (tgt, cmd))
+#         # print "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no 'root@%s' \"%s\"" % (tgt, cmd)
+#         ret_dict[tgt] = {"retcode": status, "stdout": output, "stderr": ""}
+#         return ret_dict
+#     except Exception, err:
+#         print "Error(054): Failed to run command on remote hosts"
+#         print err
+#         sys.exit(1)
+
+
+def get_hostname_list():
+    hostname = []
+    pattern = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(.*?)(?:#.*)?$")
+    try:
+        with open("/etc/hosts", "r") as fp:
+            lines = fp.readlines()
+    except IOError:
+        return hostname
+
+    for line in lines:
+        m = pattern.match(line)
+        if m is None:
+            continue
+        if m.group(2) == 'localhost localhost.localdomain localhost4 localhost4.localdomain4':
+            continue
+        hostname.append(m.group(2))
+
+    return hostname
+
+
+def mem_query_all_local():
+    rack = is_rack()
+    if not rack:
+        result = run_local_cmd("ipmitool sensor|grep -E 'MEM_[A-Za-z0-9]+_Status\'| awk \'{print $1,$7}'", timeout=20)
+    else:
+        result = run_local_cmd("ipmitool sensor|grep -E 'Memory+_Status\'| awk \'{print $1,$7}'", timeout=20)
+    if result["retcode"] != 0:
+        error('3001')
+    print "%-8s\t%-8s\t%-8s" % ('Name', 'Slot', 'Status')
+    mem_info = result["stdout"]
+    mem_info_list = mem_info.split("\n")
+    for info in mem_info_list:
+            mem_status = 'abnormal'
+            if info.split()[1].strip("|") == "0x0080":
+                mem_status = 'normal'
+            mem_name = info.split()[0].replace('_Status', '')
+            if not rack:
+                re_slot = re.findall(r'([A-Za-z]\d+)', mem_name)
+                mem_slot = re_slot[0]
+                print "%-8s\t%-8s\t%-8s" % (mem_name, mem_slot, mem_status)
+            else:
+                mem_slot = 0
+                print "%-8s\t%-8s\t%-8s" % (mem_name, mem_slot, mem_status)
+
+
+# 2018-1-12
+@FunctionTimeout(timeout=40)
+def mem_query_all():
+    result = run_remote_cmd("*", "icfs-system-memory --query --local")
+    for hostName, returnInfor in result.iteritems():
+        print "Node: %s" % str(hostName)
+        print returnInfor["stdout"]
+
+
+def do_local_query():
+    count = 0
+    # get size
+    output = run_local_cmd("dmidecode |grep -A14  '^Memory\sDevice$' | awk -F : '/Locator/||/Size/||/Serial Number/||/Manufacturer/ {print $2}'", timeout=2)
+    if output["retcode"]:
+        print "Error(1399):Unknown error. %s" % output["stderr"]
+        sys.exit(1)
+    output = output["stdout"]
+    items = output.split("\n")
+    try:
+        begin = True
+        result = ""
+        for i in range(0, len(items), 5):
+            if items[i].strip() == "No Module Installed":
+                continue
+            elif begin:
+                begin = False
+            elif not begin:
+                result += "\n"
+            result += "Memory ID: {0}".format(count) + "\n"
+            result += "Slot: {0}".format(items[i + 1].strip()) + "\n"
+            result += "capability: {0}".format(items[i].strip()) + "\n"
+            result += "Serial Number: {0}".format(items[i + 4].strip()) + "\n"
+            result += "Manufacturer: {0}".format(items[i + 3].strip()) + "\n"
+            count += 1
+        print result
+        sys.exit(0)
+    except IndexError:
+        error('3001')
+        sys.exit(1)
+
+
+# 2018-1-12
+@FunctionTimeout(timeout=40)
+def do_mem_query(query_node):
+    self_host_name = commands.getoutput("hostname")
+    if query_node == self_host_name:
+        do_local_query()
+    else:
+        result = run_remote_cmd(cmd="icfs-system-memory --local-query", tgt=query_node)
+        retcode = result[query_node]["retcode"]
+        stdout = result[query_node]["stdout"]
+        stderr = result[query_node]["stderr"]
+        if not retcode:
+            print stdout
+            sys.exit(0)
+        elif retcode == -1:
+            error("057", query_node)
+        else:
+            print stdout
+            sys.exit(1)
+
+
+def usage():
+    print '''Help(-h|--help)for icfs-system-memory:
+Usage:
+>> icfs-system-memory ------ --node node --- --query --------------------------------><
+Functions: Query memory info
+Options:
+  --query:  query memory status
+  --node:   node name
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0) 
+
+
+if __name__ == '__main__':
+    node = None
+    operation = None
+    opts = []
+    argv = []
+
+    try:
+        opt_parser = OptParser.OptParser()
+        # help information
+        opt_parser.append("help", "{-h|--help}")
+        opt_parser.append("query", "--query,--node=")
+        opt_parser.append("local_query", "--local-query")
+        opt_parser.append("query_all", "--query")
+        opt_parser.append("query_local", "--query,--local")
+        # parse arguments
+        m_name, m_opts = opt_parser.parse(sys.argv[1:])
+    except Exception, err:
+        print err
+        error('002')
+
+    for o, a in m_opts:
+        if o == "--node":
+            node = a
+            if node not in get_hostname_list():
+                error('002')
+
+    if m_name == "help":
+        usage()
+    elif m_name == "query":
+        do_mem_query(node)
+    elif m_name == "local_query":
+        do_local_query()
+    elif m_name == "query_all":
+        mem_query_all()
+    elif m_name == "query_local":
+        mem_query_all_local()
+

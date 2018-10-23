@@ -1,0 +1,78 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+import getopt
+import sys
+import commands
+import binascii
+import time
+import re
+from icfs_util import salt_run
+from icfs_util import error
+
+
+def raid_query():
+    salt_run()  # check if salt status ok ?
+    node_name = commands.getoutput("salt-key -l acc | grep -v ccept")
+    for n in node_name.splitlines():
+        # filter salt stderror so that output can be parsed correctly
+        raid_l=commands.getoutput("salt '%s' cmd.run 'sas2ircu list' 2>/dev/null| grep Index -A 2 | grep -v %s | \
+        grep -v -|grep -v Index|awk '{print $1}'" % (n, n))
+        print "Node: "+n
+        print "RAID\t\tStatus"
+        count = 0
+        for i in raid_l.splitlines() :
+            # filter salt stderror so that output can be parsed correctly
+            raid_health = commands.getoutput("salt '%s' cmd.run 'sas2ircu %s dispaly' 2>/dev/null| grep Degraded :| \
+            grep -v %s" % (n, i, n))
+
+            if "degraded" not in raid_health.lower():
+                print "RAID"+i+"\t\tnormal"
+            else:
+                print "RAID"+i+"\t\tabnormal"
+                
+            count += 1
+            
+        if count == 0:
+            print "none\t\tnone"
+
+def help():
+
+    print '''Help(-h|--help)for icfs-system-raid:
+Usage:
+>> icfs-system-raid ------ --query --------------------------------><
+Functions: Query raid info
+Options:
+  --query:  query raid status
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0) 
+
+
+if __name__ == '__main__':
+    
+    ret = None
+    try:
+        opts, argv = getopt.getopt(sys.argv[1:], 'h', ['query', 'help'])
+    except getopt.GetoptError, err:
+        error('002')
+    if '-h' in sys.argv or '--help' in sys.argv:
+        if len(opts) != 1 or argv != []:
+            error('002')
+        else:
+            help()
+    if argv != []:
+        error('002')
+    for k, v in opts:
+        if '--query' in k:
+            if len(sys.argv) != 2 or '--query' != sys.argv[1]:
+                error('002')
+            else:
+                ret = "query"
+        else:
+            error('002')
+            
+    if ret == "query":
+        raid_query()
+

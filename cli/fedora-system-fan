@@ -1,0 +1,216 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+import getopt
+import sys
+import commands
+import re
+from icfs_util import error, is_rack
+from icfs_util import run_local_cmd
+from FunctionTimeout import FunctionTimeout
+
+def run_remote_cmd(tgt, cmd):
+    try:
+        ret_dict = {}
+        status, output = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no \
+                                  -o StrictHostKeyChecking=no -o GSSAPIAuthentication=no \
+                                  'root@%s' \"%s\"" % (tgt, cmd))
+        ret_dict[tgt] = {"retcode": status, "stdout": output, "stderr": ""}
+        return ret_dict
+    except Exception, err:
+        print "Error(054): Failed to run command on remote hosts"
+        print err
+        sys.exit(1)
+
+
+def get_hostname_list():
+    hostname = []
+    pattern = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(.*?)(?:#.*)?$")
+    try:
+        with open("/etc/hosts", "r") as fp:
+            lines = fp.readlines()
+    except IOError:
+        return hostname
+
+    for line in lines:
+        m = pattern.match(line)
+        if m is None:
+            continue
+        if m.group(2) == 'localhost localhost.localdomain localhost4 localhost4.localdomain4':
+            continue
+        hostname.append(m.group(2))
+
+    return hostname
+
+
+def do_local_query():
+    fan = run_local_cmd("ipmitool sdr|grep FAN|grep -v :", timeout=20)
+    if fan["retcode"]:
+        print "Error(1399):Unknown error %s" % fan["stderr"]
+        sys.exit(1)
+    fan_out = fan["stdout"]
+    fanlist = fan_out.split('\n')
+    try:
+        result = ""
+        for line in fanlist:
+            values = [value.strip() for value in line.split('|')]
+            if values[1] == "no reading":
+                status = 'abnormal'
+                speed = "none"
+                fan_slot = values[0].split('_')[-1]
+                gear = fan_gear(fan_slot)
+                fan_name = values[0].replace('_SYS_', '')
+                result += 'Name:' + fan_name + "\n"
+                result += 'Slot:' + fan_slot + "\n"
+                result += 'State:' + status + "\n"
+                result += 'Gear:' + gear + "\n"
+                result += 'Speed:' + speed + '\n\n'
+            else:
+                status = 'normal'
+                speed = values[1].split(" ")[0]
+                fan_name = values[0].replace('_SYS_', '')
+                fan_slot = values[0].split('_')[-1]
+                gear = fan_gear(fan_slot)
+                result += 'Name:' + fan_name + "\n"
+                result += 'Slot:' + fan_slot + "\n"
+                result += 'Health:' + status + "\n"
+                result += 'State: on' if status == 'normal' else 'State: off'
+                result += "\n"
+                result += 'Gear:' + gear + "\n"
+                result += 'Speed:' + speed + 'RPM' + '\n\n'
+        print result[0:-2]
+        sys.exit(0)
+    except IndexError:
+        error('3001')
+        sys.exit(1)
+
+
+# 2018-1-12
+@FunctionTimeout(timeout=40)
+def do_fan_query(query_node):
+    self_host_name = commands.getoutput("hostname")
+    if query_node == self_host_name:
+        do_local_query()
+    else:
+        result = run_remote_cmd(cmd="icfs-system-fan --query", tgt=query_node)
+        retcode = result[query_node]["retcode"]
+        stdout = result[query_node]["stdout"]
+        stderr = result[query_node]["stderr"]
+        if not retcode:
+            print stdout
+            sys.exit(0)
+        elif retcode == -1:
+            error("057", query_node)
+        else:
+            print stdout
+            sys.exit(1)
+
+
+def fan_gear(slot):
+    if slot < 9:
+        gear_info = run_local_cmd("ipmitool raw 0x3a 0x79 0x%s" % '0'+slot, timeout=10)
+    else:
+        gear_info = run_local_cmd("ipmitool raw 0x3a 0x79 0x%s" % slot, timeout=10)
+    if gear_info["retcode"] != 0:
+        fan_gear = "--"
+        return fan_gear
+    gear_info = gear_info["stdout"]
+    gear_ascii = gear_info.split()[3]
+    fan_gear_10 = int(gear_ascii, 16)
+    fan_gear = 'medium'
+    if int(fan_gear_10) < 40:
+        fan_gear = 'low'
+    elif int(fan_gear_10) > 70:
+        fan_gear = 'high'
+    return fan_gear
+
+
+# 2018-1-12
+@FunctionTimeout(timeout=40)
+def rack_fan_query():
+    rack_info_cache = 'cat /usr/local/ism/Agent/src/Cache/rack_info.txt'
+    rack_info = commands.getoutput(rack_info_cache)
+    if rack_info == '' or 'No such file' in rack_info:
+        error('3005')
+    else:
+        rack_info_split = re.split('\n\s*\n', rack_info)
+        for r in rack_info_split:
+            if 'FanID' in r and 'Speed' in r:
+                fan_split = r.splitlines()
+                if len(fan_split) < 3:
+                    error('3005')
+                else:
+                    for fan_line in fan_split[2:]:
+                        fan = fan_line.split()
+                        if len(fan) < 3:
+                            error('3005')
+                        fan_name = 'FAN'+fan[0].strip()
+                        fan_slot = fan[0].strip()
+                        status = 'normal'
+                        if fan[1].strip() != 'OK':
+                            status = 'abnormal'
+                        fan_rotate = fan[2].strip()
+                        print 'Name:'+fan_name
+                        print 'Slot:'+fan_slot
+                        print 'State:'+status
+                        print 'Speed:'+fan_rotate+'RPM'
+                        if fan_line != fan_split[2:][-1]:
+                            print ''
+
+
+def usage():
+
+    print '''Help(-h|--help)for icfs-system-fan:
+Usage:
+>> icfs-system-fan -- --node node ---- --query --------------------------------><
+Functions: Query fans info
+Options:
+  --query:  query fans info
+  --node:   node name
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully'''
+    sys.exit(0) 
+
+
+if __name__ == '__main__':
+    node = None
+    query = None
+    opts = []
+    argv = []
+    try:
+        opts, argv = getopt.getopt(sys.argv[1:], 'h', ['node=', 'query', 'help'])
+    except getopt.GetoptError, err:
+        error('002')
+    if '-h' in sys.argv or '--help' in sys.argv:
+        if len(opts) != 1 or argv != []:
+            error('002')
+        else:
+            usage()
+    if argv:
+        error('002')
+    for k, v in opts:
+        if '--node' == k:
+            node = v
+        elif '--query' == k:
+            query = "query"
+        else:
+            error('002')
+
+    # --query is necessary parameter
+    if not query:
+        error('002')
+
+    # do local query
+    if not node:
+        do_local_query()
+
+    # do remote query
+    if node != 'smartrack':
+        if node not in get_hostname_list():
+            error('3002')
+        do_fan_query(node)
+    else:
+        if not is_rack():
+            error('3007')
+        rack_fan_query()

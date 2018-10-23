@@ -1,0 +1,1689 @@
+#!/usr/bin/python
+# coding:utf-8
+# -*- copyright -*-
+"""
+#change log list
+#modify at 2016-12-14 by huper. fix bug id: 5191 .modify  function:sys_mon_mds() query mds stat
+#modify at 2016-12-14 by huper. change search_slot() function to compatible rack
+#modify at 2016-12-20 by jason. fix bug id: 5295 add try catch
+#modify at 2016-12-28 by huper. add function find_sys_disk() and function get_all_osd_host()
+#modify at 2017-01-18 by huper. add icfs-system-disk --disk --node nodename
+#modify at 2017-01-12 by huper. add function get_slot_num() to get how many disk slots the host has
+#modify at 2017-01-12 by huper. add function check_host_is_rack_or_not() to check is rack or not 
+#modify at 2017-03-16 by huper. add function get_disk_size() to get the size of the disk 
+#modify at 2017-03-31 by huper. add function get_disk_size_icfs() to get the size of the disk after mount
+#modify at 2017-03-31 by huper. modify function relevance_disk_sas() fix the question that after upgrade sas frame , icfs-system-disk can't find hdd disk
+"""
+
+import sys
+import getopt
+import re
+import commands
+import math
+import json
+from multiprocessing import Pool, Queue
+from icfs_util import error, run_local_cmd, get_product_name, is_rack
+
+# code:/usr/bin/
+# code:/usr/local/ism/Agent/src/Cli/ClusterCli/
+# export PATH=$PATH:/usr/bin/
+
+# sas2308  sas2ircu
+# sas3008  sas3ircu
+# raid3108 storcli64
+
+PRINTSHELL = 1
+PRINTOUT = 2
+PRINTWRING = 4
+PRINTERROR = 8
+DEBUG = 0
+
+
+def usage():
+    print """Help(-h|--help) for icfs-system-disk:
+Usage:
+>> icfs-system-disk ----+ --list  -----------------------+--------><
+                        + --disk --node nodename --------+
+                        + --diskIOstat --node nodename --+
+                        + --query --node nodename -------+
+                        + --disk_usage nodename   -------+
+                        '-------- --query  --------------'
+Functions: query system information about disk, mon and mds
+Options:
+  --list:         query disk information about ID, status and slot
+  --query:        query mon and mds information, if --node is followed , query the node disk usage.
+  --disk:         query disk health status
+  --node:         node name
+  --diskIOstat：  query the IO stat of the specified node
+  --disk_usage:   query the disk usage of every node
+Exit status:
+  0 if executed successfully
+  1 if executed unsuccessfully"""
+
+
+def debug(debug_type, info):
+    if DEBUG == PRINTSHELL and debug_type & PRINTSHELL:
+        print info
+    if DEBUG == PRINTOUT and debug_type & (PRINTOUT | PRINTSHELL):
+        print info
+    if DEBUG == PRINTWRING and debug_type & (PRINTWRING | PRINTOUT | PRINTSHELL):
+        print info
+    if DEBUG == PRINTERROR:
+        print info
+
+
+def Error(num, info=None):
+    if not info:
+        info = ""
+    if num == 100:
+        print "Error(100): Saltstack anomaly", info
+    elif num == 610:
+        print "Error(610): Invalid input!", info
+    elif num == 731:
+        print "Error(731): Get mds info error ", info
+    elif num == 1399:
+        print "Error(1399): Unknow error", info
+    elif num == 1408:
+        print "Error(1408): Get raid card info error ", info
+    elif num == 1409:
+        print "Error(1409): Get virtual device info error ", info
+    elif num == 1398:
+        print "Error(1398): Unsupport config: %s" % info
+    else:
+        print "Error(553): Unknow error ", info
+    # sys.exit(1)
+
+
+class Mds:
+    standby_for_rank = None
+    export_targets = None
+    name = None
+    incarnation = None
+    standby_replay = None
+    state_seq = None
+    epoch = None
+    standby_for_fscid = None
+    state = None
+    gid = None
+    features = None
+    rank = None
+    standby_for_name = None
+    addr = None
+
+    def __init__(self, name=None):
+        if name:
+            self.name = name
+
+    def getip(self):
+        return self.addr.split(":")[0]
+
+    def setvalue(self, key, value):
+        if key == "standby_for_rank":
+            self.standby_for_fscid = value
+        elif key == "export_targets":
+            self.export_targets = value
+        elif key == "name":
+            self.name = value
+        elif key == "incarnation":
+            self.incarnation = value
+        elif key == "standby_replay":
+            self.standby_replay = value
+        elif key == "state_seq":
+            self.state_seq = value
+        elif key == "epoch":
+            self.epoch = value
+        elif key == "standby_for_fscid":
+            self.standby_for_fscid = value
+        elif key == "state":
+            self.state = value
+        elif key == "gid":
+            self.gid = value
+        elif key == "features":
+            self.features = value
+        elif key == "rank":
+            self.rank = value
+        elif key == "standby_for_name":
+            self.standby_for_name = value
+        elif key == "addr":
+            self.addr = value
+
+
+# ##########create by huper######################
+
+disk_queue = Queue()
+# disk_queue=Manager().Queue()
+host_queue = Queue()
+
+
+class Disk:
+    # disk info
+    serial_no = ""
+    disk_label = ""
+    health = ""
+    wwn = None
+    # not osd:0 ; is osd:1
+    is_osd = 0
+    osd_id = "None"
+    osd_status = "None"
+    disk_type = None
+    slot = None
+
+    def __init__(self, disk_label):
+        self.disk_label = disk_label
+
+    def get_phy_slot(self, sas_list):
+        slot = self.slot
+        try:
+            return int(slot)
+        except:
+            if not slot.sas:
+                return -1
+            return slot.get_index(sas_list)
+
+    def get_disk_type(self):
+        slot = self.slot
+        # raid card, virtual disk
+        if self.disk_type:
+            return self.disk_type
+        # sas card
+        elif not slot:
+            return "Unknow"
+        return slot.drive_type
+
+
+class Slot:
+    enclosure = ""
+    slot = ""
+    serial_no = ""
+    drive_type = ""
+    index = -1
+    sas = None
+
+    def __init__(self):
+        pass
+
+    def get_index(self, sas_list):
+        return self.index
+        # # slot 12
+        # if len(sas_list) == 2:
+        #     if self.sas.index == 0:
+        #         return int(self.slot) - 4
+        #     else:
+        #         return int(self.slot) + 4
+        # # slot 24 or 12
+        # if len(sas_list) == 1:
+        #     return int(self.slot)
+        # # slot 36
+        # if len(sas_list) == 3:
+        #     slot_index = int(self.slot)
+        #     sas_index = self.sas.index
+        #     if sas_index == 0:
+        #         slot_index -= 2
+        #     return slot_index + sas_index * 12
+        # return -1
+
+
+class Irvolume:
+    volumeid = None
+    PHY = None
+    raid_level = None
+    volume_wwid = None
+    size = None
+    sas = None
+
+    def __init__(self, volumeid=None):
+        self.PHY = []
+        if volumeid:
+            self.volumeid = volumeid
+
+
+class Sas:
+    # the index of sas on pci
+    index = ""
+    # sas version  2308,3008
+    version = ""
+    slot_list = None
+    ir_volume_list = None
+
+    def __init__(self, index, version):
+        self.index = index
+        self.version = version
+        self.slot_list = []
+        self.ir_volume_list = []
+
+
+class Raid:
+    # raid card info
+    # raid card id
+    # "Ctl" : 0,
+    # "Model" : "AVAGOMegaRAIDSAS9361-8i",
+    # "Ports" : 8,
+    # "PDs" : 12,
+    # "DGs" : 3,
+    # "DNOpt" : 0,
+    # "VDs" : 3,
+    # "VNOpt" : 0,
+    # "BBU" : "Msng",
+    # "sPR" : "On",
+    # "DS" : "1",
+    # "EHS" : "Y",
+    # "ASOs" : 3,
+    # "Hlth" : "Opt"
+    vd_list = None
+    enclosure_list = None
+    Ctl = None
+    Model = None
+    Ports = None
+    PDs = None
+    DGs = None
+    DNOpt = None
+    VDs = None
+    VNOpt = None
+    BBU = None
+    sPR = None
+    DS = None
+    EHS = None
+    ASOs = None
+    Hlth = None
+
+    def __init__(self, raid_info):
+        self.__dict__.update(raid_info)
+
+
+class Vd:
+    # virtual device
+    # "DG/VD" : "12/12",
+    # "TYPE" : "RAID0",
+    # "State" : "Optl",
+    # "Access" : "RW",
+    # "Consist" : "Yes",
+    # "Cache" : "RWTD",
+    # "Cac" : "-",
+    # "sCC" : "ON",
+    # "Size" : "7.276 TB",
+    # "Name" : ""
+    DG_VD = None
+    dg = None
+    vd = None
+    TYPE = None
+    State = None
+    Access = None
+    Consist = None
+    Cache = None
+    Cac = None
+    sCC = None
+    Size = None
+    Name = None
+    control_id = None
+    SCSI_NAA_Id = None
+    rdisk_list = None
+
+    def __init__(self, vd):
+        self.DG_VD = vd["DG/VD"]
+        self.dg = self.DG_VD.split("/")[0]
+        self.vd = self.DG_VD.split("/")[1]
+        self.__dict__.update(vd)
+
+
+class Rdisk:
+    # disk
+    # "EID:Slt" : "36:2",     EID_Slt
+    # "DID" : 30,
+    # "State" : "Onln",
+    # "DG" : 0,
+    # "Size" : "1.636 TB",
+    # "Intf" : "SAS",
+    # "Med" : "HDD",
+    # "SED" : "N",
+    # "PI" : "N",
+    # "SeSz" : "512B",
+    # "Model" : "AL14SEB18EQ     ",
+    # "Sp" : "U",
+    # "Type" : "-"
+    eid = None
+    slot = None
+    DID = None
+    State = None
+    DG = None
+    Size = None
+    Intf = None
+    Med = None
+    SED = None
+    PI = None
+    SeSz = None
+    Model = None
+    Sp = None
+
+    def __init__(self, disk):
+        self.eid, self.slot = disk["EID:Slt"].split(":")
+        self.__dict__.update(disk)
+
+
+class Enclosure:
+    EID = None
+    Slots = None
+    PD = None
+    Type = None
+
+    def __init__(self, eid):
+        self.EID = eid
+
+
+def parse_nodes(nodes):
+    node_list = nodes.split(",")
+    status, output = commands.getstatusoutput("salt-key -l acc")
+    if status != 0:
+        Error(100, output)
+        sys.exit(1)
+    valid_nodes = output.split("\n")
+    valid_nodes.pop(0)
+    invalid_nodes = [node for node in node_list if node not in valid_nodes]
+    if invalid_nodes:
+        error("3002")
+    return node_list
+
+
+def get_ip_by_hostname(hostname):
+    ip = ""
+    pattern = re.compile(r"^\s*(\d+\.\d+\.\d+\.\d+)\s+(.*?)(?:#.*)?$")
+    try:
+        with open("/etc/hosts", "r") as fp:
+            lines = fp.readlines()
+    except IOError:
+        return ip
+
+    for line in lines:
+        m = pattern.match(line)
+        if m is None:
+            continue
+
+        hostname_list = m.group(2).split()
+        if hostname in hostname_list:
+            ip = m.group(1)
+            break
+
+    return ip
+
+
+def search_slot(sas, sas_info):
+    # use sasircu find slot info,return slot_list
+    # ---------------------------------
+    # Controller information
+    # ---------------------------------
+    # ---------------------------------
+    # IR Volume information
+    #---------------------------------
+    #     IR volume 1
+    #         PHY[0] Enclosure#/Slot#                 : 1:0
+    #         PHY[1] Enclosure#/Slot#                 : 1:1
+    #---------------------------------
+    # Physical device information
+    #---------------------------------
+    #     Device is a Hard disk
+    #    
+    #     Device is a Enclosure services device
+    #---------------------------------
+    # Enclosure information
+    # ---------------------------------
+    ir_volume_list = []
+    slot_list = []
+    irvolume = None
+    slot = None
+    searchIrvolume = False
+    searchHardDisk = False
+
+    for line in sas_info.splitlines():
+        if "IR Volume information" == line:
+            searchIrvolume = True
+        if "Physical device information" == line:
+            # add final irvolume info to ir_volumes_list
+            if irvolume:
+                ir_volume_list.append(irvolume)
+            searchIrvolume = False
+            searchHardDisk = True
+        if "Enclosure information" == line:
+            if slot:
+                slot_list.append(slot)
+            slot = Slot()
+            slot = None
+            searchHardDisk = False
+        if "Device is a Enclosure services device" in line:
+            if slot:
+                slot_list.append(slot)
+            slot = Slot()
+            slot = None
+            searchHardDisk = False
+        if "Device is a Hard disk" == line:
+            if slot:
+                slot_list.append(slot)
+            slot = Slot()
+            slot.sas = sas
+            searchHardDisk = True
+        # search irvolumes info
+        if searchIrvolume:
+            if re.match("IR volume \d*$", line):  # search a ir volume
+                # add last irvolume info to ir_volumes_list
+                if irvolume:
+                    ir_volume_list.append(irvolume)
+                irvolume = Irvolume()
+                irvolume.sas = sas
+            if "Volume ID" in line:
+                irvolume.volumeid = line.split(":")[1].strip()
+            if "Volume wwid" in line:
+                irvolume.volume_wwid = line.split(":")[1].strip()
+            if "RAID level" in line:
+                irvolume.raid_level = line.split(":")[1].strip()
+            if "Size (in MB)" in line:
+                irvolume.size = line.split(":")[1].strip()
+            if "PHY" in line:
+                irenclu = line.split(":")[1].strip()
+                irslot = line.split(":")[2].strip()
+                irvolume.PHY.append(irenclu + ":" + irslot)
+        # search hard disk info
+        if searchHardDisk:
+            if "Enclosure #" in line:
+                slot.enclosure = line.split(":")[1].strip()
+            if "Slot #" in line:
+                slot.slot = line.split(":")[1].strip()
+            if "Serial No" in line:
+                slot.serial_no = line.split(":")[1].strip()
+            if "Drive Type" in line:
+                slot.drive_type = line.split(":")[1].strip()
+    # from slot_list remove ir volumes
+    result = []
+    sas.ir_volume_list = ir_volume_list
+    for slot in slot_list:
+        find = False
+        for ir in ir_volume_list:
+            for slots in ir.PHY:
+                enc, slo = slots.split(":")
+                if slot.enclosure == enc.strip() and slot.slot == slo:
+                    find = True
+                    break
+            if find:
+                break
+        if not find:
+            result.append(slot)
+    return result
+
+
+def set_raid_vd_disk_info(raid_card):
+    # vd_key like this "/cx/vx"
+    # pd for vd like this "PDs for VD x"
+    # "VDx Properties"
+    vd_part = r"^/c\d+/v(\d+$)"
+    error, info = commands.getstatusoutput("storcli64 /c%s /vall show all J" % raid_card.Ctl)
+    if error:
+        Error(1409, info)
+        sys.exit(1)
+    else:
+        try:
+            controllers = json.loads(info)["Controllers"]
+            for controller in controllers:
+                status = controller["Command Status"]["Status"]
+                description = controller["Command Status"]["Description"]
+                if status != "Success":
+                    Error(1409, description)
+                elif description == "No VDs have been configured":
+                    raid_card.vd_list = []
+                else:
+                    response = controller["Response Data"]
+                    keys = response.keys()
+                    # get vd list
+                    vd_list = []
+                    for key in keys:
+                        res = re.match(vd_part, key)
+                        if res:
+                            vd_id = res.group(1)
+                            vd = Vd(response[key][0])
+                            vd.control_id = raid_card.Ctl
+                            vd.SCSI_NAA_Id = response["VD%s Properties" % vd_id]["SCSI NAA Id"]
+                            vd.rdisk_list = [Rdisk(disk) for disk in response["PDs for VD %s" % vd_id]]
+                            vd_list.append(vd)
+                    raid_card.vd_list = vd_list
+        except Exception, e:
+            Error(1409, e)
+            sys.exit(1)
+
+
+def set_raid_enclosure_info(raid_card):
+    # enclosure_part = r"^Enclosure /c\d+/e(\d+$)"
+    error, info = commands.getstatusoutput("storcli64 /c%s /eall show all J" % raid_card.Ctl)
+    if error:
+        Error(1409, info)
+        sys.exit(1)
+    else:
+        try:
+            controllers = json.loads(info)["Controllers"]
+            for controller in controllers:
+                status = controller["Command Status"]["Status"]
+                description = controller["Command Status"]["Description"]
+                if status != "Success":
+                    Error(1409, description)
+                    sys.exit(1)
+                else:
+                    response = controller["Response Data"]
+                    keys = response.keys()
+                    # get enclosure list
+                    enclosure_list = []
+                    for key in keys:
+                        enclosure_info = response[key]
+                        eid = enclosure_info["Information"]["Device ID"]
+                        slots = enclosure_info["Properties"][0]["Slots"]
+                        etype = enclosure_info["Information"]["Enclosure Type"]
+                        pd = enclosure_info["Properties"][0]["PD"]
+                        enclosure = Enclosure(eid)
+                        enclosure.PD = pd
+                        enclosure.Slots = slots
+                        enclosure.Type = etype
+                        enclosure_list.append(enclosure)
+                    raid_card.enclosure_list = enclosure_list
+        except Exception, e:
+            Error(1409, e)
+            sys.exit(1)
+
+
+def get_all_raid():
+    raid_card_list = []
+    error, info = commands.getstatusoutput("storcli64 show J")
+    if error:
+        Error(1408, info)
+    else:
+        try:
+            raid_info_json = json.loads(info)
+            Controllers = raid_info_json["Controllers"]
+            for controller in Controllers:
+                system_overview = controller["Response Data"]["System Overview"]
+                for raid_card_info in system_overview:
+                    raid_card = Raid(raid_card_info)
+                    set_raid_vd_disk_info(raid_card)
+                    set_raid_enclosure_info(raid_card)
+                    raid_card_list.append(raid_card)
+        except:
+            pass
+    return raid_card_list
+
+
+def get_slot_num_old_for_slot_index(sas_list):
+    israck = check_host_is_rack_or_not(node=node)
+    # get all sas
+    sasnum = len(sas_list)
+    en_count = []
+    # get slot count by number of sas
+    if sasnum == 1:
+        if israck:
+            return 12
+        else:
+            sas = sas_list[0]
+            for slot in sas.slot_list:
+                en_count.append(slot.enclosure)
+            en_count = list(set(en_count))
+            if len(en_count) > 1:
+                return 36
+            else:
+                return 25
+    elif sasnum == 2:
+        return 12
+    elif sasnum == 3:
+        return 36
+    else:
+        return 12
+
+
+def get_slot_num_for_slot_index(sas_list):
+    # M1,M5,RACK old config is same with new config, so return old to process as the old method
+    # M3 old config have three sas cards but new config have one sas card, so return new
+    # other condition process as old config
+    product_name = get_product_name()
+    if product_name is None:
+        return "old", get_slot_num_old_for_slot_index(sas_list)
+    else:
+        if "AS13000-M1" == product_name and len(sas_list) == 2:
+            return "old", 12
+        elif "AS13000-M3" == product_name and len(sas_list) == 1:
+            return 'new', 36
+        elif "AS13000-M5" == product_name and len(sas_list) == 1:
+            return 'old', 25
+        elif "AS13000-Rack" == product_name and len(sas_list) == 2:
+            return 'new', 12
+        else:
+            return "old", get_slot_num_old_for_slot_index(sas_list)
+
+
+def get_slot_from_sas_num_and_slot(slot_num, sas_num, sas_slot_num, slot_index, neworold):
+    # M1: sas0[slot:4~7], sas1[slot:0~8] new && old
+    # M5: sas0[slot:0~24] new && old
+    # M3: sas0[slot:2~13], sas1[slot:0~11], sas2[slot:0~11] old
+    # M3: sas0[slot:2~37] new
+    # RACK: sas0[slot:0~11] new && old
+    one_sas_num_slot = {12: [[i for i in range(12)]], 25: [[i for i in range(25)]],
+                        36: [[None]*2 + [i for i in range(36)]]}
+    two_sas_num_slot = {12: [[None]*4 + [i for i in range(0, 4)], [i for i in range(4, 12)]]}
+    three_sas_num_slot = {36: [[None]*2 + [i for i in range(0, 12)], [i for i in range(12, 24)],
+                               [i for i in range(24, 36)]]}
+
+    # transfer the str to string
+    try:
+        sas_slot_num = int(sas_slot_num)
+        slot_index = int(slot_index)
+    except ValueError, e:
+        Error(1399, e)
+        sys.exit(1)
+    # print "slot_num %s, slot_index %s, sas_slot_num %s" % (slot_num, slot_index, sas_slot_num)
+    try:
+        if neworold == "new":
+            return one_sas_num_slot[slot_num][slot_index][sas_slot_num]
+        else:
+            if sas_num == 1:
+                return one_sas_num_slot[slot_num][slot_index][sas_slot_num]
+            elif sas_num == 2:
+                # print "slot_num %s, slot_index %s, sas_slot_num %s slot_index %s" \
+                #       % (slot_num, slot_index, sas_slot_num, two_sas_num_slot[slot_num][slot_index][sas_slot_num])
+                return two_sas_num_slot[slot_num][slot_index][sas_slot_num]
+            elif sas_num == 3:
+                return three_sas_num_slot[slot_num][slot_index][sas_slot_num]
+    except (IndexError, KeyError):
+        product_name = get_product_name()
+        Error(1398, "%s have %s sas cards, please check config!" % (product_name, sas_num))
+        sys.exit(1)
+
+
+def set_slot_index(sas_list):
+    sas_list.sort(key=lambda sas: int(sas.index))
+    # get num of sas card
+    sas_num = len(sas_list)
+    # system disk should be on the first en of the sas
+    sys_sas = sas_list[0]
+    if len(sys_sas.ir_volume_list) == 0:
+        Error(1398, "this node is not standard product.")
+        sys.exit(1)
+    else:
+        notstand = False
+        for ir in sys_sas.ir_volume_list:
+            for slots in ir.PHY:
+                enc, slo = slots.split(":")
+                if str(enc) not in ('1', '2') or str(slo) not in ("0", "1"):
+                    notstand = True
+        if notstand:
+            Error(1398, "this node is not standed product.")
+            sys.exit(1)
+    # more than one sas card, each sascard have no more than 12 disk
+    if len(sas_list) > 1:
+        for sas in sas_list:
+            if len(sas.slot_list) > 12:
+                Error(1398, "this node is not standed product.")
+                sys.exit(1)
+    # get disk number
+    neworold, slotnum = get_slot_num_for_slot_index(sas_list)
+
+    if len(sas_list) == 1:
+        # one sas card : M5: sas0: slot[0~24]
+        #                M3: E2:2~13 E3:0~11 E4:0~11
+        #
+        slot_list = sas_list[0].slot_list
+        for slot in slot_list:
+            en = int(slot.enclosure)
+            if en > 2:
+                index_s = int(slot.slot) + (en - 2) * 12 + 2
+            else:
+                index_s = int(slot.slot)
+            slot.index = get_slot_from_sas_num_and_slot(slotnum, sas_num, index_s, 0, neworold)
+        # the index should not be repeat
+        # slot_index = [slot.slot for slot in sas_list[0].slot_list]
+        # if len(slot_index) != len(set(slot_index)):
+        #     product_name = get_product_name()
+        #     Error(1398, "%s have %s sas cards, please check config!" % (product_name, sas_num))
+        #     sys.exit(1)
+
+    # set the sas slot number
+    else:
+        for sas in sas_list:
+            slot_list = sas.slot_list
+            slot_list.sort(key=lambda slot: int(slot.enclosure))
+            for slot in slot_list:
+                slot.index = get_slot_from_sas_num_and_slot(slotnum, sas_num, slot.slot, sas.index, neworold)
+
+
+def get_all_sas():
+    debug(PRINTSHELL, "lspci | grep -i sas | grep -v -i raid")
+    sas_version_info = commands.getoutput("lspci | grep -i sas | grep -v -i raid")
+    debug(PRINTOUT, sas_version_info)
+    if sas_version_info == "":
+        return []
+    sas_nu = len(sas_version_info.splitlines())
+    sasircu_command = "sas2ircu"
+    version = "2308"
+    if "SAS3008" in sas_version_info:
+        sasircu_command = "sas3ircu"
+        version = "3008"
+    # get sas info
+    sas_list = []
+    for index in range(sas_nu):
+        sas = Sas(index, version)
+        debug(PRINTSHELL, "%s %s display" % (sasircu_command, index))
+        result = run_local_cmd("%s %s display" % (sasircu_command, index), timeout=30)
+        retcode = result["retcode"]
+        stderr = result["stderr"]
+        if retcode or stderr != "":
+            Error(553, stderr)
+            sys.exit(1)
+        sas_info = result["stdout"]
+        debug(PRINTOUT, sas_info)
+        # search slot info in sas_info
+        slot_list = search_slot(sas, sas_info)
+        sas.slot_list = slot_list
+        sas_list.append(sas)
+    # set slot index
+    set_slot_index(sas_list)
+    return sas_list
+
+
+def find_disk_info(disk, disk_smart_info):
+    # use smartctl to find disk health status
+    # sata : Serial Number    overall-health
+    # sas  : Serial number    SMART Health Status
+    for line in disk_smart_info.splitlines():
+        if "Serial Number:" in line or "Serial number" in line:
+            disk.serial_no = line.split(":")[1].strip()
+        if "overall-health" in line or "SMART Health Status" in line:
+            if "PASSED" in line or "OK" in line:
+                disk.health = "up"
+            else:
+                disk.health = "down"
+            break
+
+
+def do_check_disk_osd_status(disk):
+    disk_label = disk.disk_label
+    debug(PRINTSHELL, "cat /proc/mounts 2>/dev/null| grep %s | "
+                      "grep /var/lib/icfs/osd/icfs | awk '{print $2}'" % disk_label)
+    mount_info = commands.getoutput("cat /proc/mounts 2>/dev/null | grep %s | "
+                                    "grep /var/lib/icfs/osd/icfs | awk '{print $2}'" % disk_label)
+    debug(PRINTOUT, mount_info)
+
+    disk.is_osd = 1
+    debug(PRINTSHELL, "cat %s/whoami" % mount_info)
+    osd_id = commands.getoutput("cat %s/whoami" % mount_info)
+    try:
+        int(osd_id)
+        disk.osd_id = osd_id
+    except:
+        disk.is_osd = 0
+        disk.osd_id = "None"
+    debug(PRINTOUT, disk.osd_id)
+    debug(PRINTSHELL, "icfs osd tree 2>/dev/null | grep -w osd.%s | awk '{print $4}' | tail -1" % disk.osd_id)
+    osd_status_tmp = commands.getoutput(
+        "icfs osd tree  2>/dev/null | grep -w osd.%s | awk '{print $4}' | tail -1" % disk.osd_id)
+    if "up" == osd_status_tmp or "down" == osd_status_tmp:
+        disk.osd_status = osd_status_tmp
+    else:
+        disk.osd_status = 'None'
+    debug(PRINTOUT, disk.osd_status)
+    disk_queue.put(disk)
+
+
+def check_disk_osd_status(disk_list):
+    # check disk is osd or not
+    pol = Pool(36)
+    for disk in disk_list:
+        pol.apply_async(do_check_disk_osd_status, args=(disk,))
+    pol.close()
+    pol.join()
+    debug(1, disk_queue.qsize())
+    while disk_queue.qsize() > 0:
+        disk_tmp = disk_queue.get()
+        i = 0
+        while i < len(disk_list):
+            if disk_list[i].disk_label == disk_tmp.disk_label:
+                disk_list[i] = disk_tmp
+                break
+            i += 1
+
+
+def do_smartctl_query(disk_label):
+    debug(PRINTSHELL, "smartctl -a %s" % disk_label)
+    disk_smart_info = commands.getoutput("smartctl -a %s" % disk_label)
+    debug(PRINTOUT, disk_smart_info)
+    disk = Disk(disk_label)
+    find_disk_info(disk, disk_smart_info)
+    if disk.serial_no != "":
+        disk_queue.put(disk)
+
+
+def get_disk_wwn(disk_label):
+    disk_name = disk_label.split("/")[-1]
+    wwn = commands.getoutput("ls -l /dev/disk/by-id  | grep wwn | grep -w %s | awk '{print $9}'" % disk_name)
+    return wwn
+
+
+def get_all_disk(sas_list, raid_list):
+    debug(PRINTSHELL, "ls /sys/block/")
+    disk_label_list = commands.getoutput("ls /sys/block/")
+    disk_label_list = ["/dev/" + i for i in disk_label_list.splitlines() if re.match("^(sd|hd|vd).*$", i)]
+    debug(PRINTOUT, disk_label_list)
+    disk_list = []
+    # sas card
+    if sas_list:
+        pol = Pool(36)
+        for disk_label in disk_label_list:
+            pol.apply_async(do_smartctl_query, args=(disk_label,))
+        pol.close()
+        pol.join()
+        while disk_queue.qsize() > 0:
+            disk_list.append(disk_queue.get())
+        return disk_list
+    # raid card
+    if raid_list:
+        disk_list = [Disk(disk_label) for disk_label in disk_label_list]
+        for disk in disk_list:
+            disk.wwn = get_disk_wwn(disk.disk_label)
+    # virtual disk
+    if not sas_list and not raid_list:
+        disk_list = [Disk(disk_label) for disk_label in disk_label_list]
+        for disk in disk_list:
+            disk.health = "up"
+            disk.slot = -1
+            error, info = commands.getstatusoutput("lsblk -ndo ROTA %s" % disk.disk_label)
+            try:
+                if int(info.strip()) == 0:
+                    disk.disk_type = "SSD"
+                else:
+                    disk.disk_type = "HDD"
+            except:
+                disk.disk_type = "HDD"
+    return disk_list
+
+
+def find_sys_disk(node=None):
+    # find system disk
+    # disk_info = ''
+    # mount_info = ''
+    if node:
+        # flag, disk_info = run_command(node=node, comm='lsblk -o NAME',debug=DEBUG)
+        flag, disk_info = commands.getstatusoutput(
+            "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' \"lsblk -o NAME\" 2>/dev/null " % (
+                node))
+        # flag, mount_info = run_command(node=node, comm='lsblk -o MOUNTPOINT',debug=DEBUG)
+        flag, mount_info = commands.getstatusoutput(
+            "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' \"lsblk -o MOUNTPOINT\" 2>/dev/null " % (
+                node))
+        if flag:
+            Error(713, disk_info)
+            sys.exit(1)
+    else:
+        # disk_info = run_command(comm="lsblk -o NAME",debug=DEBUG)[1]
+        disk_info = commands.getstatusoutput("lsblk -o NAME")[1]
+        # mount_info = run_command(comm="lsblk -o MOUNTPOINT",debug=DEBUG)[1]
+        mount_info = commands.getstatusoutput("lsblk -o MOUNTPOINT")[1]
+    if disk_info == "":
+        Error(713, None)
+        sys.exit(1)
+    disk_label = []
+    root_point = []
+    # check / mount point
+    index = 0
+    for mountpoint in mount_info.splitlines():
+        if mountpoint == "/":
+            root_point.append(index)
+        index += 1
+    index = 0
+    # check disk name
+    for disk_name in disk_info.splitlines():
+        if re.match("^\w.*", disk_name):
+            disk_label.append(disk_name)
+        else:
+            if index > 0:
+                disk_label.append(disk_label[index - 1])
+            else:
+                disk_label.append(disk_name)
+        index += 1
+    sys_disk = []
+    # find system disk
+    for index in root_point:
+        sys_disk.append("/dev/" + disk_label[index])
+    return sys_disk
+
+
+def relevance_disk_sas(disk_list, sas_list):
+    # relevance slot and disk label
+    disk_dic = {}
+    slot_dic = {}
+    # sys_list = find_sys_disk()
+    for disk in disk_list:
+        disk_dic[disk.serial_no] = disk
+        # # check disk is system disk or not
+        # if disk.disk_label in sys_list:
+        #     disk.osd_id = "system"
+        #     disk.osd_status = "system"
+        #     disk.health = "system"
+    for sas in sas_list:
+        for slot in sas.slot_list:
+            slot_dic[slot.serial_no] = slot
+    err_key_list = []
+    # after sas3008 upgrade frame , slot.serial_no is part of disk.serial_no
+    for key in disk_dic.iterkeys():
+        find = False
+        for key2 in slot_dic.iterkeys():
+            # bug. if disk is error, disk have no serial number
+            if key2.strip() == "" or key.strip() == "":
+                continue
+            # Western Digital: smartctl: WD-WCC131477315  sas: WDWCC131477315
+            tmp = key.replace("-", "")
+            if tmp.startswith(key2) or key2.startswith(tmp):
+                disk_dic[key].slot = slot_dic[key2]
+                find = True
+                break
+        if not find:
+            err_key_list.append(key)
+    # for key in disk_dic.iterkeys():
+    #    try:
+    #        disk_dic[key].slot = slot_dic[key]
+    #    except Exception, e:
+    #        err_key_list.append(key)
+    for key in err_key_list:
+        del disk_dic[key]
+    return disk_dic.values()
+
+
+def get_slot_dic_raid(raid_list):
+    # c_VD
+    slot_dic = {}
+    slot = 0
+    raid_list.sort(key=lambda raid: int(raid.Ctl))
+    for raid in raid_list:
+        vd_list = raid.vd_list
+        vd_list.sort(key=lambda vd: int(vd.vd))
+        for vd in vd_list:
+            slot_dic[str(raid.Ctl)+"_"+str(vd.vd)] = slot
+            slot += 1
+    return slot_dic
+
+
+def relevance_disk_raid(disk_list, raid_list):
+    slot_dic = get_slot_dic_raid(raid_list)
+    vd_list = []
+    for raid in raid_list:
+        vd_list += raid.vd_list
+    for disk in disk_list:
+        # get enclosure info
+        if disk.wwn == "":
+            continue
+        vd = [vdtmp for vdtmp in vd_list if vdtmp.SCSI_NAA_Id in disk.wwn][0]
+        disk.slot = slot_dic[str(vd.control_id)+"_"+str(vd.vd)]
+        disk.health = vd.State
+        # if len(vd.rdisk_list) != 1:
+        #     pass
+        # else:
+        #     rdisk = vd.rdisk_list[0]
+        #     disk.health = rdisk.State
+        # get disk type info
+        isSSD = True
+        for vdisk in vd.rdisk_list:
+            if vdisk.Med != "SSD":
+                isSSD = False
+                break
+        if len(vd.rdisk_list) == 1:
+            Intf = vd.rdisk_list[0].Intf+"_"
+        else:
+            Intf = vd.TYPE+"_"
+        if isSSD:
+            disk.disk_type = Intf+"SSD"
+        else:
+            disk.disk_type = Intf+"HDD"
+
+
+def mark_system_disk(disk_list):
+    sys_list = find_sys_disk()
+    for disk in disk_list:
+        if disk.disk_label in sys_list:
+            disk.osd_id = "system"
+            disk.osd_status = "system"
+            disk.health = "system"
+
+
+def disk_health_list_query(check_osd=0, check_type=0):
+    sas_list = get_all_sas()
+    raid_list = get_all_raid()
+    disk_list = get_all_disk(sas_list, raid_list)
+    if check_osd:
+        check_disk_osd_status(disk_list)
+    if sas_list:
+        disk_list = relevance_disk_sas(disk_list, sas_list)
+    if raid_list:
+        relevance_disk_raid(disk_list, raid_list)
+    mark_system_disk(disk_list)
+    for disk in disk_list:
+        outstr = ""
+        outstr += "%-10s\t%-10s\t" % (disk.disk_label, disk.health,)
+        if check_osd:
+            if disk.is_osd:
+                outstr += "%-10s\t%-10s\t" % ("osd." + str(disk.osd_id), disk.osd_status,)
+            else:
+                outstr += "%-10s\t%-10s\t" % (disk.osd_id, disk.osd_status,)
+        if check_type:
+            outstr += "%-10s\t" % (disk.get_disk_type())
+        outstr += "%-10s" % (disk.get_phy_slot(sas_list))
+        print outstr
+
+
+def do_disk_list(host, check_osd, check_type):
+    addpar = ""
+    if check_osd == 1:
+        addpar = "--checkosd"
+    if check_type == 1:
+        addpar += " --checktype"
+    if check_osd == 1 and check_type == 1:
+        # filter salt stderror so that output can be parsed correctly
+        out = commands.getoutput(
+            "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no '%s' 'icfs-system-disk --disk %s 2>/dev/null | sort -n -k 6 ' 2>/dev/null " % (
+                host, addpar))
+    elif check_osd == 1:
+        # filter salt stderror so that output can be parsed correctly
+        out = commands.getoutput(
+            "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no '%s' 'icfs-system-disk --disk %s 2>/dev/null | sort -n -k 5 ' 2>/dev/null " % (
+                host, addpar))
+    elif check_type == 1:
+        out = commands.getoutput(
+            "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no '%s' 'icfs-system-disk --disk %s 2>/dev/null | sort -n -k 4 ' 2>/dev/null " % (
+                host, addpar))
+    else:
+        out = commands.getoutput(
+            "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no '%s' 'icfs-system-disk --disk %s 2>/dev/null | sort -n -k 3 ' 2>/dev/null " % (
+                host, addpar))
+    host_queue.put([host, out])
+
+
+def get_all_osd_host():
+    # get all osd host in cluster
+    error, hostinfo = commands.getstatusoutput("icfs node ls osd --connect-timeout 5 2>/dev/null")
+    if error:
+        error, hosts = commands.getstatusoutput("salt-key -l acc | grep -v Accepted")
+        if error:
+            error, hosts = commands.getstatusoutput("cat /etc/hosts")
+            if error:
+                return commands.getoutput("hostname")
+            hosts = hosts.splitlines()
+            return_value = None
+            for line in hosts:
+                if re.match(".*localhost\.localdomain.*", line) or re.match("^[\s]*#.*", line):
+                    pass
+                else:
+                    liness = line.split()
+                    if len(liness) == 2:
+                        if not return_value:
+                            return_value = liness[1]
+                        else:
+                            return_value = return_value + "\n" + liness[1]
+                    if len(liness) == 3:
+                        if not return_value:
+                            return_value = liness[2]
+                        else:
+                            return_value = return_value + "\n" + liness[2]
+            return return_value
+        return hosts
+    hosts = json.loads(hostinfo).keys()
+    return "\n".join(hosts)
+
+
+def check_host_is_rack_or_not(node=None):
+    # rack has no fan
+    israck = False
+    # ipmi_out = ""
+    # check ipmi mode is install or not
+    # mode : ipmi_devintf
+    if node:
+        status, ipmi_out = commands.getstatusoutput("ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no "
+                                                    "-o StrictHostKeyChecking=no 'root@%s' 'icfs-verify-rack'" % (node))
+        if status == 0 and ipmi_out == "0":
+            israck = True
+    else:
+        israck = is_rack()
+
+    return israck
+
+
+def get_slot_num_old(node=None):
+    israck = check_host_is_rack_or_not(node=node)
+    # get all sas
+    sas_list = get_all_sas()
+    sasnum = len(sas_list)
+    # get all raid
+    raid_list = get_all_raid()
+    rdisk_count = 0
+    for raid in raid_list:
+        rdisk_count += int(raid.PDs)
+    # get slot count by number of sas
+    if sasnum == 1:
+        if israck:
+            return 12
+        sas = sas_list[0]
+        en_count = []
+        for slot in sas.slot_list:
+            en_count.append(slot.enclosure)
+        en_count = list(set(en_count))
+        if len(en_count) > 1:
+            return 36
+        else:
+            return 25
+    elif sasnum == 2:
+        return 12
+    elif sasnum == 3:
+        return 36
+    elif raid_list:
+        # yi dong dian pei xiang mu gu ding fan hui 25
+        return 25
+    else:
+        return 12
+
+
+def get_slot_num(node=None):
+    product_name = get_product_name()
+    if product_name is None:
+        return get_slot_num_old(node)
+    else:
+        if "AS13000-M1" == product_name:
+            return 12
+        elif "AS13000-M3" == product_name:
+            return 36
+        elif "AS13000-M5" == product_name:
+            return 25
+        elif "AS13000-Rack" == product_name:
+            return 12
+        else:
+            return get_slot_num_old(node)
+
+
+def sys_disk_list(check_osd=0, check_type=0):
+    # salt_check()
+    # get all host
+    hosts = get_all_osd_host()
+    pol = Pool(36)
+    for host in hosts.splitlines():
+        pol.apply_async(do_disk_list, args=(host, check_osd, check_type,))
+    pol.close()
+    pol.join()
+    host_dic = {}
+    while host_queue.qsize() > 0:
+        oo = host_queue.get()
+        host_dic[oo[0]] = oo[1]
+    # check slot sum
+    slotnum = get_slot_num()
+    #     if len(sas_list) == 0:
+    #         get_all_sas()
+    #     for sas in sas_list:
+    #         slotnum = slotnum + len(sas.slot_list)
+    print "Slot num:" + str(slotnum)
+    # print disk info
+    for host in hosts.splitlines():
+        print "Node:", host
+        if check_osd and check_type:
+            print "%-10s\t%-10s\t%-10s\t%-10s\t%-10s\t%-10s" % (
+                "DiskID", "Status", "Osd", "OsdStatus", "DiskType", "Slot")
+        elif check_osd:
+            print "%-10s\t%-10s\t%-10s\t%-10s\t%-10s" % ("DiskID", "Status", "Osd", "OsdStatus", "Slot")
+        elif check_type:
+            print "%-10s\t%-10s\t%-10s\t%-10s" % ("DiskID", "Status", "DiskType", "Slot")
+        else:
+            print "%-10s\t%-10s\t%-10s" % ("DiskID", "Status", "Slot")
+        try:
+            for line in host_dic[host].splitlines():
+                print line.lstrip()
+        except:
+            pass
+
+
+##############################################################
+def unit_convert(size):
+    units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
+    base = 1024
+    i = math.floor(math.log(size, base))
+    i = int(i)
+    return ('%0.2f' + units[i]) % (size / math.pow(1024, i))
+
+
+def get_all_mds_venus():
+    # return Mds list
+    # error, info = run_command(comm="icfs mds stat -f json 2>/dev/null", node=None)
+    error, info = commands.getstatusoutput("icfs mds stat -f json 2>/dev/null")
+    mds_list = []
+    if error:
+        Error(731, info)
+        sys.exit(1)
+    try:
+        infos = json.loads(info)
+        # search all  mds
+        keys = infos["mdsmap"]["info"].keys()
+        for key in keys:
+            upmds = infos["mdsmap"]["info"][key]
+            names = upmds.keys()
+            mds = Mds()
+            for name in names:
+                mds.setvalue(name, upmds[name])
+            mds_list.append(mds)
+        return mds_list
+    except Exception, e:
+        Error(731, e)
+        sys.exit(1)
+
+
+def get_all_mds():
+    # return Mds list
+    # error, info = run_command(comm="icfs mds stat -f json 2>/dev/null", node=None)
+    error, info = commands.getstatusoutput("icfs mds stat -f json 2>/dev/null")
+    mds_list = []
+    if error:
+        Error(731, info)
+        sys.exit(1)
+    try:
+        infos = json.loads(info)
+        # search all stanby mds
+        stanbys = infos["fsmap"]["standbys"]
+        for stanby in stanbys:
+            keys = stanby.keys()
+            mds = Mds()
+            for key in keys:
+                mds.setvalue(key, stanby[key])
+            mds_list.append(mds)
+        # search all active:up mds
+        for mdsmap in infos["fsmap"]["filesystems"]:
+            keys = mdsmap["mdsmap"]["info"].keys()
+            for key in keys:
+                upmds = mdsmap["mdsmap"]["info"][key]
+                names = upmds.keys()
+                mds = Mds()
+                for name in names:
+                    mds.setvalue(name, upmds[name])
+                mds_list.append(mds)
+        return mds_list
+    except Exception, e:
+        Error(731, e)
+        sys.exit(1)
+
+
+def get_host_name(ipaddr=None):
+    # get host name. if ipaddr is not none ,get host name by ipaddr
+    if ipaddr:
+        # flag, hostname = run_command(node=ipaddr, comm='hostname')
+        flag, hostname = commands.getstatusoutput(
+            "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no 'root@%s' \"hostname\" 2>/dev/null " % (
+                ipaddr))
+    else:
+        # flag, hostname = run_command(comm="hostname")
+        flag, hostname = commands.getstatusoutput("hostname")
+    if flag:
+        Error(701, hostname)
+        return 1
+    return hostname
+
+
+def print_all_mds():
+    # print mds info
+    # mars
+    mds_list = get_all_mds()
+    # venus
+    # mds_list = get_all_mds_venus()
+    l1 = len("mds_node_name")
+    l2 = len("mds_node_ip")
+    info = []
+    if mds_list == 1:
+        # print "mds_node_name    mds_node_ip    mds_stat"
+        return 1
+    for mds in mds_list:
+        mds_ip = mds.getip()
+        mds_host = get_host_name(mds_ip)
+        mds_stat = mds.state
+        l1 = max(l1, len(mds_host))
+        l2 = max(l2, len(mds_ip))
+        info.append([mds_host, mds_ip, mds_stat])
+    print "mds_node_name", (l1 - len("mds_node_name") + 4) * " ", "mds_node_ip", (l2 - len(
+        "mds_node_ip") + 4) * " ", "mds_stat"
+    for line in info:
+        print line[0], (l1 - len(line[0]) + 4) * " ", line[1], (l2 - len(line[1]) + 4) * " ", line[2]
+    return 0
+
+
+def sys_mon_mds():
+    # mon stat
+    print "mon_node:"
+    mon_stat = commands.getoutput("icfs mon stat 2>/dev/null|grep mon|grep -v fault$|"
+                                  "awk '{print $5}'|sed -r 's/(\{|\})//g'|sed -r 's/,/\\n/g'")
+    mon_stat = mon_stat.split("\n")
+    mon_x_list = []
+    for mon_x in mon_stat:
+        if not mon_x.find("fault") >= 0 and not mon_x.find("dumped") >= 0:
+            mon_x_list.append(mon_x)
+    mon_stat = "\n".join(mon_x_list)
+    print mon_stat
+    # normal mon status
+    print "normal_mon:"
+    normal_mon = commands.getoutput("icfs mon stat 2>/dev/null|grep mon|grep -v fault$|awk '{print $NF}'")
+    normal_mon = normal_mon.split("\n")
+    normal_mon_list = []
+    for normal_mon_x in normal_mon:
+        if not normal_mon_x.find("fault") >= 0 and not normal_mon_x.find("dumped") >= 0:
+            normal_mon_list.append(normal_mon_x)
+    normal_mon = "\n".join(normal_mon_list)
+    print normal_mon + '\n'
+    # mds status
+    print_all_mds()
+
+
+def proc_space(space_str):
+    # processing space in str
+    proc_space_list = []
+    proc_str_l = space_str.split('\n')
+    for proc_lstrip_slot_str in proc_str_l:
+        proc_lstrip_slot_str = proc_lstrip_slot_str.lstrip()
+        proc_space_list.append(proc_lstrip_slot_str)
+    proc_str = '\n'.join(proc_space_list)
+    return proc_str
+
+
+def salt_check():
+    a = commands.getoutput("service salt-master status")
+    if "unrecognized service" in a:
+        sys.exit(1)
+    elif "stoped" in a:
+        c, d = commands.getstatusoutput("service salt-master restart|grep starting")
+        if c or not d or "FAILED" in d:
+            sys.exit(1)
+
+
+# venus
+def sys_disk_info_venus(node):
+    total = 0
+    used = 0
+    free = 0
+    salt_check()
+    addr = commands.getoutput("salt '%s' cmd.run 'hostname -i'|grep -v %s " % (node, node))
+    if "No minions matched target." in addr:
+        sys.exit(1)
+    else:
+        addr = addr.strip()
+    ret, rvtotal = commands.getstatusoutput(
+        "salt -S '%s' cmd.run 'df -k'|grep -v %s |grep -v Filesystem |grep -v icfs-fuse|awk '{print $2,$3,$4}'" % (
+            addr, node))
+    if ret != 0:
+        sys.exit(1)
+    else:
+        rv = rvtotal.splitlines()
+        for line in rv:
+            num = line.split()
+            total += long(num[0])
+            used += long(num[1])
+            free += long(num[2])
+    ip = commands.getoutput("salt '%s' cmd.run 'hostname -i'|grep -v %s" % (node, node))
+    # print total, used, free
+    total = unit_convert(total * 1024)
+    used = unit_convert(used * 1024)
+    free = unit_convert(free * 1024)
+    print "IP\t\t Total\t\tUsed\t\tFree"
+    print "%-10s\t%-10s\t%-10s\t%-10s" % (ip.strip(), total, used, free)
+
+
+# mars
+def sys_disk_info(node):
+    total = 0
+    used = 0
+    free = 0
+    out = get_ip_by_hostname(node)
+    addr = out.strip()
+    diskinfo_status, diskinfo_output = commands.getstatusoutput("ssh -o ConnectTimeout=10 -o ConnectionAttempts=2 -o "
+                                                                "PasswordAuthentication=no -o StrictHostKeyChecking=no "
+                                                                "'root@%s' \"cat /usr/bin/.disk_usage.txt|grep -v %s|"
+                                                                "grep osd|awk '{print \$2,\$3,\$4}'\"" % (node, node))
+
+    # the output is empty and the status be equal to zero when there is no osd in this node
+    if diskinfo_output == "" and diskinfo_status == 0:
+        print "The disks of this node have no storage service"
+        sys.exit(1)
+    # use the 'df' command if the psutil has error
+    if diskinfo_status:
+        salt_check()
+        ret, rvtotal = commands.getstatusoutput("salt -S '%s' cmd.run 'df -k -B 1 > /usr/bin/.disk_usage.txt'" % addr)
+        if ret:
+            Error(1399, rvtotal)
+            sys.exit(1)
+        diskinfo_status, diskinfo_output = commands.getstatusoutput(
+            "ssh -o ConnectTimeout=10 -o ConnectionAttempts=2 -o "
+            "PasswordAuthentication=no -o StrictHostKeyChecking=no"
+            " 'root@%s' \"cat /usr/bin/.disk_usage.txt|grep -v %s"
+            "|grep osd|awk '{print \$2,\$3,\$4}'\"" % (node, node))
+        if diskinfo_status:
+            Error(1399, diskinfo_output)
+            sys.exit(1)
+        # the output is empty and the status be equal to zero when there is no osd in this node
+        if diskinfo_output == "" and diskinfo_status == 0:
+            print "The disks of this node have no storage service"
+            sys.exit(0)
+    for line in diskinfo_output.splitlines():
+        num = line.split()
+        total += long(num[0])
+        used += long(num[1])
+        free += long(num[2])
+    total = unit_convert(total)
+    used = unit_convert(used)
+    free = unit_convert(free)
+    print "IP".ljust(15, ' '), "Total".ljust(15, ' '), "Used".ljust(15, ' '), "Free".ljust(15, ' ')
+    print addr.ljust(15, ' '), total.ljust(15, ' '), used.ljust(15, ' '), free.ljust(15, ' ')
+
+
+# query the disk usage of every node
+def get_disk_usage(node):
+    status, output = commands.getstatusoutput("ssh -o ConnectTimeout=10 -o ConnectionAttempts=2 -o "
+                                              "PasswordAuthentication=no -o StrictHostKeyChecking=no "
+                                              "'root@%s' \"cat /usr/bin/.disk_usage.txt|grep -v %s|"
+                                              "grep dev|awk '{print \$1,\$2,\$3,\$5}'\"" % (node, node))
+    # use the 'df' command if the psutil has error
+    if status:
+        out = get_ip_by_hostname(node)
+        addr = out.strip()
+        salt_check()
+        ret, rvtotal = commands.getstatusoutput("salt -S '%s' cmd.run 'df -k -B 1 > /usr/bin/.disk_usage.txt'" % addr)
+        if ret:
+            Error(1399, rvtotal)
+            sys.exit(1)
+        status, output = commands.getstatusoutput("ssh -o ConnectTimeout=10 -o ConnectionAttempts=2 "
+                                                  "-o PasswordAuthentication=no -o StrictHostKeyChecking=no"
+                                                  "'root@%s' \"cat /usr/bin/.disk_usage.txt|grep -v %s"
+                                                  "|grep -E '^/'|awk '{print \$1,\$2,\$3,\$5}'\"" % (node, node))
+        if status:
+            Error(1399, output)
+            sys.exit(1)
+    print "Device".ljust(15, ' '), "Total".ljust(15, ' '), "Used".ljust(15, ' '), "Usage".ljust(15, ' ')
+    disk_list = [line.split() for line in output.split("\n")]
+    for dev, total, used, usage in disk_list:
+        dev = dev.replace("/dev/", "")
+        if used != '0':
+            has_used = True
+        else:
+            has_used = False
+        total = unit_convert(long(total))
+        if has_used:
+            used = unit_convert(long(used))
+        print dev.ljust(15, ' '), total.ljust(15, ' '), used.ljust(15, ' '), usage.ljust(15, ' ')
+
+
+# create by huper
+def slotlist():
+    sas_list = get_all_sas()
+    print "%-10s\t%-10s\t%-10s\t%-10s" % ("SasIndex", "Enclosure", "Slot", "index")
+    for sas in sas_list:
+        for slot in sas.slot_list:
+            print "%-10s\t%-10s\t%-10s\t%-10s" % (sas.index, slot.enclosure, slot.slot, slot.get_index(sas_list))
+
+
+def get_disk_status_by_host(host, check_osd, check_type):
+    addpar = ""
+    if check_osd == 1:
+        addpar = "--checkosd"
+    if check_type == 1:
+        addpar += " --checktype"
+    if check_osd == 1 and check_type == 1:
+        # filter salt stderror so that output can be parsed correctly
+        error, out = commands.getstatusoutput(
+            "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no '%s' 'icfs-system-disk --disk %s 2>/dev/null | sort -n -k 6 ' 2>/dev/null " % (
+                host, addpar))
+    elif check_osd == 1:
+        # filter salt stderror so that output can be parsed correctly
+        error, out = commands.getstatusoutput(
+            "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no '%s' 'icfs-system-disk --disk %s 2>/dev/null | sort -n -k 5 ' 2>/dev/null " % (
+                host, addpar))
+    elif check_type == 1:
+        error, out = commands.getstatusoutput(
+            "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no '%s' 'icfs-system-disk --disk %s 2>/dev/null | sort -n -k 4 ' 2>/dev/null " % (
+                host, addpar))
+    else:
+        error, out = commands.getstatusoutput(
+            "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no -o StrictHostKeyChecking=no '%s' 'icfs-system-disk --disk %s 2>/dev/null | sort -n -k 3 ' 2>/dev/null " % (
+                host, addpar))
+    if error:
+        Error(1399, out)
+        sys.exit(1)
+    else:
+        if "Error" in out:
+            print out
+            sys.exit(1)
+        slotnum = get_slot_num(host)
+        #         if len(sas_list) == 0:
+        #             get_all_sas()
+        #         for sas in sas_list:
+        #             slotnum = slotnum + len(sas.slot_list)
+        print "Slot num:" + str(slotnum)
+        if check_osd and check_type:
+            print "%-10s\t%-10s\t%-10s\t%-10s\t%-10s\t%-10s" % (
+                "DiskID", "Status", "Osd", "OsdStatus", "DiskType", "Slot")
+        elif check_osd:
+            print "%-10s\t%-10s\t%-10s\t%-10s\t%-10s" % ("DiskID", "Status", "Osd", "OsdStatus", "Slot")
+        elif check_type:
+            print "%-10s\t%-10s\t%-10s\t%-10s" % ("DiskID", "Status", "DiskType", "Slot")
+        else:
+            print "%-10s\t%-10s\t%-10s" % ("DiskID", "Status", "Slot")
+        print out
+        sys.exit(0)
+
+
+def get_disk_size_icfs(disk):
+    try:
+        disk_name = disk.split(":")[0]
+        osd_path = disk.split(":")[1]
+        error, info = commands.getstatusoutput("df -P -k %s | tail -1 " % osd_path)
+        infos = info.split()
+        if disk_name == infos[0]:
+            infos = int(infos[1]) / (1024 * 1024 * 1024.0)
+            print '%.4f' % infos
+        else:
+            print -1
+    except:
+        print -1
+
+
+def get_node_disk_io_stat(request_node):
+    try:
+        # get specified io state
+        cmd_ssh = "ssh -o ConnectTimeout=2 -o ConnectionAttempts=2 -o PasswordAuthentication=no " \
+                  "-o StrictHostKeyChecking=no -o GSSAPIAuthentication=no 'root@{0}' ".format(request_node)
+        cmd_get_io_stat = "\"iostat -xd | awk -F \\\" \\\" '/^.+\\\s[0-9]+\\\.[0-9]+\\\s/" \
+                          "{printf \\\"%-30s%-30s%-30s%-30s\\n\\\", \\$1, \\$6, \\$7, \\$14}'\""
+        cmd = cmd_ssh + cmd_get_io_stat
+        ret, output = commands.getstatusoutput(cmd)
+        if ret:
+            raise Exception("SSH get %s node iostat fail info %s" % (request_node, output))
+        print "{:<30}{:<30}{:<30}{:<30}".format("DiskID", "read(kB/s)", "write(kB/s)", "%util")
+        # print IO info
+        print output
+    except Exception, e:
+        print e
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    ##############################################################
+    operation = None
+    salt_list = None
+    node = None
+    check_osd = 0
+    check_type = 0
+    disk = None
+    try:
+        options, args = getopt.getopt(sys.argv[1:],
+                                      "h", ["list", "query", "help", "node=", "checkosd", "disk", "sas", "checktype",
+                                            "disksize=", "diskIOstat", "disk_usage="])
+    except getopt.GetoptError, err:
+        Error(610, err)
+        sys.exit(1)
+    if not options:
+        Error(610)
+        sys.exit(1)
+    if len(sys.argv[0:]) == 1:
+        Error(610)
+        sys.exit(1)
+    if len(args) != 0:
+        if "-" in args:
+            Error(610)
+            sys.exit(1)
+        else:
+            Error(610)
+            sys.exit(1)
+    for key, value in options:
+        if key == "-h":
+            usage()
+            sys.exit(0)
+        if key == "--help":
+            usage()
+            sys.exit(0)
+        if key == "--list":
+            operation = "list"
+        if key == "--disk":
+            operation = "disk"
+        if key == "--sas":
+            operation = "get_all_sas"
+        if key == '--query':
+            operation = "query"
+        if key == '--node':
+            node = value
+        if key == "--checkosd":
+            check_osd = 1
+        if key == "--checktype":
+            check_type = 1
+        if key == "--disksize":
+            operation = "check_disk_size"
+            disk = value
+        if key == "--diskIOstat":
+            operation = "check_disk_IO_stat"
+        if key == "--disk_usage":
+            operation = "get_disk_usage"
+            node = value
+    # check all disk health status which used as osd
+    if operation == "list":
+        sys_disk_list(check_osd, check_type)
+    # query disk health status
+    elif operation == "disk":
+        if node is None:
+            disk_health_list_query(check_osd, check_type)
+        else:
+            get_disk_status_by_host(node, check_osd, check_type)
+    elif operation == "query":
+        if node is None:
+            # query mds mon info
+            sys_mon_mds()
+        else:
+            node_list = parse_nodes(node)
+            # get disk usage
+            # mars
+            sys_disk_info(node)
+            # venus
+            # sys_disk_info_venus(node)
+    # get sas slot info
+    elif operation == "get_all_sas":
+        slotlist()
+    elif operation == "check_disk_size":
+        get_disk_size_icfs(disk)
+    elif operation == "check_disk_IO_stat":
+        get_node_disk_io_stat(node)
+    elif operation == "get_disk_usage":
+        node_list = parse_nodes(node)
+        get_disk_usage(node)
+    else:
+        Error(610)
+        sys.exit(1)

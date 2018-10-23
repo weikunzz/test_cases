@@ -1,0 +1,531 @@
+#!/usr/bin/env python
+# coding:utf-8
+
+import os
+import sys
+import json
+from icfs_util import run_local_cmd, run_remote_cmd
+import prettytable as pt
+import re
+import OptParser
+try:
+    import icfs_log
+    log = icfs_log.get_log("icfs-admin-mds")
+except:
+    log = None
+json_format = False
+
+
+def run_command(cmd, node=None):
+    if log:
+        log.info(cmd)
+    if not node:
+        result = run_local_cmd(cmd)
+        retcode = result["retcode"]
+        stdout = result["stdout"]
+        stderr = result["stderr"]
+        return retcode, stdout, stderr
+    else:
+        result = run_remote_cmd(node, cmd)
+        return result
+
+
+class Mds:
+    standby_for_rank = None
+    export_targets = None
+    name = None
+    incarnation = None
+    standby_replay = None
+    state_seq = None
+    epoch = None
+    standby_for_fscid = None
+    state = None
+    gid = None
+    features = None
+    rank = None
+    standby_for_name = None
+    addr = None
+
+    def __init__(self, name=None):
+        if name:
+            self.name = name
+
+    def getip(self):
+        return self.addr.split(":")[0]
+
+    def setvalue(self, key, value):
+        if key == "standby_for_rank":
+            self.standby_for_fscid = value
+        elif key == "export_targets":
+            self.export_targets = value
+        elif key == "name":
+            self.name = value
+        elif key == "incarnation":
+            self.incarnation = value
+        elif key == "standby_replay":
+            self.standby_replay = value
+        elif key == "state_seq":
+            self.state_seq = value
+        elif key == "epoch":
+            self.epoch = value
+        elif key == "standby_for_fscid":
+            self.standby_for_fscid = value
+        elif key == "state":
+            self.state = value
+        elif key == "gid":
+            self.gid = value
+        elif key == "features":
+            self.features = value
+        elif key == "rank":
+            self.rank = value
+        elif key == "standby_for_name":
+            self.standby_for_name = value
+        elif key == "addr":
+            self.addr = value
+
+
+def Error(code, info=None):
+    if code == 610:
+        mess = "Error(610): Invalid input !"
+    elif code == 701:
+        mess = "Error(701): No such path"
+    elif code == 732:
+        mess = "Error(732): Mds already exists "
+    elif code == 733:
+        mess = "Error(733): Mds is not exist "
+    elif code == 734:
+        mess = "Error(734): Create mon error "
+    elif code == 735:
+        mess = "Error(735): Create mds error "
+    elif code == 736:
+        mess = "Error(736): No mds remainder !!! "
+    elif code == 737:
+        mess = "Error(737): Gatherkeys failed "
+    elif code == 754:
+        mess = "Error(754): Set max active mds error "
+    elif code == 755:
+        mess = "Error(755): Multi_mds start failed "
+    elif code == 756:
+        mess = "Error(756): Multi_mds stop failed "
+    elif code == 757:
+        mess = "Error(757): Multi_mds is off "
+    elif code == 758:
+        mess = "Error(758): Change max active mds error "
+    elif code == 759:
+        mess = "Error(759): Max active mds number shoud be integer and greater than 0 "
+    elif code == 760:
+        mess = "Error(760): Mds rank format is invalid "
+    elif code == 761:
+        mess = "Error(761): Can not find which mds the dir belongs to "
+    elif code == 762:
+        mess = "Error(762): Export dir to mds error "
+    elif code == 1704:
+        mess = "Error(1704): File not exist "
+    else:
+        mess = "Error(553): Unknow error "
+    if not info:
+        info = ""
+    if log:
+        log.error(mess+str(info))
+    else:
+        print mess, str(info)
+
+
+def _get_all_mds(info):
+    """
+    get mds list
+    :param info: mds stat info json format
+    :return: errorcode, mds_list
+    """
+    # return Mds list
+    mds_list = []
+    try:
+        infos = json.loads(info)
+        # search all stanby mds
+        stanbys = infos["fsmap"]["standbys"]
+        for stanby in stanbys:
+            keys = stanby.keys()
+            mds = Mds()
+            for key in keys:
+                mds.setvalue(key, stanby[key])
+            mds_list.append(mds)
+        # search all active:up mds
+        for mdsmap in infos["fsmap"]["filesystems"]:
+            keys = mdsmap["mdsmap"]["info"].keys()
+            for key in keys:
+                upmds = mdsmap["mdsmap"]["info"][key]
+                names = upmds.keys()
+                mds = Mds()
+                for name in names:
+                    mds.setvalue(name, upmds[name])
+                mds_list.append(mds)
+        return 0, mds_list
+    except Exception, e:
+        return 731, e
+
+
+def _check_mulit_mds_stat(mds_info_json):
+    """
+    get mulit_mds flag from mds stat info
+    :param mds_info_json: mds stat json format string
+    :return: errorcode, info
+    """
+    try:
+        return_str = ""
+        filesystems = json.loads(mds_info_json)["fsmap"]["filesystems"]
+        for filesystem in filesystems:
+            mds_map_flag = filesystem["mdsmap"]["flags"]
+            filesystem_name = filesystem["mdsmap"]["fs_name"]
+            mds_map_flag = int(mds_map_flag)
+            if mds_map_flag & 4:
+                return_str += filesystem_name + " multi_mds: on\n"
+            else:
+                return_str += filesystem_name + " multi_mds: off\n"
+        return 0, return_str
+    except Exception, e:
+        return 731, e
+
+
+def _get_mds_dump_json():
+    """
+    get mds stat info in json format
+    :return: errorcode, info
+    """
+    error, stdout, stderr = run_command("icfs mds stat --format json 2>/dev/null")
+    if error:
+        return 731, stderr
+    return 0, stdout
+
+
+def print_mds():
+    """
+    print mds info
+    :return: errorcode
+    """
+    error, mds_info_json = _get_mds_dump_json()
+    if error:
+        Error(error, mds_info_json)
+        return 1
+    error, mds_list = _get_all_mds(mds_info_json)
+    if error:
+        Error(error, mds_list)
+        return 1
+    error, mds_multi_mds = _check_mulit_mds_stat(mds_info_json)
+    if error:
+        Error(error, mds_multi_mds)
+        return 1
+    tb_active = pt.PrettyTable()
+    tb_standby = pt.PrettyTable()
+    tb_active.set_style(pt.PLAIN_COLUMNS)
+    tb_standby.set_style(pt.PLAIN_COLUMNS)
+    tb_active.field_names = ["mds", "rank", "mds_node_ip", "mds_stat"]
+    tb_standby.field_names = ["mds", "rank", "mds_node_ip", "mds_stat"]
+    for mds in mds_list:
+        if mds.state == "up:active":
+            tb_active.add_row([mds.name, mds.rank, mds.getip(), mds.state])
+        else:
+            tb_standby.add_row([mds.name, mds.rank, mds.getip(), mds.state])
+    tb_active.sortby = "rank"
+    tb_active.align = 'l'
+    tb_standby.sortby = "mds"
+    tb_standby.align = 'l'
+
+    result_tb = pt.PrettyTable()
+    result_tb.set_style(pt.PLAIN_COLUMNS)
+    result_tb.field_names = ["mds", "rank", "mds_node_ip", "mds_stat"]
+    for line in tb_active.get_string().splitlines()[1:]:
+        result_tb.add_row(line.split())
+    for line in tb_standby.get_string().splitlines()[1:]:
+        result_tb.add_row(line.split())
+    result_tb.align = "l"
+    print mds_multi_mds
+    print result_tb
+    return 0
+
+
+def turn_on_off_multi_mds(flag):
+    """
+    turn on or turn off multi_mds
+    :param flag: true or false
+    :return: errorcode
+    """
+    # flag: true    enabled creation of more than 1 active MDS
+    # flag: false   disallowed increasing the cluster size past 1
+    retcode, stdout, stderr = run_command("icfs mds set allow_multimds %s --yes-i-really-mean-it" % flag)
+    if retcode:
+        if flag == "true":
+            Error(755, stderr)
+        else:
+            Error(756, stderr)
+        return 1
+    else:
+        if flag == "false":
+            set_active_mds(1, ign=True)
+        print "success"
+        return 0
+
+
+def set_active_mds(active_num, ign=False):
+    """
+    set\change active mds number
+    :param active_num: active mds number
+    :param ign:
+    :return: errorcode
+    """
+    try:
+        # check number > 0 or not
+        active_num = int(active_num)
+        if active_num < 0:
+            Error(759)
+            return 1
+        # get mds stat in json string
+        error, mds_info_json = _get_mds_dump_json()
+        if error:
+            Error(error, mds_info_json)
+            return 1
+        # get all mds info
+        error, mds_list = _get_all_mds(mds_info_json)
+        if error:
+            Error(error, mds_list)
+        # check allow_mulit_mds falg set or not
+        error, mds_multi_mds = _check_mulit_mds_stat(mds_info_json)
+        if error:
+            Error(error, mds_multi_mds)
+            return 1
+        if not ign:
+            if mds_multi_mds.split(":")[1].strip() == "off":
+                Error(757)
+                return 1
+        if active_num > len(mds_list):
+            Error(754, "active_num is more than count of mds")
+            return 1
+        # get active mds rank list
+        rank_list = []
+        for mds in mds_list:
+            if mds.rank >= 0:
+                rank_list.append(int(mds.rank))
+        retcode, stdout, stderr = run_command(cmd="icfs mds set_max_mds %s" % str(active_num))
+        if retcode:
+            Error(758, stderr)
+            return 1
+        else:
+            rank_list.sort(reverse=True)
+            if active_num < len(rank_list):
+                more_mds = len(rank_list) - active_num
+                i = 0
+                for rank in rank_list:
+                    run_command("icfs mds stop %d" % rank)
+                    i += 1
+                    if i == more_mds:
+                        break
+            if not ign:
+                print "success"
+            return 0
+    except Exception, e:
+        Error(759, e)
+        return 1
+
+
+def _query_dir_path(dir):
+    """
+    query the dir belongs to which mds
+    :param dir:
+    :return:
+    """
+    error, stdout, stderr = run_command("icfs-query-dir %s self" % dir)
+    if not os.path.exists(dir):
+        return 701, dir
+    for line in stdout.splitlines():
+        result = re.match('.*"the path belongs to mds".*', line)
+        if result:
+            dir_info = result.group().strip()
+            dir_info = re.sub("\"| ", "", dir_info)
+            rank = dir_info.split(":")[1]
+            return 0, rank
+    return 761, stdout
+
+
+def _query_rank_dir(rank):
+    """
+    :param rank: mds.N
+    :return: dir_mds.rank list
+    """
+    error, stdout, stderr = run_command("icfs-query-dir /mnt/icfs/ %s" % rank)
+    dir_list = []
+    for line in stdout.splitlines():
+        result = re.match('.*"/share/.*": \d*$', line)
+        if result:
+            dir_info = result.group().strip()
+            dir_info = re.sub("\"| ", "", dir_info)
+            dir_info = dir_info.split(":")
+            dir_list.append([dir_info[0], dir_info[1]])
+    return dir_list
+
+
+def query_dir_by_mds(mds=None):
+    """
+    query all dir on the mds
+    :param mds: mds rank ,  ALL: query all mds
+    :return: errorcode
+    """
+    mds_rank_list = []
+    dir_mds_info_list = []
+    group = re.match("(mds\.)?(\d*)$", mds)
+    if group:
+        mds = "mds." + group.group(2)
+        mds_rank_list.append(mds)
+    elif mds == "ALL":
+        error, mds_info = _get_mds_dump_json()
+        if error:
+            Error(error, mds_info)
+            return 1
+        error, mds_list = _get_all_mds(mds_info)
+        if error:
+            Error(error, mds_list)
+            return 1
+        for mds in mds_list:
+            if mds.state == "up:active":
+                mds_rank_list.append("mds."+str(mds.rank))
+    else:
+        Error(760)
+        return 1
+    for mds_rank in mds_rank_list:
+        dir_mds_info_list += _query_rank_dir(mds_rank)
+    tb = pt.PrettyTable()
+    tb.set_style(pt.PLAIN_COLUMNS)
+    tb.field_names = ["dir", "mds"]
+    for dir_mds in dir_mds_info_list:
+        tb.add_row(dir_mds)
+    tb.sortby = "mds"
+    tb.align = "l"
+    if dir_mds_info_list:
+        print tb
+    else:
+        print "dir\tmds"
+    return 0
+
+
+def print_dir_by_path(path):
+    error, rank = _query_dir_path(path)
+    if error:
+        Error(error, rank)
+        return 1
+    print "mds:" + rank
+    return 0
+
+
+def export_dir(dir, rank):
+    """
+    set dir mds
+    :param dir:
+    :param rank: mds rank
+    :return: errorcode
+    """
+    if not os.path.exists(dir):
+        Error(701)
+        return 1
+    group = re.match("(mds\.)?(\d*)$", rank)
+    if group:
+        rank = group.group(2)
+    else:
+        Error(760)
+        return 1
+    # query current rank
+    error, curr_rank = _query_dir_path(dir)
+    if error:
+        Error(error, curr_rank)
+    # get all mds info
+    error, mds_info = _get_mds_dump_json()
+    if error:
+        Error(error, mds_info)
+    # query dest rank is active or not
+    error, rank_list = _get_all_mds(mds_info)
+    if error:
+        Error(Error, rank_list)
+    rank_is_active = False
+    for rank_obj in rank_list:
+        if str(rank_obj.rank) == rank:
+            if "active" in rank_obj.state:
+                rank_is_active = True
+                break
+    if rank == curr_rank:
+        print "success"
+        return 0
+    # export dir
+    if rank_is_active:
+        error, stdout, stderr = run_command("icfs-export-dir %s %s %s" % (dir, curr_rank, rank))
+        for line in stdout.splitlines():
+            if "ERROR:" in line:
+                errorinfo = line.split(": ")[1]
+                Error(762, errorinfo)
+                return 1
+        print "success"
+        return 0
+    else:
+        return 1
+
+
+def usage():
+    print """Help(-h|--help) for icfs-amdin-mds:
+Usaeg:
+>>---icfs-admin-mds-----------+   --on   +--------><
+                              +   --off  +
+                              + --status +
+                              ' --set  N '
+Options:
+    -h,--help   show this help message
+    --on        start multi_mds
+    --off       stop multi_mds
+    --status    query multi_mds status and mds status
+    --set N     set max active mds
+Exit status:
+    0 if executed successfully
+    1 if executed unsuccessfully"""
+    return 0
+
+if __name__ == "__main__":
+    active_mds_number = -1
+    dir = None
+    rank = None
+    mds = None
+    try:
+        parser = OptParser.OptParser()
+        parser.append("help", "{-h|--help}")
+        parser.append("start", "--on")
+        parser.append("stop", "--off")
+        parser.append("status", "--status")
+        parser.append("set_mds", "--set=")
+        parser.append("query_dir", "--query-dir,--dir=")
+        parser.append("query_mds", "--query-dir,--mds=")
+        parser.append("export_dir", "--export-dir,--dir=,--rank=")
+        m_name, m_opts = parser.parse(sys.argv[1:])
+    except Exception, e:
+        Error(610, e)
+        sys.exit(1)
+    for key, value in m_opts:
+        if key == "--set":
+            active_mds_number = value
+        elif key == "--dir":
+            dir = value
+        elif key == "--mds":
+            mds = value
+        elif key == "--rank":
+            rank = value
+    flag = 0
+    if m_name == "help":
+        flag = usage()
+    elif m_name == "start":
+        flag = turn_on_off_multi_mds("true")
+    elif m_name == "stop":
+        flag = turn_on_off_multi_mds("false")
+    elif m_name == "status":
+        flag = print_mds()
+    elif m_name == "set_mds":
+        flag = set_active_mds(active_mds_number)
+    elif m_name == "query_dir":
+        flag = print_dir_by_path(dir)
+    elif m_name == "query_mds":
+        flag = query_dir_by_mds(mds)
+    elif m_name == "export_dir":
+        flag = export_dir(dir, rank)
+    sys.exit(flag)
