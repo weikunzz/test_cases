@@ -1,0 +1,27 @@
+# CentOS-Base.repo
+#
+# The mirror system uses the connecting IP address of the client and the
+# update status of each mirror to pick mirrors that are updated to and
+# geographically close to the client.  You should use this for CentOS updates
+# unless you are manually picking other mirrors.
+#
+# If the mirrorlist= does not work for you, as a fall back you can try the 
+# remarked out baseurl= line instead.
+#
+#
+[gitbuilder-14]
+name=13000-gitbuilder
+baseurl=http://100.7.40.14/icfs-rpm-centos7-x86_64-basic/ref/v3.5.mars/x86_64/
+enabled=1
+gpgcheck=0
+
+[gitbuilder-noarch14]
+name=noarch-gitbuilder
+baseurl=http://100.7.40.14/icfs-rpm-centos7-x86_64-basic/ref/v3.5.mars/noarch/
+enabled=1
+gpgcheck=0
+[packages]
+name=CentOS-bianyi-7.2
+baseurl=http://100.7.40.14/rpms/packages/
+enabled=1
+gpgcheck=0

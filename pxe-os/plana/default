@@ -1,0 +1,37 @@
+default manual
+#prompt 1
+timeout 1
+
+display boot.msg
+
+menu background splash.jpg
+menu title Welcome to CentOS 7.2!
+menu color border 0 #ffffffff #00000000
+menu color sel 7 #ffffffff #ff000000
+menu color title 0 #ffffffff #00000000
+menu color tabmsg 0 #ffffffff #00000000
+menu color unsel 0 #ffffffff #00000000
+menu color hotsel 0 #ff000000 #ffffffff
+menu color hotkey 7 #ffffffff #ff000000
+menu color scrollbar 0 #ffffffff #00000000
+
+label auto
+  menu label Install ICFS Server and ^Auto-partition
+  menu default
+  kernel vmlinuz
+  append initrd=initrd.img ks=cdrom:/isolinux/ks_auto_partition.cfg
+label manual
+  menu label Install VMware and ICFS ^Server
+  kernel vmlinuz
+  append initrd=initrd.img ks=http://100.7.40.160/version/ks.cfg
+#label manual
+#  menu label ^Install an system
+#  kernel vmlinuz
+#  append initrd=initrd.img
+#label manual
+#  menu label ^Install an system
+#  kernel vmlinuz
+#  append initrd=initrd.img
+#label local
+#  menu label Boot from ^local drive
+#  localboot 0xffff
